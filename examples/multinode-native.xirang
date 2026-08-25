@@ -1,0 +1,16 @@
+XIRANG 1
+# Native SPMD example. Every rank receives XIRANG_RANK, XIRANG_WORLD_SIZE,
+# XIRANG_LOCAL_RANK, XIRANG_HOSTFILE and the selected network interface.
+project = parallel-demo
+queue = default
+attempts = 1
+artifact = https://artifacts.example/spmd-worker
+sha256 = <64-character SHA-256>
+architecture = amd64
+entrypoint = spmd-worker
+cpu = 2
+memory = 2G
+nodes = 2
+tasks_per_node = 2
+launcher = native
+timeout = 15m

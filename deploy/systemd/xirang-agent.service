@@ -1,0 +1,21 @@
+[Unit]
+Description=XIRANG node agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/xirang/xirang-agent.env
+ExecStart=/usr/local/bin/xirang-agent run --state-dir=/var/lib/xirang-agent --executor-task-user=xirang-task --executor-task-dir=/var/lib/xirang-tasks --executor-cgroup-root=auto --terminal-user=xirang-operator $XIRANG_AGENT_ARGS
+Restart=always
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/xirang-agent /var/lib/xirang-tasks /var/lib/xirang-build /var/lib/xirang-operator
+Delegate=cpu memory pids cpuset
+
+[Install]
+WantedBy=multi-user.target

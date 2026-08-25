@@ -1,0 +1,27 @@
+XIRANG 1
+
+# The Builds page must contain at least one completed gromacs variant mapped to
+# an eligible node. XIRANG resolves the signed node-specific output at submit.
+project = molecular-dynamics
+queue = default
+priority = 20
+attempts = 1
+application = gromacs
+
+cpu = 8
+memory = 16G
+timeout = 24h
+
+env.OMP_NUM_THREADS = 8
+env.GMX_MAXBACKUP = -1
+
+# Input and output paths must exist at the same path on every candidate node.
+arg = mdrun
+arg = -s
+arg = /shared/gromacs/project/topol.tpr
+arg = -deffnm
+arg = /shared/gromacs/project/run
+arg = -ntmpi
+arg = 1
+arg = -ntomp
+arg = 8

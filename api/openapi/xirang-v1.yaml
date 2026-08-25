@@ -1,0 +1,2860 @@
+openapi: 3.1.0
+info:
+  title: XIRANG Management API
+  version: 1.8.0-dev
+  description: Multi-user cluster management, native-host observability, restricted discovery, resource-aware scheduling, administrator-curated job templates, shared storage, administrator terminals, native builds, RBAC, and recovery contract. The Web console and API share HTTPS port 8899 by default.
+servers:
+  - url: /api/v1
+security:
+  - managementBearer: []
+paths:
+  /setup/status:
+    get:
+      security: []
+      operationId: getSetupStatus
+      responses:
+        "200":
+          description: Whether the first local administrator must be created
+  /setup/admin:
+    post:
+      security: []
+      operationId: createFirstAdministrator
+      responses:
+        "201": { description: First administrator created }
+        "409": { description: Setup has already completed }
+  /auth/register:
+    post:
+      security: []
+      operationId: registerLocalUser
+      responses:
+        "202": { description: Registration is pending administrator approval }
+  /auth/login:
+    post:
+      security: []
+      operationId: loginLocalUser
+      responses:
+        "200": { description: Twelve-hour local Web session issued }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /version:
+    get:
+      security: []
+      operationId: getVersion
+      responses:
+        "200":
+          description: Version metadata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VersionInfo" }
+  /capabilities:
+    get:
+      security: []
+      operationId: getCapabilities
+      responses:
+        "200":
+          description: Enabled capabilities
+  /enrollment/tokens:
+    post:
+      operationId: createEnrollmentToken
+      summary: Create an expiring enrollment token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateEnrollmentToken" }
+      responses:
+        "201":
+          description: Token created; secret is returned only once
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedEnrollmentToken" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /enrollment/join-token:
+    get:
+      operationId: getClusterJoinToken
+      summary: View the administrator-managed cluster join token
+      responses:
+        "200": { description: Current cluster join token }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /enrollment/join-token/reset:
+    post:
+      operationId: resetClusterJoinToken
+      summary: Revoke the old cluster join token and generate a replacement
+      responses:
+        "201": { description: Replacement token generated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /enrollment/register:
+    post:
+      security: []
+      operationId: registerNode
+      summary: Consume an enrollment token and register direct host inventory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterNode" }
+      responses:
+        "201":
+          description: Node registered; the node certificate is returned only once
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegistrationResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /enrollment/ca:
+    get:
+      security: []
+      operationId: getEnrollmentCA
+      summary: Retrieve the controller CA for an explicitly confirmed first-contact enrollment
+      responses:
+        "200":
+          description: Controller CA and SHA-256 fingerprint
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [caCertificatePem, fingerprint]
+                properties:
+                  caCertificatePem: { type: string }
+                  fingerprint: { type: string, pattern: "^[a-f0-9]{64}$" }
+  /discovery/scans:
+    get:
+      operationId: listDiscoveryScans
+      summary: List bounded allowlisted network scans
+      responses:
+        "200":
+          description: Recent scans
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/DiscoveryScan" } }
+    post:
+      operationId: startDiscoveryScan
+      summary: Probe one explicit IP for an unenrolled XIRANG Agent, or an allowlisted CIDR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [cidrs]
+              properties:
+                cidrs: { type: array, minItems: 1, maxItems: 16, items: { type: string } }
+      responses:
+        "201":
+          description: Completed bounded scan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DiscoveryScan" }
+        "400": { description: Target is invalid, CIDR is outside the allowlist, or scan exceeds configured bounds }
+  /discovery/candidates:
+    get:
+      operationId: listDiscoveryCandidates
+      responses:
+        "200":
+          description: Durable candidates; discovery does not establish trust
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/DiscoveryCandidate" } }
+  /discovery/candidates/{candidateId}/approve:
+    parameters:
+      - name: candidateId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: approveDiscoveryCandidate
+      summary: Pin the observed Agent identity and approve automatic enrollment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pairingCode]
+              properties:
+                pairingCode: { type: string, pattern: "^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$" }
+      responses:
+        "200":
+          description: Agent enrolled through a pinned bootstrap channel
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DiscoveryBootstrap" }
+        "409": { description: Candidate was already decided }
+  /discovery/candidates/{candidateId}/reject:
+    parameters:
+      - name: candidateId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: rejectDiscoveryCandidate
+      responses:
+        "200":
+          description: Rejected candidate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DiscoveryCandidate" }
+  /nodes:
+    get:
+      operationId: listNodes
+      responses:
+        "200":
+          description: Registered nodes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Node" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /nodes/{nodeId}:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      operationId: getNode
+      responses:
+        "200":
+          description: Node details
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /nodes/{nodeId}/inventory:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      operationId: getNodeInventory
+      summary: Get the latest native host inventory snapshot
+      responses:
+        "200":
+          description: Latest inventory received over the authenticated Agent stream
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeInventorySnapshot" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /nodes/{nodeId}/observations:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      operationId: listNodeResourceObservations
+      summary: List newest bounded native resource observations
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+      responses:
+        "200":
+          description: Newest observations first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/NodeResourceObservation" }
+        "400":
+          description: Invalid limit
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /topology:
+    get:
+      operationId: getTopologySnapshot
+      summary: Get the latest or a retained versioned topology snapshot
+      parameters:
+        - name: version
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Versioned topology derived from authenticated Agent observations
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TopologySnapshot" }
+        "400":
+          description: Invalid version
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /flows:
+    get:
+      operationId: listLatestNodeFlows
+      summary: List the latest bounded eBPF flow observation from each enabled node
+      responses:
+        "200":
+          description: Payload-free flow deltas; nodes without the opt-in Agent feature are absent
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/NodeFlowObservation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /nodes/{nodeId}/flows:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      operationId: listNodeFlowObservations
+      summary: List newest retained eBPF flow observations for one node
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 60 }
+      responses:
+        "200":
+          description: Newest flow observations first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/NodeFlowObservation" }
+        "400": { description: Invalid limit }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /nodes/{nodeId}/approve:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      operationId: approveNode
+      responses:
+        "200":
+          description: Approved node
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+  /nodes/{nodeId}/reject:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      operationId: rejectNode
+      responses:
+        "200":
+          description: Rejected node
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+  /nodes/{nodeId}/taints:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    put:
+      operationId: setNodeTaints
+      summary: Replace the node scheduling taints
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [taints]
+              properties:
+                taints:
+                  type: array
+                  maxItems: 64
+                  items: { $ref: "#/components/schemas/Taint" }
+      responses:
+        "200":
+          description: Updated node
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "400": { description: Invalid taint set }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /nodes/{nodeId}/configuration:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    put:
+      operationId: updateNodeConfiguration
+      summary: Assign node roles and reconcile the management-panel service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NodeConfiguration" }
+      responses:
+        "200":
+          description: Updated node
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "202":
+          description: Configuration accepted; the Agent is reconciling the management panel
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "400": { description: Invalid role, address, SSH user, or group }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Another management-panel transition is still pending }
+  /nodes/{nodeId}/heartbeat:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      security:
+        - nodeMTLS: []
+      operationId: heartbeatNode
+      description: Requires a verified per-node client certificate whose URI SAN matches nodeId.
+      responses:
+        "200":
+          description: Updated node
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /nodes/{nodeId}/certificate/rotate:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      security:
+        - nodeMTLS: []
+      operationId: rotateNodeCertificate
+      summary: Stage a new node certificate; first heartbeat activates it
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [csrPem]
+              properties:
+                csrPem: { type: string, writeOnly: true }
+      responses:
+        "200":
+          description: Pending certificate identity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CertificateRotationResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /nodes/{nodeId}/certificate/rotate-command:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      operationId: requestNodeCertificateRotation
+      summary: Persist and enqueue an Agent-side certificate rotation command
+      responses:
+        "202":
+          description: Rotation command accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [commandId, rotationId, node]
+                properties:
+                  commandId: { type: string }
+                  rotationId: { type: string }
+                  node: { $ref: "#/components/schemas/Node" }
+  /nodes/{nodeId}/mode:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      operationId: setNodeMode
+      summary: Persist and enqueue a node mode transition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode: { type: string, enum: [ready, cordoned, draining] }
+                reason: { type: string }
+      responses:
+        "202":
+          description: Desired mode persisted and command queued
+  /nodes/{nodeId}/certificate/revoke:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      operationId: revokeNodeCertificate
+      summary: Revoke the current and pending node identities
+      responses:
+        "200":
+          description: Node with revoked certificate state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+  /audit:
+    get:
+      operationId: listAuditEvents
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+      responses:
+        "200":
+          description: Newest audit events first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEvent" }
+  /events/nodes:
+    get:
+      operationId: watchNodeEvents
+      summary: Stream authenticated node updates as server-sent events
+      responses:
+        "200":
+          description: SSE stream with `node` events containing the Node schema
+          content:
+            text/event-stream:
+              schema: { type: string }
+  /events/topology:
+    get:
+      operationId: watchTopologyEvents
+      summary: Stream the latest topology and live interface-health overlay as server-sent events
+      responses:
+        "200":
+          description: SSE stream with `topology` events containing the TopologySnapshot schema
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /alerts:
+    get:
+      operationId: listAlerts
+      summary: List firing and acknowledged alerts, with optional resolved history
+      parameters:
+        - name: includeResolved
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Alerts ordered by newest observation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Alert" }
+        "400": { description: Invalid includeResolved value }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /alerts/{alertId}/acknowledge:
+    parameters:
+      - name: alertId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: acknowledgeAlert
+      summary: Mark a firing alert as operator acknowledged without resolving it
+      responses:
+        "200":
+          description: Acknowledged alert
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alert" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Alert is not firing }
+  /events/alerts:
+    get:
+      operationId: watchAlertEvents
+      summary: Stream alert firing, severity, acknowledgement, and resolution transitions
+      responses:
+        "200":
+          description: SSE stream with `alert` events containing the Alert schema
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /alert-deliveries:
+    get:
+      operationId: listAlertDeliveries
+      summary: List durable alert webhook delivery attempts and configuration status
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+      responses:
+        "200":
+          description: Newest delivery records and non-secret webhook status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [webhook, items]
+                properties:
+                  webhook: { $ref: "#/components/schemas/AlertWebhookStatus" }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AlertDelivery" }
+        "400": { description: Invalid limit }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /alert-deliveries/{deliveryId}/retry:
+    parameters:
+      - name: deliveryId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: retryAlertDelivery
+      summary: Reset a terminally failed webhook delivery for immediate retry
+      responses:
+        "200":
+          description: Delivery returned to pending state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertDelivery" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Delivery is not failed or webhook is disabled }
+  /assignments:
+    get:
+      operationId: listAssignmentReports
+      summary: List the latest persisted Agent report for each assignment attempt
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+      responses:
+        "200":
+          description: Assignment reports ordered by controller receipt time
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AssignmentReport" }
+  /jobs:
+    get:
+      operationId: listJobs
+      summary: List persistent jobs in scheduler order
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+      responses:
+        "200":
+          description: Queued jobs are priority ordered; other jobs are newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Job" }
+        "400": { description: Invalid limit }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: submitJob
+      summary: Submit a native artifact to the persistent priority queue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubmitJob" }
+      responses:
+        "201":
+          description: Job persisted and queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "400": { description: Invalid job specification }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /jobs/script:
+    post:
+      operationId: submitJobScript
+      summary: Parse and submit a concise XIRANG 1 job script
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [script]
+              properties:
+                script:
+                  type: string
+                  minLength: 1
+                  description: Complete UTF-8 XIRANG 1 script.
+      responses:
+        "201":
+          description: Script parsed and job persisted in the priority queue
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "400": { description: Invalid XIRANG 1 script or job specification }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /job-templates:
+    get:
+      operationId: listJobTemplates
+      summary: List validated administrator-curated XIRANG 1 job templates
+      responses:
+        "200":
+          description: Templates available to the authenticated user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 100
+                    items: { $ref: "#/components/schemas/JobTemplate" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createJobTemplate
+      summary: Validate and publish a job template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateJobTemplate" }
+      responses:
+        "201":
+          description: Published template
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobTemplate" }
+        "400": { description: Invalid metadata or XIRANG 1 script }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: Template limit, identifier, or case-insensitive name conflict }
+  /job-templates/{templateId}:
+    parameters:
+      - name: templateId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getJobTemplate
+      summary: Get one published job template
+      responses:
+        "200":
+          description: Published template
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobTemplate" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: updateJobTemplate
+      summary: Validate and replace a template using optimistic revision control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateJobTemplate" }
+      responses:
+        "200":
+          description: Updated template
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobTemplate" }
+        "400": { description: Invalid metadata, revision, or XIRANG 1 script }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Revision or case-insensitive name conflict }
+    delete:
+      operationId: deleteJobTemplate
+      summary: Delete a template using optimistic revision control
+      parameters:
+        - name: revision
+          in: query
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "204": { description: Template deleted }
+        "400": { description: Invalid revision }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Revision conflict }
+  /jobs/{jobId}:
+    parameters:
+      - name: jobId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getJob
+      responses:
+        "200":
+          description: Persistent job state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /jobs/{jobId}/cancel:
+    parameters:
+      - name: jobId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: cancelJob
+      summary: Cancel queued or executing work without releasing capacity before process exit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason: { type: string, maxLength: 4096 }
+                gracePeriodSeconds: { type: integer, format: int64, minimum: 0, maximum: 300, default: 5 }
+      responses:
+        "202":
+          description: Queued job canceled or execution cancellation dispatched
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "400": { description: Invalid cancellation request }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Job is already terminal }
+  /jobs/{jobId}/logs/stream:
+    parameters:
+      - name: jobId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: watchJobLogs
+      summary: Stream bounded live stdout/stderr snapshots and terminal state
+      responses:
+        "200":
+          description: SSE stream with `logs` events containing the Job schema
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /queues:
+    get:
+      operationId: listQueuePolicies
+      summary: List durable weighted fair-share queue policies
+      responses:
+        "200":
+          description: Queue policies
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/QueuePolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /accounting/summary:
+    get:
+      operationId: getUsageSummary
+      summary: Get the authenticated user's measured usage and cost
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: ownerId, in: query, description: Administrator-only owner selection, schema: { type: string } }
+      responses:
+        "200":
+          description: Daily and total usage
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UsageSummary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /accounting/users:
+    get:
+      operationId: listUserUsageSummaries
+      summary: List measured usage and cost by user
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        "200": { description: Administrator user usage list }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /accounting/rates:
+    get:
+      operationId: listBillingRates
+      responses:
+        "200": { description: Immutable billing rate versions }
+    post:
+      operationId: createBillingRate
+      summary: Publish a new effective-dated billing standard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BillingRate" }
+      responses:
+        "201": { description: Billing rate version created }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /elasticity:
+    get:
+      operationId: getElasticityRecommendations
+      summary: Get bounded advisory scale-out recommendations without provisioning nodes
+      responses:
+        "200":
+          description: Current demand and budget bounded recommendations
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ElasticitySnapshot" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /build-workers:
+    get:
+      operationId: listBuildWorkers
+      summary: List architecture-specific native build workers
+      responses:
+        "200":
+          description: Configured build pool
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/BuildWorker" } }
+  /build-retention:
+    get:
+      operationId: getBuildRetention
+      summary: Read the native-build history retention policy
+      responses:
+        "200": { description: Active retention policy, content: { application/json: { schema: { $ref: "#/components/schemas/BuildRetentionPolicy" } } } }
+    put:
+      operationId: updateBuildRetention
+      summary: Replace the native-build history retention policy
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/BuildRetentionPolicy" } } } }
+      responses:
+        "200": { description: Updated retention policy, content: { application/json: { schema: { $ref: "#/components/schemas/BuildRetentionPolicy" } } } }
+  /build-signing-key:
+    get:
+      operationId: getBuildSigningKey
+      responses:
+        "200":
+          description: Active Ed25519 public key for Agent trust configuration
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BuildSigningKey" }
+  /build-signing-key/rotate:
+    post:
+      operationId: rotateBuildSigningKey
+      summary: Activate a new signing key; keep old Agent trust during staged rotation
+      responses:
+        "200":
+          description: Newly active public key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BuildSigningKey" }
+  /builds:
+    get:
+      operationId: listBuilds
+      responses:
+        "200":
+          description: Durable native builds
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Build" } }
+    post:
+      operationId: submitBuild
+      summary: Submit a checksum-pinned declarative native build
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BuildRecipeRequest" }
+      responses:
+        "202":
+          description: Build accepted by a matching architecture worker
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Build" }
+  /builds/cleanup:
+    post:
+      operationId: cleanupBuilds
+      summary: Delete terminal build records and outputs beyond the active retention policy
+      responses:
+        "200": { description: Cleanup result, content: { application/json: { schema: { $ref: "#/components/schemas/BuildCleanupResult" } } } }
+  /builds/{buildId}:
+    parameters:
+      - name: buildId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getBuild
+      responses:
+        "200":
+          description: Build state and signed artifact metadata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Build" }
+    delete:
+      operationId: deleteBuild
+      summary: Delete one terminal build record and its controller-managed outputs
+      responses:
+        "200": { description: Deletion result, content: { application/json: { schema: { $ref: "#/components/schemas/BuildCleanupResult" } } } }
+        "409": { description: Build is not terminal }
+  /builds/{buildId}/cancel:
+    parameters:
+      - name: buildId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: cancelBuild
+      summary: Cancel a running native build on its selected worker
+      responses:
+        "202": { description: Cancellation accepted, content: { application/json: { schema: { $ref: "#/components/schemas/Build" } } } }
+        "409": { description: Build is already terminal or no longer active }
+  /builds/{buildId}/runtime-targets:
+    parameters:
+      - name: buildId
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: updateBuildRuntimeTargets
+      summary: Remap a completed application build variant to runtime nodes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodeIds]
+              properties:
+                nodeIds: { type: array, minItems: 1, maxItems: 1024, uniqueItems: true, items: { type: string } }
+      responses:
+        "200": { description: Updated build routing, content: { application/json: { schema: { $ref: "#/components/schemas/Build" } } } }
+  /shared-spaces:
+    get:
+      operationId: listSharedSpaces
+      summary: List administrator-managed task shared spaces
+      responses:
+        "200":
+          description: Shared spaces and the latest per-node operation results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/SharedSpace" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createSharedSpace
+      summary: Export a storage-node path and mount it on all, grouped, or selected nodes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSharedSpace" }
+      responses:
+        "201":
+          description: Shared space applied; inspect results for each selected node
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SharedSpace" }
+        "400": { description: Invalid path, source storage node, or target selection }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /shared-spaces/{spaceId}:
+    parameters:
+      - name: spaceId
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: updateSharedSpace
+      summary: Change the dynamic all-node, group, or explicit-node mount target
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSharedSpace" }
+      responses:
+        "200":
+          description: Target selection updated and reconciled against current nodes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SharedSpace" }
+        "400": { description: Invalid or immutable shared-space fields }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteSharedSpace
+      summary: Legacy alias for unsharing while retaining the source directory and files
+      responses:
+        "204": { description: Shared space removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /shared-spaces/{spaceId}/unshare:
+    parameters:
+      - name: spaceId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: unshareSharedSpace
+      summary: Remove mounts, export, and XIRANG configuration while retaining the source directory and files
+      responses:
+        "204": { description: Sharing removed; source data retained }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /shared-spaces/{spaceId}/files:
+    parameters:
+      - name: spaceId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: path
+        in: query
+        required: false
+        description: Relative directory or file path below the shared-space root.
+        schema: { type: string }
+    get:
+      operationId: listSharedSpaceFiles
+      summary: List file-tree entries visible to the authenticated user
+      responses:
+        "200":
+          description: Administrators receive all entries; users receive only entries they own.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/SharedFile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteSharedSpaceFile
+      summary: Delete an owned file or directory, or any entry as an administrator
+      responses:
+        "204": { description: Entry deleted }
+        "400": { description: Invalid or root path }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /shared-spaces/{spaceId}/files/content:
+    parameters:
+      - name: spaceId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: path
+        in: query
+        required: true
+        description: Relative file path below the shared-space root.
+        schema: { type: string }
+    get:
+      operationId: downloadSharedSpaceFile
+      summary: Download an owned file, or any file as an administrator
+      responses:
+        "200":
+          description: File content
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: uploadSharedSpaceFile
+      summary: Upload or replace an owned file, or any file as an administrator
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "204": { description: File content stored }
+        "400": { description: Invalid path or payload }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /shared-spaces/{spaceId}/files/directory:
+    parameters:
+      - name: spaceId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: createSharedSpaceDirectory
+      summary: Create an owned directory, or any directory as an administrator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SharedFilePath" }
+      responses:
+        "204": { description: Directory created }
+        "400": { description: Invalid path }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /shared-spaces/{spaceId}/files/rename:
+    parameters:
+      - name: spaceId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: renameSharedSpaceFile
+      summary: Rename an owned entry, or any entry as an administrator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RenameSharedFile" }
+      responses:
+        "204": { description: Entry renamed }
+        "400": { description: Invalid path }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /terminal/tickets:
+    post:
+      operationId: createTerminalTicket
+      summary: Issue an administrator-only, one-use, 30-second terminal ticket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [nodeId]
+              properties:
+                nodeId: { type: string }
+      responses:
+        "201":
+          description: One-use WebSocket ticket
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TerminalTicket" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /terminal/connect:
+    get:
+      security: []
+      operationId: connectTerminal
+      summary: Upgrade to a WebSocket SSH terminal using a one-use ticket
+      parameters:
+        - name: ticket
+          in: query
+          required: true
+          schema: { type: string, writeOnly: true }
+      responses:
+        "101": { description: WebSocket terminal connected }
+        "401": { description: Ticket is missing, expired, or already consumed }
+  /access/me:
+    get:
+      operationId: getCurrentPrincipal
+      responses:
+        "200":
+          description: Authenticated bootstrap, OIDC, or API-token principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Principal" }
+  /access/roles:
+    get:
+      operationId: listRoles
+      responses:
+        "200":
+          description: Immutable built-in least-privilege roles
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Role" } }
+  /access/users:
+    get:
+      operationId: listLocalUsers
+      summary: List XIRANG registrations and approval states
+      responses:
+        "200": { description: Virtual XIRANG accounts; no Linux login users are created }
+  /access/users/{userId}:
+    patch:
+      operationId: updateLocalUser
+      summary: Approve, disable, group, promote, or demote a XIRANG account
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Updated user }
+  /access/settings:
+    get:
+      operationId: getAccessSettings
+      summary: Read cluster-wide account registration defaults
+      responses:
+        "200":
+          description: Access settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccessSettings" }
+    put:
+      operationId: updateAccessSettings
+      summary: Select the user group assigned to future registrations, or clear the default
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [defaultUserGroupId]
+              properties:
+                defaultUserGroupId: { type: string, description: Empty string leaves new registrations ungrouped. }
+      responses:
+        "200":
+          description: Updated access settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccessSettings" }
+  /access/groups:
+    get:
+      operationId: listUserGroups
+      responses:
+        "200":
+          description: User groups and quotas
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/UserGroup" } }
+    post:
+      operationId: createUserGroup
+      summary: Create a resource, concurrency, storage, and maximum-runtime policy group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserGroup" }
+      responses:
+        "201":
+          description: User group created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserGroup" }
+  /access/groups/{groupId}:
+    put:
+      operationId: updateUserGroup
+      parameters:
+        - name: groupId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: User group policy updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserGroup" }
+    delete:
+      operationId: deleteUserGroup
+      summary: Remove a user group and atomically detach its members
+      parameters:
+        - name: groupId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: User group removed and memberships detached
+          headers:
+            X-Xirang-Detached-Users:
+              schema: { type: integer, minimum: 0 }
+              description: Number of local users detached from the removed group.
+  /access/tokens:
+    get:
+      operationId: listAPITokens
+      responses:
+        "200":
+          description: API token metadata; secrets are never persisted or listed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/APIToken" } }
+    post:
+      operationId: createAPIToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, role, ttlSeconds]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 128 }
+                role: { type: string, enum: [viewer, builder, operator, admin] }
+                ttlSeconds: { type: integer, minimum: 1, maximum: 31536000 }
+      responses:
+        "201":
+          description: Token secret shown once
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedAPIToken" }
+  /access/tokens/{tokenId}/revoke:
+    parameters:
+      - name: tokenId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: revokeAPIToken
+      responses:
+        "200":
+          description: Revoked token metadata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIToken" }
+  /system/backups:
+    get:
+      operationId: listBackups
+      responses:
+        "200": { description: Verified consistent recovery points }
+    post:
+      operationId: createBackup
+      responses:
+        "201":
+          description: Individually transaction-consistent database snapshots and manifest
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupManifest" }
+  /system/telemetry-interval:
+    get:
+      operationId: getTelemetryInterval
+      summary: Read the cluster-wide Agent resource telemetry interval
+      responses:
+        "200":
+          description: Active interval and accepted bounds
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TelemetryIntervalSettings" }
+    put:
+      operationId: updateTelemetryInterval
+      summary: Update browser polling and all connected Agent telemetry intervals
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [intervalSeconds]
+              properties:
+                intervalSeconds: { type: integer, minimum: 2, maximum: 60 }
+      responses:
+        "200":
+          description: Interval persisted and dispatched to connected Agents
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TelemetryIntervalSettings" }
+        "400": { description: Interval is outside the supported 2–60 second range }
+  /system/backups/{backupId}/verify:
+    parameters:
+      - name: backupId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: verifyBackup
+      responses:
+        "200":
+          description: SHA-256 and bbolt structural validation passed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupManifest" }
+  /queues/{queueName}:
+    parameters:
+      - name: queueName
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: putQueuePolicy
+      summary: Create or replace a queue policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PutQueuePolicy" }
+      responses:
+        "200":
+          description: Persisted queue policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueuePolicy" }
+        "400": { description: Invalid queue policy }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+components:
+  securitySchemes:
+    managementBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: Bootstrap, OIDC JWT, or XIRANG API token
+      description: Management credential authorized through built-in RBAC.
+    nodeMTLS:
+      type: mutualTLS
+      description: Per-node certificate issued by the XIRANG control-plane CA.
+  parameters:
+    NodeId:
+      name: nodeId
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Unauthorized:
+      description: Authentication failed
+    Forbidden:
+      description: Authenticated principal lacks the required administrator permission
+    NotFound:
+      description: Resource not found
+  schemas:
+    AccessSettings:
+      type: object
+      additionalProperties: false
+      required: [defaultUserGroupId, updatedAt]
+      properties:
+        defaultUserGroupId: { type: string, description: User group assigned atomically to future registrations; empty means no default group. }
+        updatedAt: { type: string, format: date-time }
+    UserGroup:
+      type: object
+      additionalProperties: false
+      required: [name, resourceQuota, storageQuotaBytes, maxConcurrentJobs, maxJobTimeoutSeconds]
+      properties:
+        id: { type: string, readOnly: true }
+        name: { type: string, minLength: 1, maxLength: 128 }
+        resourceQuota: { $ref: "#/components/schemas/ResourceVector" }
+        storageQuotaBytes: { type: integer, format: int64, minimum: 0, description: Zero means unlimited. }
+        maxConcurrentJobs: { type: integer, format: int32, minimum: 0 }
+        maxJobTimeoutSeconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9223372036
+          default: 604800
+          description: Maximum runtime for group members. Zero in legacy or omitted input is normalized to seven days; administrator accounts are unlimited.
+        disabled: { type: boolean, default: false, description: Disabled groups cannot submit new jobs. }
+        disableSuspendQueued: { type: boolean, default: false, description: Suspend queued jobs governed by this group when it is disabled; enabling the group resumes only jobs suspended by this policy. }
+        disableEndSessions: { type: boolean, default: false, description: Revoke member browser sessions and close active administrator terminal sessions when the group is disabled. }
+        createdAt: { type: string, format: date-time, readOnly: true }
+        updatedAt: { type: string, format: date-time, readOnly: true }
+    NativeArtifact:
+      type: object
+      additionalProperties: false
+      required: [uri, sha256, architecture, entrypoint]
+      properties:
+        uri: { type: string, description: file or HTTPS URI }
+        sha256: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
+        architecture: { type: string }
+        abi: { type: string }
+        signature: { type: string, description: Base64 Ed25519 signature over decoded SHA-256 bytes }
+        entrypoint: { type: string, description: Safe relative executable path }
+    SubmitJob:
+      type: object
+      additionalProperties: false
+      required: [projectId, resources]
+      oneOf:
+        - required: [artifact]
+        - required: [application]
+      properties:
+        projectId: { type: string, minLength: 1, maxLength: 128 }
+        queue: { type: string, maxLength: 128, default: default }
+        priority: { type: integer, format: int32, minimum: -1000, maximum: 1000, default: 0 }
+        maxAttempts: { type: integer, format: int32, minimum: 0, maximum: 100, default: 1 }
+        artifact: { $ref: "#/components/schemas/NativeArtifact" }
+        application: { type: string, description: Logical application resolved to signed build variants and node routing at submission time. }
+        arguments:
+          type: array
+          maxItems: 256
+          items: { type: string }
+        workingDirectory: { type: string }
+        environment:
+          type: object
+          maxProperties: 256
+          additionalProperties: { type: string }
+        resources: { $ref: "#/components/schemas/ResourceVector" }
+        parallel: { $ref: "#/components/schemas/ParallelSpec" }
+        requiredArchitecture: { type: string }
+        requiredLabels:
+          type: object
+          additionalProperties: { type: string }
+        requiredTopology:
+          type: object
+          maxProperties: 64
+          additionalProperties: { type: string }
+        excludedNodeIds:
+          type: array
+          maxItems: 256
+          items: { type: string }
+        tolerations:
+          type: array
+          maxItems: 64
+          items: { $ref: "#/components/schemas/Toleration" }
+        preferredZone: { type: string, maxLength: 128 }
+        minimumNetworkBits: { type: integer, format: int64, minimum: 0 }
+        cpuSet: { type: string, pattern: "^[0-9,-]+$", maxLength: 4096 }
+        numaNodes: { type: string, pattern: "^[0-9,-]+$", maxLength: 4096 }
+        timeoutSeconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9223372036
+          description: Optional wall time in seconds; zero or omission inherits the user's group maximum, while administrators may run without a limit.
+        arrayId: { type: string, description: Controller-owned array identifier; script users declare array instead. }
+        arrayIndex: { type: integer, format: int32, minimum: 0 }
+        arraySize: { type: integer, format: int32, minimum: 0, maximum: 1000 }
+        dependencies:
+          type: array
+          maxItems: 64
+          items: { $ref: "#/components/schemas/JobDependency" }
+    NodeConfiguration:
+      type: object
+      additionalProperties: false
+      required: [roles, managementAddress, sshUser, group, computePriority]
+      properties:
+        roles:
+          type: array
+          uniqueItems: true
+          minItems: 1
+          maxItems: 3
+          items: { type: string, enum: [management, compute, storage] }
+        managementAddress:
+          type: string
+          description: Administrator-reachable DNS name or IP address used for SSH operations.
+        sshUser:
+          type: string
+          description: Existing Linux account authorized for XIRANG SSH and restricted mount-helper use.
+        group:
+          type: string
+          description: Administrator-defined node group used by shared-space targeting.
+        computePriority:
+          type: integer
+          minimum: -1000
+          maximum: 1000
+          description: Administrator override used before automatic capability weight during placement.
+    CreateJobTemplate:
+      type: object
+      additionalProperties: false
+      required: [name, script]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        description: { type: string, maxLength: 1024 }
+        script:
+          type: string
+          minLength: 1
+          maxLength: 65536
+          description: Complete XIRANG 1 script that must pass server-side parsing before publication.
+    UpdateJobTemplate:
+      type: object
+      additionalProperties: false
+      required: [name, script, revision]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        description: { type: string, maxLength: 1024 }
+        script: { type: string, minLength: 1, maxLength: 65536 }
+        revision: { type: integer, format: int64, minimum: 1 }
+    JobTemplate:
+      type: object
+      required: [id, name, script, createdBy, updatedBy, revision, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        ownerId: { type: string, description: Immutable submitting principal identifier. }
+        ownerName: { type: string, description: Submitting principal display name snapshot. }
+        name: { type: string }
+        description: { type: string }
+        script: { type: string }
+        createdBy: { type: string }
+        updatedBy: { type: string }
+        revision: { type: integer, format: int64, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Job:
+      type: object
+      required: [id, projectId, queue, priority, status, task, maxAttempts, attempt, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        queue: { type: string }
+        priority: { type: integer, format: int32 }
+        ownerId: { type: string }
+        ownerName: { type: string }
+        groupId: { type: string }
+        policyGroupIds: { type: array, items: { type: string }, description: Complete group set whose merged policy governs this job. }
+        suspendedPolicyGroupIds: { type: array, items: { type: string }, description: Disabled policy groups currently keeping an unassigned job suspended. }
+        storageQuotaBytes: { type: integer, format: int64, minimum: 0, description: Administrator policy; zero is unlimited. }
+        arrayId: { type: string }
+        arrayIndex: { type: integer, format: int32, minimum: 0 }
+        arraySize: { type: integer, format: int32, minimum: 0 }
+        dependencies:
+          type: array
+          items: { $ref: "#/components/schemas/JobDependency" }
+        status: { type: string, enum: [pending, queued, assigned, running, suspended, canceling, orphaned, succeeded, failed, canceled] }
+        task: { $ref: "#/components/schemas/TaskSpec" }
+        maxAttempts: { type: integer, format: int32 }
+        attempt: { type: integer, format: int32, minimum: 0 }
+        assignmentId: { type: string }
+        nodeId: { type: string }
+        allocation: { $ref: "#/components/schemas/Allocation" }
+        exitCode: { type: integer, format: int32 }
+        reason: { type: string }
+        blockReason: { $ref: "#/components/schemas/JobBlockReason" }
+        stdoutTail: { type: string, maxLength: 65536, description: Last 64 KiB of stdout, persisted after a terminal report. }
+        stderrTail: { type: string, maxLength: 65536, description: Last 64 KiB of stderr, persisted after a terminal report. }
+        logsTruncated: { type: boolean }
+        logsObservedAt: { type: string, format: date-time }
+        cancelGracePeriod: { type: integer, format: int64, minimum: 0, description: Requested cancellation grace in nanoseconds. }
+        preemptedByJobId: { type: string }
+        preemptionCount: { type: integer, format: int32, minimum: 0 }
+        preemptionNodeId: { type: string }
+        preemptionVictims:
+          type: array
+          items: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        usage: { $ref: "#/components/schemas/JobUsage" }
+    JobBlockReason:
+      type: object
+      required: [code, category, message, observedAt]
+      properties:
+        code: { type: string, description: Stable scheduler reason code for localization and automation. }
+        category: { type: string, enum: [dependency, queue, quota, policy, node, architecture, capability, device, placement, resource, topology, scheduler] }
+        message: { type: string }
+        details:
+          type: object
+          additionalProperties: { type: string }
+        observedAt: { type: string, format: date-time }
+    JobDependency:
+      type: object
+      required: [jobId, condition]
+      properties:
+        jobId: { type: string }
+        condition: { type: string, enum: [afterok, afterany] }
+    JobUsage:
+      type: object
+      properties:
+        cpuUsageMicros: { type: integer, format: int64, minimum: 0 }
+        memoryByteSeconds: { type: integer, format: int64, minimum: 0 }
+        gpuDeviceSeconds: { type: integer, format: int64, minimum: 0 }
+        wallTimeMillis: { type: integer, format: int64, minimum: 0 }
+        workspaceBytes: { type: integer, format: int64, minimum: 0 }
+        peakWorkspaceBytes: { type: integer, format: int64, minimum: 0 }
+        filesystemAvailableBytes: { type: integer, format: int64, minimum: 0 }
+        filesystemTotalBytes: { type: integer, format: int64, minimum: 0 }
+        observedAt: { type: string, format: date-time }
+    TaskSpec:
+      type: object
+      required: [artifact, resources]
+      properties:
+        artifact: { $ref: "#/components/schemas/NativeArtifact" }
+        arguments:
+          type: array
+          items: { type: string }
+        workingDirectory: { type: string }
+        environment:
+          type: object
+          additionalProperties: { type: string }
+        resources: { $ref: "#/components/schemas/ResourceVector" }
+        parallel: { $ref: "#/components/schemas/ParallelSpec" }
+        placement:
+          type: object
+          properties:
+            requiredArchitecture: { type: string }
+            requiredLabels:
+              type: object
+              additionalProperties: { type: string }
+            requiredTopology:
+              type: object
+              additionalProperties: { type: string }
+            excludedNodeIds:
+              type: array
+              items: { type: string }
+            tolerations:
+              type: array
+              items: { $ref: "#/components/schemas/Toleration" }
+            preferredZone: { type: string }
+            minimumNetworkBits: { type: integer, format: int64, minimum: 0 }
+            cpuSet: { type: string }
+            numaNodes: { type: string }
+        timeout: { type: integer, format: int64, minimum: 0, description: Go duration in nanoseconds }
+    AssignmentReport:
+      type: object
+      required: [nodeId, assignmentId, attempt, state, occurredAt, receivedAt]
+      properties:
+        nodeId: { type: string }
+        assignmentId: { type: string }
+        attempt: { type: integer, format: int32, minimum: 1 }
+        state:
+          type: string
+          enum: [accepted, pulling, ready, running, suspended, succeeded, failed, canceled]
+        exitCode: { type: integer, format: int32 }
+        reason: { type: string }
+        stdoutTail: { type: string, maxLength: 65536 }
+        stderrTail: { type: string, maxLength: 65536 }
+        logsTruncated: { type: boolean }
+        occurredAt: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time }
+    ParallelSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        nodes: { type: integer, format: int32, minimum: 1, maximum: 128, default: 1 }
+        tasksPerNode: { type: integer, format: int32, minimum: 1, maximum: 256, default: 1 }
+        launcher: { type: string, enum: [native, openmpi, mpich, intelmpi], default: native }
+      description: Optional gang allocation. The product of nodes and tasksPerNode cannot exceed 4096.
+    Allocation:
+      type: object
+      required: [id, attempt, state, worldSize, launcher, members, hosts, taskGroups, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        attempt: { type: integer, format: int32, minimum: 1 }
+        state: { type: string, enum: [preparing, ready, running, canceling, succeeded, failed, canceled] }
+        worldSize: { type: integer, format: int32, minimum: 2, maximum: 4096 }
+        launcher: { type: string, enum: [native, openmpi, mpich, intelmpi] }
+        members:
+          type: array
+          minItems: 2
+          maxItems: 128
+          items: { $ref: "#/components/schemas/AllocationMember" }
+        hosts:
+          type: array
+          minItems: 2
+          maxItems: 128
+          items: { $ref: "#/components/schemas/AllocationHost" }
+        taskGroups:
+          type: array
+          items: { $ref: "#/components/schemas/TaskGroup" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    AllocationMember:
+      type: object
+      required: [nodeId, assignmentId, nodeRank, rankStart, rankCount]
+      properties:
+        nodeId: { type: string }
+        assignmentId: { type: string }
+        nodeRank: { type: integer, format: int32, minimum: 0 }
+        rankStart: { type: integer, format: int32, minimum: 0 }
+        rankCount: { type: integer, format: int32, minimum: 1, maximum: 256 }
+        networkInterface: { type: string }
+        address: { type: string }
+        state: { type: string, enum: [accepted, pulling, ready, running, suspended, succeeded, failed, canceled] }
+        exitCode: { type: integer, format: int32 }
+        reason: { type: string }
+        stdoutTail: { type: string, maxLength: 65536 }
+        stderrTail: { type: string, maxLength: 65536 }
+        logsTruncated: { type: boolean }
+        observedAt: { type: string, format: date-time }
+        logsObservedAt: { type: string, format: date-time }
+        usage: { $ref: "#/components/schemas/JobUsage" }
+    AllocationHost:
+      type: object
+      required: [nodeId, hostname, slots]
+      properties:
+        nodeId: { type: string }
+        hostname: { type: string }
+        address: { type: string }
+        networkInterface: { type: string }
+        slots: { type: integer, format: int32, minimum: 1, maximum: 256 }
+    TaskGroup:
+      type: object
+      required: [id, launcher, ranks]
+      properties:
+        id: { type: string }
+        launcher: { type: string, enum: [native, openmpi, mpich, intelmpi] }
+        ranks:
+          type: array
+          maxItems: 4096
+          items:
+            type: object
+            required: [rank, localRank, nodeRank, nodeId]
+            properties:
+              rank: { type: integer, format: int32, minimum: 0 }
+              localRank: { type: integer, format: int32, minimum: 0 }
+              nodeRank: { type: integer, format: int32, minimum: 0 }
+              nodeId: { type: string }
+    QueuePolicy:
+      type: object
+      required: [name, weight, resourceQuota, projectResourceQuota, backfill, allowPreemption, preemptible, elasticityBudget, updatedAt]
+      properties:
+        name: { type: string }
+        weight: { type: integer, format: int32, minimum: 1, maximum: 1000 }
+        maxConcurrent: { type: integer, format: int32, minimum: 0 }
+        maxConcurrentPerProject: { type: integer, format: int32, minimum: 0 }
+        resourceQuota: { $ref: "#/components/schemas/ResourceVector" }
+        projectResourceQuota: { $ref: "#/components/schemas/ResourceVector" }
+        backfill: { type: boolean }
+        allowPreemption: { type: boolean }
+        preemptible: { type: boolean }
+        preemptionGraceSeconds: { type: integer, format: int32, minimum: 0, maximum: 300 }
+        maxPreemptionsPerJob: { type: integer, format: int32, minimum: 0, maximum: 100 }
+        maxRecommendedScaleOut: { type: integer, format: int32, minimum: 0, maximum: 10000 }
+        elasticityBudget: { $ref: "#/components/schemas/ResourceVector" }
+        qos: { type: string, enum: [normal, high, urgent] }
+        maxWallTimeSeconds: { type: integer, format: int64, minimum: 0, deprecated: true, description: Retained for wire compatibility and ignored; runtime limits are user-group policy. }
+        fairShareHalfLifeHours: { type: integer, format: int32, minimum: 0, maximum: 8760 }
+        historicalUsageWeight: { type: integer, format: int32, minimum: 0, maximum: 1000 }
+        reservationStart: { type: string, format: date-time }
+        reservationEnd: { type: string, format: date-time }
+        reservationNodeIds: { type: array, maxItems: 1024, items: { type: string } }
+        reservationGroupIds: { type: array, maxItems: 1024, items: { type: string } }
+        updatedAt: { type: string, format: date-time }
+    PutQueuePolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        weight: { type: integer, format: int32, minimum: 1, maximum: 1000, default: 1 }
+        maxConcurrent: { type: integer, format: int32, minimum: 0, default: 0 }
+        maxConcurrentPerProject: { type: integer, format: int32, minimum: 0, default: 0 }
+        resourceQuota: { $ref: "#/components/schemas/ResourceVector" }
+        projectResourceQuota: { $ref: "#/components/schemas/ResourceVector" }
+        backfill: { type: boolean, default: true }
+        allowPreemption: { type: boolean, default: false }
+        preemptible: { type: boolean, default: false }
+        preemptionGraceSeconds: { type: integer, format: int32, minimum: 0, maximum: 300, default: 10 }
+        maxPreemptionsPerJob: { type: integer, format: int32, minimum: 0, maximum: 100, default: 3 }
+        maxRecommendedScaleOut: { type: integer, format: int32, minimum: 0, maximum: 10000, default: 0 }
+        elasticityBudget: { $ref: "#/components/schemas/ResourceVector" }
+        qos: { type: string, enum: [normal, high, urgent], default: normal }
+        maxWallTimeSeconds: { type: integer, format: int64, minimum: 0, deprecated: true, description: Retained for wire compatibility and ignored; runtime limits are user-group policy. }
+        fairShareHalfLifeHours: { type: integer, format: int32, minimum: 0, maximum: 8760 }
+        historicalUsageWeight: { type: integer, format: int32, minimum: 0, maximum: 1000 }
+        reservationStart: { type: string, format: date-time }
+        reservationEnd: { type: string, format: date-time }
+        reservationNodeIds: { type: array, maxItems: 1024, items: { type: string } }
+        reservationGroupIds: { type: array, maxItems: 1024, items: { type: string } }
+    ElasticitySnapshot:
+      type: object
+      required: [generatedAt, recommendations]
+      properties:
+        generatedAt: { type: string, format: date-time }
+        recommendations:
+          type: array
+          items:
+            type: object
+            required: [queue, queuedJobs, queuedResources, capacityDeficit, suggestedAdditionalNodes, limitedByBudget, reason]
+            properties:
+              queue: { type: string }
+              queuedJobs: { type: integer, format: int32, minimum: 1 }
+              queuedResources: { $ref: "#/components/schemas/ResourceVector" }
+              capacityDeficit: { $ref: "#/components/schemas/ResourceVector" }
+              suggestedAdditionalNodes: { type: integer, format: int32, minimum: 0 }
+              limitedByBudget: { type: boolean }
+              reason: { type: string }
+    UsageCost:
+      type: object
+      required: [cpuCostMicros, memoryCostMicros, gpuCostMicros, storageCostMicros, totalCostMicros]
+      properties:
+        cpuCostMicros: { type: integer, format: int64, minimum: 0 }
+        memoryCostMicros: { type: integer, format: int64, minimum: 0 }
+        gpuCostMicros: { type: integer, format: int64, minimum: 0 }
+        storageCostMicros: { type: integer, format: int64, minimum: 0 }
+        totalCostMicros: { type: integer, format: int64, minimum: 0 }
+    DailyUsageCost:
+      type: object
+      required: [date, ownerId, cpuUsageMicros, memoryByteSeconds, gpuDeviceSeconds, wallTimeMillis, workspaceByteSeconds, peakWorkspaceBytes, cost]
+      properties:
+        date: { type: string, format: date }
+        ownerId: { type: string }
+        ownerName: { type: string }
+        cpuUsageMicros: { type: integer, format: int64, minimum: 0 }
+        memoryByteSeconds: { type: integer, format: int64, minimum: 0 }
+        gpuDeviceSeconds: { type: integer, format: int64, minimum: 0 }
+        wallTimeMillis: { type: integer, format: int64, minimum: 0 }
+        workspaceByteSeconds: { type: integer, format: int64, minimum: 0 }
+        peakWorkspaceBytes: { type: integer, format: int64, minimum: 0 }
+        cost: { $ref: "#/components/schemas/UsageCost" }
+    UsageSummary:
+      type: object
+      required: [from, to, currency, cpuUsageMicros, memoryByteSeconds, gpuDeviceSeconds, wallTimeMillis, workspaceByteSeconds, peakWorkspaceBytes, cost, daily]
+      properties:
+        ownerId: { type: string }
+        ownerName: { type: string }
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        cpuUsageMicros: { type: integer, format: int64, minimum: 0 }
+        memoryByteSeconds: { type: integer, format: int64, minimum: 0 }
+        gpuDeviceSeconds: { type: integer, format: int64, minimum: 0 }
+        wallTimeMillis: { type: integer, format: int64, minimum: 0 }
+        workspaceByteSeconds: { type: integer, format: int64, minimum: 0 }
+        peakWorkspaceBytes: { type: integer, format: int64, minimum: 0 }
+        cost: { $ref: "#/components/schemas/UsageCost" }
+        daily:
+          type: array
+          items: { $ref: "#/components/schemas/DailyUsageCost" }
+    BillingRate:
+      type: object
+      required: [currency, cpuCoreHourMicros, memoryGiBHourMicros, gpuDeviceHourMicros, storageGiBDayMicros]
+      properties:
+        id: { type: string, readOnly: true }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        cpuCoreHourMicros: { type: integer, format: int64, minimum: 0 }
+        memoryGiBHourMicros: { type: integer, format: int64, minimum: 0 }
+        gpuDeviceHourMicros: { type: integer, format: int64, minimum: 0 }
+        storageGiBDayMicros: { type: integer, format: int64, minimum: 0 }
+        effectiveAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time, readOnly: true }
+        createdBy: { type: string, readOnly: true }
+    BuildWorker:
+      type: object
+      required: [id, architecture, toolchains, isolation, ready]
+      properties:
+        id: { type: string }
+        architecture: { type: string }
+        toolchains: { type: array, items: { type: string } }
+        toolchainCapabilities:
+          type: array
+          items: { $ref: "#/components/schemas/ToolchainCapability" }
+        isolation: { type: string }
+        ready: { type: boolean }
+        supportsCancellation: { type: boolean, description: True when the worker can terminate an active native build through the authenticated control stream. }
+    ToolchainCapability:
+      type: object
+      required: [name, targetArchitectures]
+      properties:
+        name: { type: string }
+        version: { type: string }
+        targetArchitectures: { type: array, items: { type: string } }
+        executables: { type: array, items: { type: string } }
+    BuildRetentionPolicy:
+      type: object
+      required: [maximumRecords, maximumAgeSeconds, preserveSuccessfulBuilds]
+      properties:
+        maximumRecords: { type: integer, minimum: 1, maximum: 1000 }
+        maximumAgeSeconds: { type: integer, format: int64, minimum: 86400, maximum: 315360000 }
+        preserveSuccessfulBuilds: { type: boolean, default: false, description: Exclude successful build records, signed artifacts, SBOM metadata, and application routing from automatic cleanup. }
+    BuildCleanupResult:
+      type: object
+      required: [deletedRecords, deletedArtifacts, reclaimedBytes]
+      properties:
+        deletedRecords: { type: integer, minimum: 0 }
+        deletedArtifacts: { type: integer, minimum: 0 }
+        reclaimedBytes: { type: integer, format: int64, minimum: 0 }
+    BuildSigningKey:
+      type: object
+      required: [publicKey, fingerprint, activatedAt]
+      properties:
+        publicKey: { type: string, description: Base64 Ed25519 public key }
+        fingerprint: { type: string, pattern: "^[a-f0-9]{64}$" }
+        pairingRequired: { type: boolean }
+        activatedAt: { type: string, format: date-time }
+    BuildRecipeRequest:
+      type: object
+      additionalProperties: false
+      required: [name, sourcePath, architecture, outputPath, toolchain, milliCpu, memoryBytes, timeoutSeconds]
+      oneOf:
+        - required: [command]
+        - required: [steps]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        application: { type: string, maxLength: 128, description: Logical runtime application name; requires shared output and runtime node mapping. }
+        variant: { type: string, maxLength: 128, description: Hardware/software build variant such as amd64-nvidia. }
+        runtimeNodeIds: { type: array, minItems: 1, maxItems: 1024, uniqueItems: true, items: { type: string } }
+        runtimeEntrypoint: { type: string, description: Executable path inside the published output. }
+        sourcePath: { type: string }
+        sourceSpaceId: { type: string, description: Active shared space containing sourcePath. }
+        sourceSha256: { type: string, pattern: "^[a-fA-F0-9]{64}$", description: Optional caller pin; the controller always computes and records the source-tree digest. }
+        architecture: { type: string }
+        builderArchitecture: { type: string, description: Architecture of the node that executes the compiler. Defaults to architecture. }
+        workerId: { type: string, description: Optional exact build worker selection. }
+        crossCompile: { type: boolean, default: false }
+        command: { type: array, minItems: 1, maxItems: 64, items: { type: string } }
+        steps:
+          type: array
+          minItems: 1
+          maxItems: 16
+          description: Ordered direct-argv build steps; no implicit shell is used.
+          items: { type: array, minItems: 1, maxItems: 64, items: { type: string } }
+        outputPath: { type: string }
+        outputSpaceId: { type: string, description: Active shared space receiving the successful output. }
+        publishPath: { type: string, description: Destination relative path inside outputSpaceId; defaults to outputPath for compatibility. }
+        toolchain: { type: string }
+        environment: { type: object, additionalProperties: { type: string } }
+        milliCpu: { type: integer, format: int64, minimum: 10 }
+        memoryBytes: { type: integer, format: int64, minimum: 1 }
+        timeoutSeconds: { type: integer, format: int64, minimum: 1, maximum: 7200 }
+    Build:
+      type: object
+      required: [id, status, recipe, workerId, artifact, createdAt, startedAt]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [running, canceling, succeeded, failed, canceled] }
+        recipe:
+          allOf:
+            - { $ref: "#/components/schemas/BuildRecipeRequest" }
+            - type: object
+              properties:
+                timeout: { type: integer, format: int64, description: Go duration in nanoseconds }
+        workerId: { type: string }
+        logTail: { type: string, maxLength: 65536 }
+        failure: { type: string, maxLength: 4096 }
+        artifact:
+          type: object
+          properties:
+            uri: { type: string }
+            sha256: { type: string }
+            signature: { type: string }
+            publicKey: { type: string }
+            architecture: { type: string }
+            abi: { type: string }
+            toolchain: { type: string }
+            sbomUri: { type: string }
+            application: { type: string }
+            variant: { type: string }
+            entrypoint: { type: string }
+            runtimeNodeIds: { type: array, items: { type: string } }
+            routingUpdatedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+    Principal:
+      type: object
+      required: [subject, role, permissions, authMethod]
+      properties:
+        subject: { type: string }
+        displayName: { type: string }
+        role: { type: string, enum: [viewer, user, builder, operator, admin] }
+        permissions: { type: array, items: { type: string } }
+        authMethod: { type: string, enum: [bootstrap, oidc, api_token, local_password] }
+    Role:
+      type: object
+      required: [name, description, permissions]
+      properties:
+        name: { type: string, enum: [viewer, user, builder, operator, admin] }
+        description: { type: string }
+        permissions: { type: array, items: { type: string } }
+    APIToken:
+      type: object
+      required: [id, name, role, subject, createdAt, expiresAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [viewer, builder, operator, admin] }
+        subject: { type: string }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        lastUsedAt: { type: string, format: date-time }
+        revokedAt: { type: string, format: date-time }
+    CreatedAPIToken:
+      type: object
+      required: [token, secret]
+      properties:
+        token: { $ref: "#/components/schemas/APIToken" }
+        secret: { type: string, writeOnly: true }
+    BackupManifest:
+      type: object
+      required: [id, schemaVersion, createdAt, files]
+      properties:
+        id: { type: string }
+        schemaVersion: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        files:
+          type: array
+          items:
+            type: object
+            required: [name, sha256, size]
+            properties:
+              name: { type: string }
+              sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+              size: { type: integer, format: int64, minimum: 0 }
+    VersionInfo:
+      type: object
+      required: [name, version, protocolVersion, commit, buildTime, goVersion, os, architecture]
+      properties:
+        name: { type: string, const: XIRANG }
+        version: { type: string }
+        protocolVersion: { type: string }
+        commit: { type: string }
+        buildTime: { type: string }
+        goVersion: { type: string }
+        os: { type: string }
+        architecture: { type: string }
+    DiscoveryScan:
+      type: object
+      required: [id, cidrs, ports, status, scannedHosts, candidatesSeen, startedAt]
+      properties:
+        id: { type: string }
+        cidrs: { type: array, items: { type: string } }
+        ports: { type: array, items: { type: integer, minimum: 1, maximum: 65535 } }
+        status: { type: string, enum: [running, completed, failed] }
+        scannedHosts: { type: integer, minimum: 0 }
+        candidatesSeen: { type: integer, minimum: 0 }
+        failure: { type: string }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+    DiscoveryCandidate:
+      type: object
+      required: [id, address, agentPort, openPorts, status, firstSeenAt, lastSeenAt, lastScanId]
+      properties:
+        id: { type: string }
+        address: { type: string }
+        agentPort: { type: integer, minimum: 1, maximum: 65535 }
+        openPorts: { type: array, items: { type: integer } }
+        banners: { type: object, additionalProperties: { type: string, maxLength: 256 } }
+        protocol: { type: string }
+        agentVersion: { type: string }
+        hostname: { type: string }
+        architecture: { type: string }
+        distribution: { type: string }
+        kernelVersion: { type: string }
+        cpuCount: { type: integer, minimum: 1 }
+        memoryBytes: { type: integer, format: int64, minimum: 1 }
+        interfaces:
+          type: array
+          items: { $ref: "#/components/schemas/NetworkInterfaceSnapshot" }
+        fingerprint: { type: string, pattern: "^[a-f0-9]{64}$" }
+        enrolledNodeId: { type: string }
+        status: { type: string, enum: [discovered, approved, rejected] }
+        firstSeenAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        lastScanId: { type: string }
+        approvedAt: { type: string, format: date-time }
+        rejectedAt: { type: string, format: date-time }
+    DiscoveryBootstrap:
+      type: object
+      required: [candidate, expiresAt, controllerUrl, nodeId]
+      properties:
+        candidate: { $ref: "#/components/schemas/DiscoveryCandidate" }
+        enrollmentToken: { type: string, writeOnly: true }
+        expiresAt: { type: string, format: date-time }
+        controllerUrl: { type: string, format: uri }
+        installCommand: { type: string, writeOnly: true }
+        nodeId: { type: string }
+    CreateEnrollmentToken:
+      type: object
+      additionalProperties: false
+      required: [name, ttlSeconds, maxUses, requireApproval]
+      properties:
+        name: { type: string, minLength: 1 }
+        ttlSeconds: { type: integer, minimum: 1, maximum: 86400 }
+        maxUses: { type: integer, minimum: 1, maximum: 1024 }
+        requireApproval: { type: boolean }
+    CreatedEnrollmentToken:
+      type: object
+      required: [token, secret]
+      properties:
+        token: { $ref: "#/components/schemas/EnrollmentToken" }
+        secret: { type: string, writeOnly: true }
+    EnrollmentToken:
+      type: object
+      required: [id, name, requireApproval, maxUses, uses, createdAt, expiresAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        requireApproval: { type: boolean }
+        maxUses: { type: integer }
+        uses: { type: integer }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+    RegisterNode:
+      type: object
+      additionalProperties: false
+      required: [token, csrPem, inventory]
+      properties:
+        token: { type: string, writeOnly: true }
+        csrPem: { type: string, writeOnly: true }
+        inventory: { $ref: "#/components/schemas/InventorySummary" }
+    RegistrationResult:
+      type: object
+      required: [node, certificatePem, caCertificatePem]
+      properties:
+        node: { $ref: "#/components/schemas/Node" }
+        certificatePem: { type: string, writeOnly: true }
+        caCertificatePem: { type: string }
+    CertificateRotationResult:
+      type: object
+      required: [node, certificatePem, caCertificatePem]
+      properties:
+        node: { $ref: "#/components/schemas/Node" }
+        certificatePem: { type: string, writeOnly: true }
+        caCertificatePem: { type: string }
+    InventorySummary:
+      type: object
+      additionalProperties: false
+      required: [hostname, os, architecture, cpuCount, memoryBytes]
+      properties:
+        hostname: { type: string }
+        os: { type: string, const: linux }
+        architecture: { type: string }
+        distribution: { type: string }
+        kernelVersion: { type: string }
+        agentVersion: { type: string }
+        capabilities:
+          type: array
+          items: { type: string }
+        cpuCount: { type: integer, minimum: 1 }
+        cpuModel: { type: string, maxLength: 512 }
+        cpuFeatures:
+          type: array
+          maxItems: 1024
+          items: { type: string, maxLength: 64 }
+        cpuBenchmarkScore: { type: number, format: double, minimum: 0 }
+        computeWeight: { type: number, format: double, minimum: 0 }
+        memoryBytes: { type: integer, format: int64, minimum: 1 }
+        devices:
+          type: object
+          maxProperties: 64
+          additionalProperties: { type: integer, format: int64, minimum: 0 }
+        numaTopology:
+          type: array
+          items: { $ref: "#/components/schemas/NUMANode" }
+        deviceTopology:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: { type: integer, format: int64, minimum: 0 }
+    Node:
+      type: object
+      required: [id, name, status, os, architecture, capacity, allocatable, allocated, revision, createdAt, updatedAt, lastSeenAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        status: { type: string }
+        desiredStatus: { type: string, enum: [ready, cordoned, draining] }
+        pendingModeCommandId: { type: string }
+        pendingManagementCommandId: { type: string }
+        desiredManagementPanel: { type: boolean }
+        managementPanelEnabled: { type: boolean }
+        managementPanelStatus: { type: string }
+        os: { type: string }
+        architecture: { type: string }
+        distribution: { type: string }
+        kernelVersion: { type: string }
+        agentVersion: { type: string }
+        cpuModel: { type: string }
+        cpuFeatures:
+          type: array
+          items: { type: string }
+        cpuBenchmarkScore: { type: number, format: double, minimum: 0 }
+        computeWeight: { type: number, format: double, minimum: 0 }
+        computePriority: { type: integer, minimum: -1000, maximum: 1000 }
+        certificateSerial: { type: string }
+        certificateNotAfter: { type: string, format: date-time }
+        pendingCertificateSerial: { type: string }
+        pendingCertificateNotAfter: { type: string, format: date-time }
+        pendingCertificateCommandId: { type: string }
+        pendingCertificateRotationId: { type: string }
+        certificateRevokedAt: { type: string, format: date-time }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+        roles:
+          type: array
+          uniqueItems: true
+          items: { type: string, enum: [management, compute, storage] }
+        managementAddress: { type: string }
+        sshUser: { type: string }
+        group: { type: string }
+        taints:
+          type: array
+          items: { $ref: "#/components/schemas/Taint" }
+        numaTopology:
+          type: array
+          items: { $ref: "#/components/schemas/NUMANode" }
+        deviceTopology:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: { type: integer, format: int64, minimum: 0 }
+        capacity: { $ref: "#/components/schemas/ResourceVector" }
+        allocatable: { $ref: "#/components/schemas/ResourceVector" }
+        allocated: { $ref: "#/components/schemas/ResourceVector" }
+        revision: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        approvedAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+    CreateSharedSpace:
+      type: object
+      additionalProperties: false
+      required: [name, sourceNodeId, sourcePath, mountPath, target]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        sourceNodeId: { type: string }
+        sourcePath:
+          type: string
+          description: Absolute export path on a node with the storage role.
+        mountPath:
+          type: string
+          description: Absolute task-visible mount path on selected nodes.
+        target: { type: string, enum: [all, group, nodes] }
+        targetGroup: { type: string }
+        targetNodeIds:
+          type: array
+          uniqueItems: true
+          items: { type: string }
+    SharedSpaceNodeResult:
+      type: object
+      required: [nodeId, status]
+      properties:
+        nodeId: { type: string }
+        status: { type: string, enum: [exported, mounted, available, failed] }
+        message: { type: string }
+    SharedSpace:
+      type: object
+      required: [id, name, sourceNodeId, sourcePath, mountPath, target, status, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        sourceNodeId: { type: string }
+        sourcePath: { type: string }
+        mountPath: { type: string }
+        target: { type: string, enum: [all, group, nodes] }
+        targetGroup: { type: string }
+        targetNodeIds:
+          type: array
+          items: { type: string }
+        status: { type: string, enum: [applying, active, degraded, failed] }
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/SharedSpaceNodeResult" }
+        usedBytes: { type: integer, format: int64, minimum: 0 }
+        availableBytes: { type: integer, format: int64, minimum: 0 }
+        totalBytes: { type: integer, format: int64, minimum: 0 }
+        capacityObservedAt: { type: string, format: date-time }
+        capacityError: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    SharedFile:
+      type: object
+      required: [path, name, directory, sizeBytes, modifiedAt, owner, ownedByUser]
+      properties:
+        path: { type: string }
+        name: { type: string }
+        directory: { type: boolean }
+        sizeBytes: { type: integer, format: int64, minimum: 0 }
+        modifiedAt: { type: string, format: date-time }
+        owner: { type: string }
+        ownedByUser: { type: boolean }
+    SharedFilePath:
+      type: object
+      additionalProperties: false
+      required: [path]
+      properties:
+        path: { type: string, minLength: 1, maxLength: 1024 }
+    RenameSharedFile:
+      type: object
+      additionalProperties: false
+      required: [oldPath, newPath]
+      properties:
+        oldPath: { type: string, minLength: 1, maxLength: 1024 }
+        newPath: { type: string, minLength: 1, maxLength: 1024 }
+    TerminalTicket:
+      type: object
+      required: [ticket, expiresAt]
+      properties:
+        ticket: { type: string, writeOnly: true }
+        expiresAt: { type: string, format: date-time }
+    Taint:
+      type: object
+      additionalProperties: false
+      required: [key, effect]
+      properties:
+        key: { type: string, minLength: 1, maxLength: 128 }
+        value: { type: string, maxLength: 256 }
+        effect: { type: string, enum: [NoSchedule, NoExecute] }
+    NUMANode:
+      type: object
+      required: [id, cpus, memoryBytes]
+      properties:
+        id: { type: integer, format: int32, minimum: 0 }
+        cpus: { type: string }
+        memoryBytes: { type: integer, format: int64, minimum: 0 }
+    Toleration:
+      type: object
+      additionalProperties: false
+      required: [key, effect]
+      properties:
+        key: { type: string, minLength: 1, maxLength: 128 }
+        value: { type: string, maxLength: 256 }
+        effect: { type: string, enum: [NoSchedule, NoExecute] }
+    ResourceVector:
+      type: object
+      required: [milliCpu, memoryBytes, ephemeralStorageBytes]
+      properties:
+        milliCpu: { type: integer, format: int64, minimum: 0 }
+        memoryBytes: { type: integer, format: int64, minimum: 0 }
+        ephemeralStorageBytes: { type: integer, format: int64, minimum: 0, description: Node-capacity field; job submissions must set this to zero because storage is governed by administrator quotas. }
+        devices:
+          type: object
+          additionalProperties: { type: integer, format: int64, minimum: 0 }
+    NetworkInterfaceSnapshot:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        macAddress: { type: string }
+        addresses:
+          type: array
+          items: { type: string }
+        speedBitsPerSecond: { type: integer, format: int64, minimum: 0 }
+        mtu: { type: integer, format: int32, minimum: 0 }
+    DeviceSnapshot:
+      type: object
+      required: [resourceName]
+      properties:
+        resourceName: { type: string }
+        vendor: { type: string }
+        model: { type: string }
+        deviceId: { type: string }
+        attributes:
+          type: object
+          additionalProperties: { type: string }
+    NodeInventorySnapshot:
+      type: object
+      required: [nodeId, hostname, architecture, logicalCpuCount, memoryBytes, observedAt, receivedAt]
+      properties:
+        nodeId: { type: string }
+        hostname: { type: string }
+        distribution: { type: string }
+        kernelVersion: { type: string }
+        architecture: { type: string }
+        logicalCpuCount: { type: integer, format: int32, minimum: 1 }
+        cpuModel: { type: string }
+        cpuFeatures:
+          type: array
+          items: { type: string }
+        cpuBenchmarkScore: { type: number, format: double, minimum: 0 }
+        computeWeight: { type: number, format: double, minimum: 0 }
+        memoryBytes: { type: integer, format: int64, minimum: 1 }
+        networkInterfaces:
+          type: array
+          items: { $ref: "#/components/schemas/NetworkInterfaceSnapshot" }
+        devices:
+          type: array
+          items: { $ref: "#/components/schemas/DeviceSnapshot" }
+        numaTopology:
+          type: array
+          items: { $ref: "#/components/schemas/NUMANode" }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+        observedAt: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time }
+    TelemetryIntervalSettings:
+      type: object
+      required: [intervalSeconds, minimumSeconds, maximumSeconds]
+      properties:
+        intervalSeconds: { type: integer, minimum: 2, maximum: 60 }
+        minimumSeconds: { type: integer, const: 2 }
+        maximumSeconds: { type: integer, const: 60 }
+    NodeResourceObservation:
+      type: object
+      required: [messageId, nodeId, usedMilliCpu, usedMemoryBytes, receivedBytes, transmittedBytes, cpuTemperatureAvailable, gpuUtilizationAvailable, gpuTemperatureAvailable, observedAt, receivedAt]
+      properties:
+        messageId: { type: string }
+        nodeId: { type: string }
+        usedMilliCpu: { type: integer, format: int64, minimum: 0 }
+        usedMemoryBytes: { type: integer, format: int64, minimum: 0 }
+        receivedBytes: { type: integer, format: int64, minimum: 0 }
+        transmittedBytes: { type: integer, format: int64, minimum: 0 }
+        usedDevices:
+          type: object
+          additionalProperties: { type: integer, format: int64, minimum: 0 }
+        cpuTemperatureC: { type: number, format: double, minimum: 0, maximum: 250 }
+        cpuTemperatureAvailable: { type: boolean }
+        cpuTemperatureSource: { type: string, maxLength: 128, description: Read-only provider such as hwmon/thermal-zone, ipmi, or redfish. }
+        cpuTemperatureConfidence: { type: string, enum: [high, medium, low] }
+        gpuTemperatureC: { type: number, format: double, minimum: 0, maximum: 250 }
+        gpuUtilizationPercent: { type: number, format: double, minimum: 0, maximum: 100 }
+        gpuUtilizationAvailable: { type: boolean }
+        gpuTemperatureAvailable: { type: boolean }
+        accelerators:
+          type: array
+          items: { $ref: "#/components/schemas/AcceleratorObservation" }
+        interfaceCounters:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/NetworkInterfaceCounters" }
+        observedAt: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time }
+    AcceleratorObservation:
+      type: object
+      required: [id, vendor, utilizationAvailable, temperatureAvailable]
+      properties:
+        id: { type: string }
+        vendor: { type: string }
+        utilizationPercent: { type: number, format: double, minimum: 0, maximum: 100 }
+        temperatureC: { type: number, format: double, minimum: 0, maximum: 250 }
+        memoryUsedBytes: { type: integer, format: int64, minimum: 0 }
+        memoryTotalBytes: { type: integer, format: int64, minimum: 0 }
+        utilizationAvailable: { type: boolean }
+        temperatureAvailable: { type: boolean }
+    NetworkInterfaceCounters:
+      type: object
+      required: [receivedBytes, transmittedBytes, receivedPackets, transmittedPackets, receiveErrors, transmitErrors, receiveDropped, transmitDropped, packetCountersSupported]
+      properties:
+        receivedBytes: { type: integer, format: int64, minimum: 0 }
+        transmittedBytes: { type: integer, format: int64, minimum: 0 }
+        receivedPackets: { type: integer, format: int64, minimum: 0 }
+        transmittedPackets: { type: integer, format: int64, minimum: 0 }
+        receiveErrors: { type: integer, format: int64, minimum: 0 }
+        transmitErrors: { type: integer, format: int64, minimum: 0 }
+        receiveDropped: { type: integer, format: int64, minimum: 0 }
+        transmitDropped: { type: integer, format: int64, minimum: 0 }
+        packetCountersSupported: { type: boolean, description: True when packet, error, and dropped counters were explicitly collected by the Agent. }
+    TopologyVertex:
+      type: object
+      required: [id, kind]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [host, switch, router, unknown] }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+    TopologyEdge:
+      type: object
+      required: [id, type, sourceId, targetId, observedAt]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [neighbor, route, lldp, probe] }
+        sourceId: { type: string }
+        targetId: { type: string }
+        sourceInterface: { type: string }
+        targetInterface: { type: string }
+        sourceAddress: { type: string }
+        targetAddress: { type: string }
+        capacityBits: { type: integer, format: int64, minimum: 0, description: Source-interface line rate reported by native inventory. }
+        observedBits: { type: integer, format: int64, minimum: 0, description: Current source-interface aggregate bits per second; latest snapshot only. }
+        observedPacketsPerSecond: { type: number, format: double, minimum: 0, description: Current source-interface aggregate packets per second; latest snapshot only. }
+        droppedPacketsPerSecond: { type: number, format: double, minimum: 0, description: Current source-interface RX and TX dropped packets per second; latest snapshot only. }
+        errorPacketsPerSecond: { type: number, format: double, minimum: 0, description: Current source-interface RX and TX error packets per second; latest snapshot only. }
+        dropRatio: { type: number, format: double, minimum: 0, maximum: 1, description: Dropped packets divided by observed plus dropped packets for the sample interval. }
+        health: { type: string, enum: [healthy, degraded, critical], description: Informational interface health derived from counter deltas; not a persisted alert. }
+        latencyMicros: { type: integer, format: int64, minimum: 0 }
+        observedAt: { type: string, format: date-time }
+    NetworkPathSelection:
+      type: object
+      required: [sourceId, targetId, primaryEdgeId, policy]
+      properties:
+        sourceId: { type: string }
+        targetId: { type: string }
+        primaryEdgeId: { type: string }
+        fallbackEdgeIds:
+          type: array
+          items: { type: string }
+        effectiveCapacityBits: { type: integer, format: int64, minimum: 0, description: Capacity of the selected primary; parallel links are not summed. }
+        policy: { type: string, enum: [single-best-healthy] }
+    TopologyRoute:
+      type: object
+      required: [nodeId, destination, interfaceName, table, family]
+      properties:
+        nodeId: { type: string }
+        destination: { type: string }
+        gateway: { type: string }
+        interfaceName: { type: string }
+        metric: { type: integer, format: int32, minimum: 0 }
+        table: { type: integer, format: int32, minimum: 0 }
+        family: { type: string, enum: [ipv4, ipv6] }
+    TopologyNeighbor:
+      type: object
+      required: [nodeId, address, interfaceName, state]
+      properties:
+        nodeId: { type: string }
+        address: { type: string }
+        macAddress: { type: string }
+        interfaceName: { type: string }
+        state: { type: string }
+        router: { type: boolean }
+    TopologyLLDPNeighbor:
+      type: object
+      required: [nodeId, localInterface, chassisId]
+      properties:
+        nodeId: { type: string }
+        localInterface: { type: string }
+        chassisId: { type: string }
+        portId: { type: string }
+        systemName: { type: string }
+        systemDescription: { type: string }
+        managementAddresses:
+          type: array
+          items: { type: string }
+    NetworkPathProbe:
+      type: object
+      required: [nodeId, targetNodeId, sourceInterface, sourceAddress, targetInterface, targetAddress, reachable, observedAt]
+      properties:
+        nodeId: { type: string }
+        targetNodeId: { type: string }
+        sourceInterface: { type: string }
+        sourceAddress: { type: string }
+        targetInterface: { type: string }
+        targetAddress: { type: string }
+        sourceSpeedBitsPerSecond: { type: integer, format: int64, minimum: 0 }
+        targetSpeedBitsPerSecond: { type: integer, format: int64, minimum: 0 }
+        latencyMicros: { type: integer, format: int64, minimum: 0 }
+        reachable: { type: boolean }
+        failure: { type: string }
+        observedAt: { type: string, format: date-time }
+    TopologySnapshot:
+      type: object
+      required: [version, generatedAt, reportCount, vertices, edges]
+      properties:
+        version: { type: integer, format: int64, minimum: 1 }
+        generatedAt: { type: string, format: date-time }
+        reportCount: { type: integer, minimum: 1 }
+        vertices:
+          type: array
+          items: { $ref: "#/components/schemas/TopologyVertex" }
+        edges:
+          type: array
+          items: { $ref: "#/components/schemas/TopologyEdge" }
+        pathSelections:
+          type: array
+          description: Latest response-local primary and fallback choices for parallel observed links.
+          items: { $ref: "#/components/schemas/NetworkPathSelection" }
+        routes:
+          type: array
+          items: { $ref: "#/components/schemas/TopologyRoute" }
+        neighbors:
+          type: array
+          items: { $ref: "#/components/schemas/TopologyNeighbor" }
+        lldpNeighbors:
+          type: array
+          items: { $ref: "#/components/schemas/TopologyLLDPNeighbor" }
+        pathProbes:
+          type: array
+          description: Latest full source-address-to-target-address reachability measurements reported by Agents.
+          items: { $ref: "#/components/schemas/NetworkPathProbe" }
+    NetworkFlow:
+      type: object
+      required: [family, protocol, sourceAddress, sourcePort, destinationAddress, destinationPort, direction, packets, bytes]
+      properties:
+        family: { type: string, enum: [ipv4, ipv6] }
+        protocol: { type: string, enum: [tcp, udp] }
+        sourceAddress: { type: string }
+        sourcePort: { type: integer, minimum: 0, maximum: 65535 }
+        destinationAddress: { type: string }
+        destinationPort: { type: integer, minimum: 0, maximum: 65535 }
+        direction: { type: string, enum: [ingress, egress] }
+        packets: { type: integer, format: int64, minimum: 1 }
+        bytes: { type: integer, format: int64, minimum: 1 }
+    NodeFlowObservation:
+      type: object
+      required: [messageId, nodeId, flows, truncated, mapEntries, interval, observedAt, receivedAt]
+      properties:
+        messageId: { type: string }
+        nodeId: { type: string }
+        flows:
+          type: array
+          maxItems: 4096
+          items: { $ref: "#/components/schemas/NetworkFlow" }
+        truncated: { type: boolean }
+        mapEntries: { type: integer, minimum: 0, maximum: 1048576 }
+        interval: { type: integer, format: int64, minimum: 1000000000, description: Observation interval in nanoseconds. }
+        observedAt: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time }
+    Alert:
+      type: object
+      required: [id, fingerprint, kind, sourceNodeId, sourceInterface, status, severity, observedHealth, summary, observedBits, droppedPacketsPerSecond, errorPacketsPerSecond, dropRatio, firstObservedAt, lastObservedAt, revision]
+      properties:
+        id: { type: string }
+        fingerprint: { type: string, description: Stable condition identity for one alert series. }
+        kind: { type: string, enum: [interface_health, job_storage, group_storage, node_storage] }
+        sourceNodeId: { type: string }
+        sourceInterface: { type: string }
+        status: { type: string, enum: [firing, acknowledged, resolved] }
+        severity: { type: string, enum: [info, warning, critical] }
+        observedHealth: { type: string, enum: [healthy, degraded, critical, unhealthy] }
+        summary: { type: string }
+        observedBits: { type: integer, format: int64, minimum: 0 }
+        droppedPacketsPerSecond: { type: number, format: double, minimum: 0 }
+        errorPacketsPerSecond: { type: number, format: double, minimum: 0 }
+        dropRatio: { type: number, format: double, minimum: 0, maximum: 1 }
+        firstObservedAt: { type: string, format: date-time }
+        lastObservedAt: { type: string, format: date-time }
+        firingAt: { type: string, format: date-time }
+        healthySince: { type: string, format: date-time }
+        acknowledgedAt: { type: string, format: date-time }
+        acknowledgedBy: { type: string }
+        resolvedAt: { type: string, format: date-time }
+        revision: { type: integer, format: int64, minimum: 1 }
+    AlertWebhookStatus:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+        destination: { type: string, description: Host and optional port only; URL path and signing secret are never exposed. }
+    AlertDelivery:
+      type: object
+      required: [id, eventType, alertId, alertRevision, alert, state, attempts, createdAt]
+      properties:
+        id: { type: string, description: Stable event identifier used by receivers for deduplication. }
+        eventType: { type: string, enum: [alert.firing, alert.updated, alert.acknowledged, alert.resolved] }
+        alertId: { type: string }
+        alertRevision: { type: integer, format: int64, minimum: 1 }
+        alert: { $ref: "#/components/schemas/Alert" }
+        state: { type: string, enum: [pending, retrying, delivered, failed] }
+        attempts: { type: integer, minimum: 0 }
+        responseStatus: { type: integer, minimum: 100, maximum: 599 }
+        lastError: { type: string, maxLength: 512 }
+        createdAt: { type: string, format: date-time }
+        nextAttemptAt: { type: string, format: date-time }
+        lastAttemptAt: { type: string, format: date-time }
+        deliveredAt: { type: string, format: date-time }
+    AuditEvent:
+      type: object
+      required: [id, actorType, actorId, action, targetKind, targetId, outcome, occurredAt]
+      properties:
+        id: { type: string }
+        actorType: { type: string }
+        actorId: { type: string }
+        action: { type: string }
+        targetKind: { type: string }
+        targetId: { type: string }
+        outcome: { type: string }
+        occurredAt: { type: string, format: date-time }
+        details:
+          type: object
+          additionalProperties: { type: string }

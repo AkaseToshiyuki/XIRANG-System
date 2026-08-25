@@ -1,0 +1,32 @@
+[Unit]
+Description=XIRANG control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xirang
+Group=xirang
+SupplementaryGroups=xirang-task
+EnvironmentFile=-/etc/xirang/xirangd.env
+ExecStart=/usr/local/bin/xirangd -listen=0.0.0.0:8899 -web-root=/usr/local/share/xirang/web -data-dir=/var/lib/xirang $XIRANGD_ARGS
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+AmbientCapabilities=CAP_CHOWN CAP_SETGID CAP_SETUID
+CapabilityBoundingSet=CAP_CHOWN CAP_SETGID CAP_SETUID
+Delegate=cpu memory pids
+DelegateSubgroup=xirang-control
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/xirang
+LockPersonality=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

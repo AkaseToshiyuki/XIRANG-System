@@ -1,0 +1,149 @@
+# 部署 XIRANG
+
+[English](DEPLOYMENT.md) | [简体中文](DEPLOYMENT.zh-CN.md)
+
+适用于 XIRANG **1.0.1**。
+
+本指南使用预构建原生包部署控制节点或被控节点，不需要容器运行时。
+
+## 支持范围
+
+- CPU 架构：Linux AMD64、ARM64
+- 服务管理：systemd、OpenRC
+- 软件源：apt、dnf、yum、zypper、pacman、apk、xbps、Portage
+- 默认网页与管理 API：TCP `8899`
+- 控制节点的 Agent 通信：TCP `8444`
+- 等待网页扫描接入的临时端口：TCP `8844`
+
+请先按实际网络范围配置防火墙。不要将 `8444` 或 `8844` 暴露到不受信任的
+网络。
+
+## 一键安装
+
+```bash
+git clone https://github.com/AkaseToshiyuki/XIRANG-System.git
+cd XIRANG
+./install.sh
+```
+
+安装器会：
+
+1. 检查 Linux 架构和服务管理器。
+2. 仅在缺少系统工具时调用软件包管理器安装依赖。
+3. 通过标准 `sudo` 提示请求系统安装权限。
+4. 从 GitHub Release 下载与本机架构匹配的包。
+5. 使用 Release 中的 `SHA256SUMS` 校验包。
+6. 启用已有 NTP 客户端，或安装 Chrony，并确认时间已经同步。
+7. 安装服务并进入控制节点或被控节点初始化向导。
+
+脚本不会读取、保存或上传 sudo 密码。密码只由本机 `sudo` 程序处理。
+
+mTLS 证书有效期、OIDC 会话、遥测排序和用量核算要求主机具有可靠的系统时间。
+普通 NTP 已经足够，不强制要求 PTP。在有意离线的暂存环境中，可使用
+`--allow-unsynchronized-clock` 带警告继续，但必须在节点接入前完成时间同步。
+`--skip-dependencies` 不会静默绕过时间检查。
+
+## 选择版本或本地包
+
+安装指定 Release：
+
+```bash
+./install.sh --version 1.0.1
+```
+
+安装已下载的包时，安装器会读取同目录下的 `SHA256SUMS`：
+
+```bash
+./install.sh --archive ~/Downloads/xirang-1.0.1-linux-amd64.tar.gz
+```
+
+如果没有校验文件，必须显式提供可信的 SHA-256：
+
+```bash
+./install.sh \
+  --archive ~/Downloads/xirang-1.0.1-linux-amd64.tar.gz \
+  --sha256 EXPECTED_SHA256
+```
+
+## 初始化控制节点
+
+在向导中选择 `controller`，输入其他节点可访问的控制节点 IP。安装器会启动
+控制服务、注册本机 Agent，并显示网页地址。
+
+打开 `https://控制节点IP:8899`，根据页面提示创建首位管理员。初始管理员
+Token 位于控制节点 `/var/lib/xirang/admin.token`，文件权限仅允许服务账户读取；
+后续使用网页账户和受限 API Token。
+
+## 初始化被控节点
+
+在向导中选择 `node`，然后选择一种方式：
+
+- `direct`：输入控制节点 IP 和管理员生成的入群 Token，立即接入。
+- `wait`：Agent 在 `8844` 端口等待；管理员在网页的节点发现界面输入该节点
+  IP，核对身份并输入安装程序打印的一次性配对码后批准接入。如果安装终端已经
+  关闭，可在该节点的 `xirang-agent` 服务日志中查看配对码。
+
+接入后 Agent 会汇报硬件与网卡信息，并探测与已知节点之间的可用链路。
+
+## 账户与服务身份
+
+XIRANG 网页账户是控制平面中的虚拟身份。注册或批准账户不会在任何节点创建
+Linux 登录用户。管理员可在“身份管理”中为之后注册的新账户选择默认用户组，
+也可以明确不设置默认组。
+
+原生安装包只创建不可登录的服务身份。管理员网页终端以 `xirang-operator`
+运行，不具备 root 或 sudo 权限。原生任务默认从 `200000-265535` 分配只在任务
+活动期间使用的临时数字 UID，不写入 `/etc/passwd`。可使用
+`--executor-task-uid-min` 与 `--executor-task-uid-max` 调整范围，但必须避开本机、
+LDAP 和 NFS 已使用的身份范围。
+
+Agent 本身仍是特权的结构化代理，因为 cgroup、设备、挂载和硬件遥测需要主机
+权限；这些权限不会传递给网页终端或任务可执行文件。
+
+## 共享路径服务权限
+
+在 systemd 主机上，XIRANG 只允许服务写入明确登记的共享路径，不再把整个
+`/srv`、`/shared` 或 `/mnt` 设为可写。特权挂载辅助程序在
+`/etc/xirang/shared-write-paths.d` 保存白名单，并在共享空间挂载或解除时更新服务
+drop-in。导出源目录操作始终限制在特权辅助程序内；升级时会自动导入带标记的
+`/etc/fstab` 挂载条目。
+
+默认 `/srv/xirang/XirangShare` 会在首次启动前得到授权。增加或解除其他共享
+路径后，应在维护窗口重启相关服务，使新的 systemd 挂载命名空间策略生效；
+重启 Agent 前应先排空正在运行的任务。
+
+共享空间管理还要求把控制节点的 SSH 公钥授权给每个参与节点上配置的管理用户。
+该用户的免密 sudo 应只允许 `xirang-agent mount-helper`；如果不能接受首次连接
+信任，应预先填充控制节点的 known-hosts 文件。
+
+## 服务检查
+
+systemd：
+
+```bash
+sudo systemctl status xirangd
+sudo systemctl status xirang-agent
+sudo journalctl -u xirangd -u xirang-agent --since today
+```
+
+OpenRC：
+
+```bash
+sudo rc-service xirangd status
+sudo rc-service xirang-agent status
+```
+
+只有控制节点需要运行 `xirangd`；被控节点只需要运行 `xirang-agent`。
+
+## 常见问题
+
+- **无法下载 Release**：检查到 GitHub Releases 的网络访问后重试。
+- **没有匹配的资产**：确认 Release 同时包含
+  `xirang-<版本>-linux-<amd64|arm64>.tar.gz` 和 `SHA256SUMS`。
+- **网页无法访问**：检查 `xirangd` 状态、防火墙和输入的控制节点 IP。
+- **节点无法接入**：检查 `8444`/`8844` 端口、系统时间和证书指纹。
+- **时间同步失败**：检查 DNS、到 NTP 时间源的 UDP `123`，然后查看
+  `timedatectl status` 或 `chronyc tracking`。绕过选项只用于离线暂存，不能作为
+  集群的长期配置。
+- **GPU 信息缺失**：先安装厂商驱动与管理工具，例如 NVIDIA 驱动提供的
+  `nvidia-smi`；XIRANG 不会安装或替换 GPU 内核驱动。

@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+architecture=$(uname -m)
+case "${architecture}" in
+    aarch64|arm64) ;;
+    *) echo "expected ARM64, received ${architecture}" >&2; exit 1 ;;
+esac
+
+echo "XIRANG ARM64 node acceptance"
+echo "architecture=${architecture}"
+echo "kernel=$(uname -sr)"
+echo "logical_cpus=$(getconf _NPROCESSORS_ONLN)"
+echo "page_size=$(getconf PAGESIZE)"
+
+if command -v lscpu >/dev/null 2>&1; then
+    LC_ALL=C lscpu | grep -E '^(Architecture|CPU\\(s\\)|Model name|NUMA node\\(s\\)|Flags|Byte Order):' || true
+fi
+
+memory_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+if [ -z "${memory_kib}" ] || [ "${memory_kib}" -le 0 ]; then
+    echo "unable to read total memory" >&2
+    exit 1
+fi
+echo "memory_kib=${memory_kib}"
+
+feature_line=$(awk -F: '/^(Features|flags)[[:space:]]*:/ { print $2; exit }' /proc/cpuinfo)
+echo "cpu_features=${feature_line:-unavailable}"
+
+checksum=$(awk 'BEGIN {
+    value = 1
+    for (i = 1; i <= 5000000; i++) value = (value * 1664525 + 1013904223) % 2147483647
+    printf "%d", value
+}')
+echo "integer_probe=${checksum}"
+
+probe=.xirang-arm64-write-test
+printf 'arm64 acceptance\n' >"${probe}"
+grep -q 'arm64 acceptance' "${probe}"
+rm -f "${probe}"
+echo "ARM64 node acceptance passed"

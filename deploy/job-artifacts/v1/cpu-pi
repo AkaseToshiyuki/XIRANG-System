@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+workers=${1:-4}
+terms_per_worker=${2:-2500000}
+
+case "${workers}:${terms_per_worker}" in
+    *[!0-9:]*|:*|*:) echo "usage: cpu-pi [workers] [terms-per-worker]" >&2; exit 2 ;;
+esac
+if [ "${workers}" -lt 1 ] || [ "${workers}" -gt 256 ] || [ "${terms_per_worker}" -lt 1 ]; then
+    echo "workers must be 1..256 and terms-per-worker must be positive" >&2
+    exit 2
+fi
+
+result_dir=.xirang-pi-results
+rm -rf "${result_dir}"
+mkdir "${result_dir}"
+trap 'rm -rf "${result_dir}"' EXIT INT TERM
+
+echo "Computing pi with ${workers} workers and ${terms_per_worker} terms per worker"
+worker=0
+while [ "${worker}" -lt "${workers}" ]; do
+    awk -v worker="${worker}" -v workers="${workers}" -v terms="${terms_per_worker}" '
+        BEGIN {
+            sum = 0.0
+            for (n = 0; n < terms; n++) {
+                k = n * workers + worker
+                sign = (k % 2 == 0) ? 1.0 : -1.0
+                sum += sign / (2.0 * k + 1.0)
+            }
+            printf "%.17g\n", sum
+        }
+    ' >"${result_dir}/${worker}" &
+    worker=$((worker + 1))
+done
+wait
+
+awk '
+    { sum += $1 }
+    END {
+        pi = 4.0 * sum
+        reference = 3.141592653589793
+        error = pi > reference ? pi - reference : reference - pi
+        printf "pi=%.15f\nabsolute_error=%.12g\n", pi, error
+        if (error > 0.000001) exit 1
+    }
+' "${result_dir}"/*
+echo "CPU pi calculation passed"

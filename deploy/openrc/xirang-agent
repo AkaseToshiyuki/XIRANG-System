@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+
+name="XIRANG node agent"
+command="/usr/local/bin/xirang-agent"
+if [ -r /etc/xirang/xirang-agent.env ]; then
+	. /etc/xirang/xirang-agent.env
+fi
+command_args="run --state-dir=/var/lib/xirang-agent --executor-task-user=xirang-task --executor-task-dir=/var/lib/xirang-tasks --executor-cgroup-root=/sys/fs/cgroup/xirang-agent --terminal-user=xirang-operator ${XIRANG_AGENT_ARGS:-}"
+command_background="yes"
+pidfile="/run/xirang-agent.pid"
+output_log="/var/log/xirang-agent.log"
+error_log="/var/log/xirang-agent.err"
+
+depend() {
+    need net
+    after xirangd
+}
+
+start_pre() {
+	checkpath --directory --owner root:root --mode 0700 /var/lib/xirang-agent
+	checkpath --directory --owner root:root --mode 0711 /var/lib/xirang-tasks
+	checkpath --directory --owner xirang-operator --mode 0700 /var/lib/xirang-operator
+}

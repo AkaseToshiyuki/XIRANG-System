@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "nvidia-smi is unavailable" >&2
+    exit 2
+fi
+if ! command -v nvcc >/dev/null 2>&1; then
+    echo "nvcc is unavailable; install the CUDA toolkit on this node" >&2
+    exit 2
+fi
+
+echo "NVIDIA devices detected on node"
+nvidia-smi --query-gpu=index,name,compute_cap,driver_version --format=csv,noheader
+echo "XIRANG assigned CUDA device indexes: ${CUDA_VISIBLE_DEVICES:-all}"
+
+source_file=xirang_cuda_smoke.cu
+binary=xirang_cuda_smoke
+temporary_dir=.xirang-cuda-tmp
+rm -rf "${temporary_dir}"
+mkdir "${temporary_dir}"
+export TMPDIR="$(pwd -P)/${temporary_dir}"
+trap 'rm -rf "${temporary_dir}"; rm -f "${source_file}" "${binary}"' EXIT INT TERM
+
+cat >"${source_file}" <<'CUDA'
+#include <cuda_runtime.h>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+
+#define CUDA_OK(call) do { \
+    cudaError_t error = (call); \
+    if (error != cudaSuccess) { \
+        std::fprintf(stderr, "%s failed: %s\n", #call, cudaGetErrorString(error)); \
+        return 1; \
+    } \
+} while (0)
+
+__global__ void vector_add(const float *left, const float *right, float *output, int count) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < count) output[index] = left[index] + right[index];
+}
+
+int main() {
+    int device_count = 0;
+    CUDA_OK(cudaGetDeviceCount(&device_count));
+    if (device_count < 1) {
+        std::fprintf(stderr, "CUDA reported no visible devices\n");
+        return 1;
+    }
+    cudaDeviceProp properties{};
+    CUDA_OK(cudaGetDeviceProperties(&properties, 0));
+    std::printf("device=%s capability=%d.%d\n", properties.name, properties.major, properties.minor);
+
+    constexpr int count = 1 << 20;
+    const size_t bytes = count * sizeof(float);
+    std::vector<float> left(count, 1.25f), right(count, 2.75f), output(count);
+    float *device_left = nullptr, *device_right = nullptr, *device_output = nullptr;
+    CUDA_OK(cudaMalloc(&device_left, bytes));
+    CUDA_OK(cudaMalloc(&device_right, bytes));
+    CUDA_OK(cudaMalloc(&device_output, bytes));
+    CUDA_OK(cudaMemcpy(device_left, left.data(), bytes, cudaMemcpyHostToDevice));
+    CUDA_OK(cudaMemcpy(device_right, right.data(), bytes, cudaMemcpyHostToDevice));
+    vector_add<<<(count + 255) / 256, 256>>>(device_left, device_right, device_output, count);
+    CUDA_OK(cudaGetLastError());
+    CUDA_OK(cudaDeviceSynchronize());
+    CUDA_OK(cudaMemcpy(output.data(), device_output, bytes, cudaMemcpyDeviceToHost));
+    CUDA_OK(cudaFree(device_left));
+    CUDA_OK(cudaFree(device_right));
+    CUDA_OK(cudaFree(device_output));
+    for (float value : output) {
+        if (std::fabs(value - 4.0f) > 1e-6f) {
+            std::fprintf(stderr, "vector result verification failed\n");
+            return 1;
+        }
+    }
+    std::printf("CUDA vector addition passed: %d elements\n", count);
+    return 0;
+}
+CUDA
+
+nvcc -O2 -std=c++14 "${source_file}" -o "${binary}"
+./"${binary}"

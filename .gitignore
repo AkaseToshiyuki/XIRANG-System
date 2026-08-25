@@ -1,0 +1,29 @@
+# Go
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Web
+/web/node_modules/
+/web/dist/
+/web/.vite/
+/web/test-results/
+/web/playwright-report/
+*.tsbuildinfo
+
+# Runtime data
+/.data/
+*.log
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Local environment
+.env
+.env.*
+!.env.example

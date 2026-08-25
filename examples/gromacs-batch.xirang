@@ -1,0 +1,18 @@
+XIRANG 1
+project = molecular-dynamics
+queue = default
+application = gromacs
+
+cpu = 8
+memory = 16G
+device.nvidia.com/gpu = 1
+timeout = 7d
+env.OMP_NUM_THREADS = 8
+
+arg = mdrun
+arg = -deffnm
+arg = /shared/gromacs/results/run
+batch_space = share_default
+batch_file = gromacs/inputs/tpr-manifest.txt
+batch_arg = -s
+batch_nodes = 4

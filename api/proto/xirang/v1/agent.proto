@@ -1,0 +1,504 @@
+syntax = "proto3";
+
+package xirang.v1;
+
+option go_package = "github.com/xirang-grid/xirang/gen/xirang/v1;xirangv1";
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// AgentControl is initiated by the node Agent and carries negotiated heartbeats,
+// commands, acknowledgements, inventory, resource observations, and topology.
+service AgentControl {
+  rpc Connect(stream AgentMessage) returns (stream ControlMessage);
+}
+
+message AgentMessage {
+  string message_id = 1;
+  google.protobuf.Timestamp sent_at = 2;
+
+  oneof payload {
+    AgentHello hello = 10;
+    Heartbeat heartbeat = 11;
+    InventorySnapshot inventory = 12;
+    ResourceObservation observation = 13;
+    AssignmentUpdate assignment_update = 14;
+    CommandAcknowledgement acknowledgement = 15;
+    TopologyObservation topology = 16;
+    FlowObservation flows = 17;
+    AssignmentLogSnapshot assignment_log = 18;
+    AssignmentUsageSnapshot assignment_usage = 19;
+    TerminalEvent terminal_event = 20;
+    NativeBuildWorker native_build_worker = 21;
+    NativeBuildUpdate native_build_update = 22;
+  }
+}
+
+message ControlMessage {
+  string message_id = 1;
+  google.protobuf.Timestamp sent_at = 2;
+
+  oneof payload {
+    HelloAccepted hello_accepted = 10;
+    RunAssignment run_assignment = 11;
+    CancelAssignment cancel_assignment = 12;
+    SetNodeMode set_node_mode = 13;
+    RotateCertificate rotate_certificate = 14;
+    SetTelemetryInterval set_telemetry_interval = 15;
+    UpdateNetworkProbeTargets update_network_probe_targets = 16;
+    SetAssignmentStoragePolicy set_assignment_storage_policy = 17;
+    ReleaseAssignment release_assignment = 18;
+    OpenTerminal open_terminal = 20;
+    TerminalInput terminal_input = 21;
+    ResizeTerminal resize_terminal = 22;
+    CloseTerminal close_terminal = 23;
+    RunNativeBuild run_native_build = 24;
+    CancelNativeBuild cancel_native_build = 25;
+    SetManagementPanel set_management_panel = 26;
+  }
+}
+
+message AgentHello {
+  string node_id = 1;
+  string agent_version = 2;
+  string protocol_version = 3;
+  string os = 4;
+  string architecture = 5;
+  repeated string capabilities = 6;
+}
+
+message HelloAccepted {
+  string node_id = 1;
+  google.protobuf.Duration heartbeat_interval = 2;
+  repeated string negotiated_capabilities = 3;
+  google.protobuf.Duration telemetry_interval = 4;
+  repeated NetworkProbeTarget network_probe_targets = 5;
+}
+
+message SetTelemetryInterval {
+  google.protobuf.Duration interval = 1;
+}
+
+message Heartbeat {
+  uint64 sequence = 1;
+  NodeMode mode = 2;
+  uint32 running_assignments = 3;
+  bool management_panel_enabled = 4;
+  string management_panel_status = 5;
+}
+
+message InventorySnapshot {
+  string hostname = 1;
+  string distribution = 2;
+  string kernel_version = 3;
+  string architecture = 4;
+  uint32 logical_cpu_count = 5;
+  uint64 memory_bytes = 6;
+  repeated NetworkInterface network_interfaces = 7;
+  repeated Device devices = 8;
+  map<string, string> labels = 9;
+  repeated NUMANode numa_nodes = 10;
+  string cpu_model = 11;
+  repeated string cpu_features = 12;
+  double cpu_benchmark_score = 13;
+  double compute_weight = 14;
+}
+
+message NUMANode {
+  uint32 id = 1;
+  string cpus = 2;
+  uint64 memory_bytes = 3;
+}
+
+message NetworkInterface {
+  string name = 1;
+  string mac_address = 2;
+  repeated string addresses = 3;
+  uint64 speed_bits_per_second = 4;
+  uint32 mtu = 5;
+}
+
+message Device {
+  string resource_name = 1;
+  string vendor = 2;
+  string model = 3;
+  string device_id = 4;
+  map<string, string> attributes = 5;
+}
+
+message ResourceObservation {
+  int64 used_milli_cpu = 1;
+  uint64 used_memory_bytes = 2;
+  uint64 received_bytes = 3;
+  uint64 transmitted_bytes = 4;
+  map<string, int64> used_devices = 5;
+  repeated NetworkInterfaceCounters interface_counters = 6;
+  double cpu_temperature_c = 7;
+  double gpu_temperature_c = 8;
+  double gpu_utilization_percent = 9;
+  repeated AcceleratorMetric accelerator_metrics = 10;
+  bool gpu_utilization_available = 11;
+  bool gpu_temperature_available = 12;
+  bool cpu_temperature_available = 13;
+  string cpu_temperature_source = 14;
+  string cpu_temperature_confidence = 15;
+}
+
+message AcceleratorMetric {
+  string id = 1;
+  string vendor = 2;
+  double utilization_percent = 3;
+  double temperature_c = 4;
+  uint64 memory_used_bytes = 5;
+  uint64 memory_total_bytes = 6;
+  bool utilization_available = 7;
+  bool temperature_available = 8;
+}
+
+message NetworkInterfaceCounters {
+  string name = 1;
+  uint64 received_bytes = 2;
+  uint64 transmitted_bytes = 3;
+  uint64 received_packets = 4;
+  uint64 transmitted_packets = 5;
+  uint64 receive_errors = 6;
+  uint64 transmit_errors = 7;
+  uint64 receive_dropped = 8;
+  uint64 transmit_dropped = 9;
+  bool packet_counters_supported = 10;
+}
+
+message TopologyObservation {
+  repeated Route routes = 1;
+  repeated Neighbor neighbors = 2;
+  repeated LLDPNeighbor lldp_neighbors = 3;
+  repeated NetworkPathProbe path_probes = 4;
+}
+
+message Route {
+  string destination = 1;
+  string gateway = 2;
+  string interface_name = 3;
+  uint32 metric = 4;
+  uint32 table = 5;
+  string family = 6;
+}
+
+message Neighbor {
+  string address = 1;
+  string mac_address = 2;
+  string interface_name = 3;
+  string state = 4;
+  bool router = 5;
+}
+
+message LLDPNeighbor {
+  string local_interface = 1;
+  string chassis_id = 2;
+  string port_id = 3;
+  string system_name = 4;
+  string system_description = 5;
+  repeated string management_addresses = 6;
+}
+
+message ResourceRequest {
+  int64 milli_cpu = 1;
+  uint64 memory_bytes = 2;
+  uint64 ephemeral_storage_bytes = 3;
+  map<string, int64> devices = 4;
+  string cpu_set = 5;
+  string numa_nodes = 6;
+}
+
+message RunAssignment {
+  reserved 4, 5;
+  reserved "image", "command";
+  string assignment_id = 1;
+  string job_id = 2;
+  uint32 attempt = 3;
+  map<string, string> environment = 6;
+  ResourceRequest resources = 7;
+  google.protobuf.Duration timeout = 8;
+  NativeArtifact artifact = 9;
+  repeated string arguments = 10;
+  string working_directory = 11;
+  string user = 12;
+  string group = 13;
+  string owner_id = 14;
+  string owner_group_id = 15;
+  uint64 storage_quota_bytes = 16;
+  uint64 storage_min_free_bytes = 17;
+  string allocation_id = 18;
+  uint32 node_rank = 19;
+  uint32 rank_start = 20;
+  uint32 rank_count = 21;
+  uint32 world_size = 22;
+  string launcher = 23;
+  repeated AllocationHost hosts = 24;
+  bool start_barrier = 25;
+  string network_interface = 26;
+  string primary_address = 27;
+}
+
+message AllocationHost {
+  string node_id = 1;
+  string hostname = 2;
+  string address = 3;
+  string network_interface = 4;
+  uint32 slots = 5;
+}
+
+// ReleaseAssignment opens the local start barrier after every gang member has
+// reported READY. It is a separate idempotent command so controller restarts
+// cannot accidentally start only part of an allocation.
+message ReleaseAssignment {
+  string assignment_id = 1;
+  string allocation_id = 2;
+  string job_id = 3;
+  uint32 attempt = 4;
+}
+
+message NativeArtifact {
+  string uri = 1;
+  string sha256 = 2;
+  string architecture = 3;
+  string abi = 4;
+  string entrypoint = 5;
+  bytes signature = 6;
+}
+
+message CancelAssignment {
+  string assignment_id = 1;
+  string reason = 2;
+  google.protobuf.Duration grace_period = 3;
+}
+
+message SetAssignmentStoragePolicy {
+  string assignment_id = 1;
+  uint64 quota_bytes = 2;
+  uint64 min_free_bytes = 3;
+}
+
+message SetNodeMode {
+  NodeMode mode = 1;
+  string reason = 2;
+}
+
+// Terminal commands are ephemeral and are accepted only on the authenticated
+// Agent control stream. They never contain credentials or SSH key material.
+message OpenTerminal {
+  string session_id = 1;
+  uint32 columns = 2;
+  uint32 rows = 3;
+}
+
+message TerminalInput {
+  string session_id = 1;
+  bytes data = 2;
+}
+
+message ResizeTerminal {
+  string session_id = 1;
+  uint32 columns = 2;
+  uint32 rows = 3;
+}
+
+message CloseTerminal {
+  string session_id = 1;
+  string reason = 2;
+}
+
+// Native builds use a checksum-pinned source tree on an administrator-managed
+// shared filesystem. Source bytes and artifacts never transit the control
+// stream; the Agent only receives a bounded recipe and an allowlisted path.
+message NativeBuildWorker {
+  string architecture = 1;
+  repeated string toolchains = 2;
+  string isolation = 3;
+  bool ready = 4;
+  repeated ToolchainCapability toolchain_capabilities = 5;
+  bool supports_cancellation = 6;
+}
+
+message ToolchainCapability {
+  string name = 1;
+  string version = 2;
+  repeated string target_architectures = 3;
+  repeated string executables = 4;
+}
+
+message RunNativeBuild {
+  string build_id = 1;
+  string workspace = 2;
+  repeated string command = 3;
+  string output_path = 4;
+  string toolchain = 5;
+  map<string, string> environment = 6;
+  int64 milli_cpu = 7;
+  int64 memory_bytes = 8;
+  google.protobuf.Duration timeout = 9;
+  string architecture = 10;
+  string workspace_sha256 = 11;
+  repeated NativeBuildStep steps = 12;
+}
+
+message CancelNativeBuild {
+  string build_id = 1;
+  string reason = 2;
+}
+
+message NativeBuildUpdate {
+  string build_id = 1;
+  NativeBuildState state = 2;
+  string log_tail = 3;
+  string failure = 4;
+  google.protobuf.Timestamp occurred_at = 5;
+  string output_sha256 = 6;
+}
+
+enum NativeBuildState {
+  NATIVE_BUILD_STATE_UNSPECIFIED = 0;
+  NATIVE_BUILD_STATE_RUNNING = 1;
+  NATIVE_BUILD_STATE_SUCCEEDED = 2;
+  NATIVE_BUILD_STATE_FAILED = 3;
+  NATIVE_BUILD_STATE_CANCELED = 4;
+}
+
+message TerminalEvent {
+  string session_id = 1;
+  TerminalEventType type = 2;
+  bytes data = 3;
+  string message = 4;
+  int32 exit_code = 5;
+  google.protobuf.Timestamp occurred_at = 6;
+}
+
+enum TerminalEventType {
+  TERMINAL_EVENT_TYPE_UNSPECIFIED = 0;
+  TERMINAL_EVENT_TYPE_OPENED = 1;
+  TERMINAL_EVENT_TYPE_OUTPUT = 2;
+  TERMINAL_EVENT_TYPE_CLOSED = 3;
+  TERMINAL_EVENT_TYPE_ERROR = 4;
+}
+
+message RotateCertificate {
+  string rotation_id = 1;
+  bytes certificate_chain_pem = 2;
+}
+
+message CommandAcknowledgement {
+  string command_message_id = 1;
+  bool accepted = 2;
+  string reason = 3;
+}
+
+message AssignmentUpdate {
+  string assignment_id = 1;
+  uint32 attempt = 2;
+  AssignmentState state = 3;
+  int32 exit_code = 4;
+  string reason = 5;
+  google.protobuf.Timestamp occurred_at = 6;
+  bytes stdout_tail = 7;
+  bytes stderr_tail = 8;
+  bool logs_truncated = 9;
+}
+
+message AssignmentLogSnapshot {
+  string assignment_id = 1;
+  uint32 attempt = 2;
+  bytes stdout_tail = 3;
+  bytes stderr_tail = 4;
+  bool logs_truncated = 5;
+  google.protobuf.Timestamp observed_at = 6;
+}
+
+// AssignmentUsageSnapshot is cumulative for one attempt. Cumulative counters
+// make controller-side accounting idempotent across reconnects and retries.
+message AssignmentUsageSnapshot {
+  string assignment_id = 1;
+  uint32 attempt = 2;
+  uint64 cpu_usage_micros = 3;
+  uint64 memory_byte_seconds = 4;
+  uint64 gpu_device_seconds = 5;
+  uint64 wall_time_millis = 6;
+  uint64 workspace_bytes = 7;
+  uint64 filesystem_available_bytes = 8;
+  uint64 filesystem_total_bytes = 9;
+  google.protobuf.Timestamp observed_at = 10;
+}
+
+enum NodeMode {
+  NODE_MODE_UNSPECIFIED = 0;
+  NODE_MODE_READY = 1;
+  NODE_MODE_CORDONED = 2;
+  NODE_MODE_DRAINING = 3;
+}
+
+enum AssignmentState {
+  ASSIGNMENT_STATE_UNSPECIFIED = 0;
+  ASSIGNMENT_STATE_ACCEPTED = 1;
+  ASSIGNMENT_STATE_PULLING = 2;
+  ASSIGNMENT_STATE_RUNNING = 3;
+  ASSIGNMENT_STATE_SUCCEEDED = 4;
+  ASSIGNMENT_STATE_FAILED = 5;
+  ASSIGNMENT_STATE_CANCELED = 6;
+  ASSIGNMENT_STATE_SUSPENDED = 7;
+  ASSIGNMENT_STATE_READY = 8;
+}
+
+// FlowObservation contains bounded, payload-free deltas collected by an
+// explicitly enabled eBPF observer. It never includes process or socket IDs.
+message FlowObservation {
+  repeated NetworkFlow flows = 1;
+  bool truncated = 2;
+  uint32 map_entries = 3;
+  google.protobuf.Duration interval = 4;
+}
+
+message NetworkFlow {
+  string family = 1;
+  string protocol = 2;
+  string source_address = 3;
+  uint32 source_port = 4;
+  string destination_address = 5;
+  uint32 destination_port = 6;
+  string direction = 7;
+  uint64 packets = 8;
+  uint64 bytes = 9;
+}
+
+message NetworkProbeTarget {
+  string node_id = 1;
+  string interface_name = 2;
+  string address = 3;
+  uint64 speed_bits_per_second = 4;
+}
+
+message NetworkPathProbe {
+  string target_node_id = 1;
+  string source_interface = 2;
+  string source_address = 3;
+  string target_interface = 4;
+  string target_address = 5;
+  uint64 source_speed_bits_per_second = 6;
+  uint64 target_speed_bits_per_second = 7;
+  int64 latency_micros = 8;
+  bool reachable = 9;
+  string failure = 10;
+}
+
+message UpdateNetworkProbeTargets {
+  repeated NetworkProbeTarget targets = 1;
+}
+
+message NativeBuildStep {
+  repeated string arguments = 1;
+}
+
+// SetManagementPanel controls the local HTTPS relay exposed by a management
+// node. The Agent always derives its upstream from the enrolled controller
+// identity; the command cannot redirect the relay to an arbitrary endpoint.
+message SetManagementPanel {
+  bool enabled = 1;
+}

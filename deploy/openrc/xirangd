@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+
+name="XIRANG control plane"
+command="/usr/local/bin/xirangd"
+if [ -r /etc/xirang/xirangd.env ]; then
+	. /etc/xirang/xirangd.env
+fi
+command_args="-listen=0.0.0.0:8899 -web-root=/usr/local/share/xirang/web -data-dir=/var/lib/xirang ${XIRANGD_ARGS:-}"
+command_user="xirang:xirang"
+command_background="yes"
+pidfile="/run/xirangd.pid"
+output_log="/var/log/xirangd.log"
+error_log="/var/log/xirangd.err"
+
+depend() {
+    need net
+}
+
+start_pre() {
+    checkpath --directory --owner xirang:xirang --mode 0750 /var/lib/xirang
+}
