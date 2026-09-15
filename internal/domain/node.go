@@ -22,6 +22,7 @@ const (
 	NodeStatusUnreachable     NodeStatus = "unreachable"
 	NodeStatusOffline         NodeStatus = "offline"
 	NodeStatusRejected        NodeStatus = "rejected"
+	NodeStatusRemoved         NodeStatus = "removed"
 )
 
 // Taint prevents scheduling unless a workload declares a matching toleration.
@@ -52,6 +53,7 @@ type Node struct {
 	Architecture                 string                      `json:"architecture"`
 	Distribution                 string                      `json:"distribution,omitempty"`
 	KernelVersion                string                      `json:"kernelVersion,omitempty"`
+	RuntimeFacts                 map[string]string           `json:"runtimeFacts,omitempty"`
 	AgentVersion                 string                      `json:"agentVersion,omitempty"`
 	Capabilities                 []string                    `json:"capabilities,omitempty"`
 	CPUModel                     string                      `json:"cpuModel,omitempty"`
@@ -66,6 +68,7 @@ type Node struct {
 	PendingCertificateCommandID  string                      `json:"pendingCertificateCommandId,omitempty"`
 	PendingCertificateRotationID string                      `json:"pendingCertificateRotationId,omitempty"`
 	CertificateRevokedAt         *time.Time                  `json:"certificateRevokedAt,omitempty"`
+	RemovedAt                    *time.Time                  `json:"removedAt,omitempty"`
 	Labels                       map[string]string           `json:"labels,omitempty"`
 	Roles                        []NodeRole                  `json:"roles,omitempty"`
 	ManagementAddress            string                      `json:"managementAddress,omitempty"`

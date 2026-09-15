@@ -20,6 +20,7 @@ import (
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
 	"github.com/xirang-grid/xirang/internal/domain"
+	"github.com/xirang-grid/xirang/internal/runtimecompat"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -47,6 +48,11 @@ type Repository interface {
 	CreateJob(context.Context, domain.Job) error
 	GetJob(context.Context, string) (domain.Job, error)
 	ListJobs(context.Context, int) ([]domain.Job, error)
+	ListAllJobs(context.Context) ([]domain.Job, error)
+	ListActiveJobs(context.Context) ([]domain.Job, error)
+	ListJobsFinishedSince(context.Context, time.Time) ([]domain.Job, error)
+	ListJobsForOwner(context.Context, string, int) ([]domain.Job, error)
+	ListActiveJobsForOwner(context.Context, string) ([]domain.Job, error)
 	AssignJob(context.Context, string, string, string, time.Time) (domain.Job, error)
 	RollbackAssignment(context.Context, string, string, string, time.Time) (domain.Job, error)
 	RejectAssignment(context.Context, string, string, string, time.Time) (domain.Job, error)
@@ -428,6 +434,27 @@ func (coordinator *Coordinator) List(ctx context.Context, limit int) ([]domain.J
 	return coordinator.repository.ListJobs(ctx, limit)
 }
 
+// ListForOwner returns a bounded page of one owner's jobs. Callers that must
+// not expose other owners' work use this instead of filtering the result of
+// List, which would silently shrink the page to nothing on a busy cluster.
+func (coordinator *Coordinator) ListForOwner(ctx context.Context, ownerID string, limit int) ([]domain.Job, error) {
+	if limit < 1 || limit > 10_000 {
+		return nil, ErrInvalidJob
+	}
+	return coordinator.repository.ListJobsForOwner(ctx, ownerID, limit)
+}
+
+// ListActiveForOwner returns every non-terminal job an owner currently holds,
+// which is what quota accounting has to see in full to stay correct.
+func (coordinator *Coordinator) ListActiveForOwner(ctx context.Context, ownerID string) ([]domain.Job, error) {
+	return coordinator.repository.ListActiveJobsForOwner(ctx, ownerID)
+}
+
+// ListActive returns every non-terminal job in the cluster.
+func (coordinator *Coordinator) ListActive(ctx context.Context) ([]domain.Job, error) {
+	return coordinator.repository.ListActiveJobs(ctx)
+}
+
 func (coordinator *Coordinator) PutQueuePolicy(ctx context.Context, policy domain.QueuePolicy) (domain.QueuePolicy, error) {
 	policy.Name = strings.TrimSpace(policy.Name)
 	if !validText(policy.Name, 128, false) || policy.Weight < 0 || policy.Weight > 1000 || policy.MaxConcurrent < 0 ||
@@ -512,18 +539,6 @@ func (coordinator *Coordinator) Schedule(ctx context.Context) error {
 	if _, err := coordinator.repository.ReconcileOrphanedJobs(ctx, coordinator.now().UTC()); err != nil {
 		return err
 	}
-	jobs, err := coordinator.repository.ListJobs(ctx, 10_000)
-	if err != nil {
-		return err
-	}
-	for _, job := range jobs {
-		if job.Status == domain.JobStatusCanceling && job.AssignmentID != "" && job.NodeID != "" {
-			if err := coordinator.enqueueJobCancellations(job); err != nil {
-				return err
-			}
-			continue
-		}
-	}
 	policies, err := coordinator.repository.ListQueuePolicies(ctx)
 	if err != nil {
 		return err
@@ -532,11 +547,40 @@ func (coordinator *Coordinator) Schedule(ctx context.Context) error {
 	for _, policy := range policies {
 		policyByQueue[policy.Name] = policy
 	}
+	// Scheduling needs the live working set plus the finished jobs that still
+	// carry weight, not the entire history. Fair-share debt decays by half over
+	// each configured half-life, so beyond fairShareHorizon a completed job
+	// contributes less than a thousandth of its original weight and reading it
+	// only costs time that grows with the age of the cluster.
+	jobs, err := coordinator.repository.ListActiveJobs(ctx)
+	if err != nil {
+		return err
+	}
+	recent, err := coordinator.repository.ListJobsFinishedSince(ctx, coordinator.now().UTC().Add(-fairShareHorizon(policies)))
+	if err != nil {
+		return err
+	}
+	jobs = append(jobs, recent...)
+	for _, job := range jobs {
+		if job.Status == domain.JobStatusCanceling && job.AssignmentID != "" && job.NodeID != "" {
+			if err := coordinator.enqueueJobCancellations(job); err != nil {
+				return err
+			}
+			continue
+		}
+	}
 	stats := buildSchedulingStats(jobs, policyByQueue, coordinator.now().UTC())
 	pending := make([]domain.Job, 0)
 	jobsByID := make(map[string]domain.Job, len(jobs))
 	for _, job := range jobs {
 		jobsByID[job.ID] = job
+	}
+	// dependencyState fails a job outright when a prerequisite is missing from
+	// this map, so a prerequisite that finished before the window above has to
+	// be fetched. Dependencies are declared by identifier, which makes this a
+	// bounded set of point reads rather than another scan.
+	if err := coordinator.resolveDeclaredDependencies(ctx, jobs, jobsByID); err != nil {
+		return err
 	}
 	for _, job := range jobs {
 		if job.Status == domain.JobStatusQueued {
@@ -593,9 +637,15 @@ func (coordinator *Coordinator) Schedule(ctx context.Context) error {
 		nodes = reservationEligibleNodes(job, nodes, policyByQueue, coordinator.now().UTC())
 		parallel := job.Task.Parallel.Effective()
 		if parallel.Nodes > 1 {
-			selected, found := selectNodeSetWithTopology(job, nodes, int(parallel.Nodes), liveTopology)
-			if !found {
-				if err := coordinator.recordJobBlock(ctx, job, nodeBlockReason(job, nodes, liveTopology)); err != nil {
+			selection := selectNodeSetWithTopologyDetailed(job, nodes, int(parallel.Nodes), liveTopology, 100_000)
+			if len(selection.nodes) == 0 {
+				reason := nodeBlockReason(job, nodes, liveTopology)
+				if selection.budgetExhausted {
+					reason = blockReason("gang_search_budget", "scheduler", "gang search budget was exhausted before a feasible set was found", map[string]string{
+						"searchStates": strconv.Itoa(selection.visited), "searchLimit": "100000",
+					})
+				}
+				if err := coordinator.recordJobBlock(ctx, job, reason); err != nil {
 					return err
 				}
 				if !policy.Backfill {
@@ -603,10 +653,12 @@ func (coordinator *Coordinator) Schedule(ctx context.Context) error {
 				}
 				continue
 			}
-			allocation, allocationErr := coordinator.newAllocation(job, selected, liveTopology)
+			allocation, allocationErr := coordinator.newAllocation(job, selection.nodes, liveTopology)
 			if allocationErr != nil {
 				return allocationErr
 			}
+			allocation.SelectionOptimal = !selection.budgetExhausted
+			allocation.SelectionSearchStates = selection.visited
 			repository, supported := coordinator.repository.(gangRepository)
 			queue, batchSupported := coordinator.commands.(batchCommandQueue)
 			if !supported || !batchSupported {
@@ -701,6 +753,48 @@ func (coordinator *Coordinator) Schedule(ctx context.Context) error {
 	return nil
 }
 
+// defaultFairShareHalfLife applies to a queue policy that enables historical
+// usage weighting without naming its own half-life.
+const defaultFairShareHalfLife = 7 * 24 * time.Hour
+
+// fairShareHorizon is how far back completed work still measurably influences
+// fair-share ordering: ten half-lives, after which a job's remaining weight is
+// under a thousandth of what it started with.
+func fairShareHorizon(policies []domain.QueuePolicy) time.Duration {
+	halfLife := defaultFairShareHalfLife
+	for _, policy := range policies {
+		if configured := time.Duration(policy.FairShareHalfLifeHours) * time.Hour; configured > halfLife {
+			halfLife = configured
+		}
+	}
+	return 10 * halfLife
+}
+
+// resolveDeclaredDependencies fills in prerequisites that the scheduling window
+// did not already contain. A prerequisite that genuinely no longer exists is
+// left absent so dependencyState can report it.
+func (coordinator *Coordinator) resolveDeclaredDependencies(ctx context.Context, jobs []domain.Job, jobsByID map[string]domain.Job) error {
+	for _, job := range jobs {
+		if job.Status != domain.JobStatusQueued {
+			continue
+		}
+		for _, dependency := range job.Dependencies {
+			if _, known := jobsByID[dependency.JobID]; known {
+				continue
+			}
+			prerequisite, err := coordinator.repository.GetJob(ctx, dependency.JobID)
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			jobsByID[dependency.JobID] = prerequisite
+		}
+	}
+	return nil
+}
+
 func dependencyState(job domain.Job, jobs map[string]domain.Job) (bool, bool, string) {
 	for _, dependency := range job.Dependencies {
 		prerequisite, ok := jobs[dependency.JobID]
@@ -731,7 +825,8 @@ func dependencyState(job domain.Job, jobs map[string]domain.Job) (bool, bool, st
 // provisioning side effect and reports only queues with an explicit budget.
 func (coordinator *Coordinator) Elasticity(ctx context.Context) (domain.ElasticitySnapshot, error) {
 	snapshot := domain.ElasticitySnapshot{GeneratedAt: coordinator.now().UTC(), Recommendations: []domain.ElasticityRecommendation{}}
-	jobs, err := coordinator.repository.ListJobs(ctx, 10_000)
+	// Only queued demand is measured, so the live working set is enough.
+	jobs, err := coordinator.repository.ListActiveJobs(ctx)
 	if err != nil {
 		return snapshot, err
 	}
@@ -829,7 +924,7 @@ func buildSchedulingStats(jobs []domain.Job, policies map[string]domain.QueuePol
 		if job.Status.Terminal() && job.FinishedAt != nil && job.OwnerID != "" && policy.HistoricalUsageWeight > 0 {
 			halfLife := time.Duration(policy.FairShareHalfLifeHours) * time.Hour
 			if halfLife <= 0 {
-				halfLife = 7 * 24 * time.Hour
+				halfLife = defaultFairShareHalfLife
 			}
 			age := now.Sub(*job.FinishedAt)
 			if age < 0 {
@@ -1146,7 +1241,9 @@ func quotaFits(quota, requested domain.ResourceVector) bool {
 // RestoreAssignments reconstructs accepted-but-not-yet-reported Run commands.
 // Replaying the same assignment/attempt is safe because the Agent hashes its spec.
 func (coordinator *Coordinator) RestoreAssignments(ctx context.Context) error {
-	jobs, err := coordinator.repository.ListJobs(ctx, 10_000)
+	// Only work that is still in flight can need replaying, and a finished job
+	// must never have its assignment re-sent.
+	jobs, err := coordinator.repository.ListActiveJobs(ctx)
 	if err != nil {
 		return err
 	}
@@ -1403,7 +1500,9 @@ func (coordinator *Coordinator) reconcileGroupStorage(ctx context.Context, group
 	if groupID == "" {
 		return nil
 	}
-	jobs, err := coordinator.repository.ListJobs(ctx, 10_000)
+	// Finished jobs still count towards the group's workspace total below, so
+	// this needs the full history rather than the live working set.
+	jobs, err := coordinator.repository.ListAllJobs(ctx)
 	if err != nil {
 		return err
 	}
@@ -1520,6 +1619,7 @@ func assignmentCommand(job domain.Job, nodeID string) *xirangv1.ControlMessage {
 			Uri: artifact.URI, Sha256: artifact.SHA256,
 			Architecture: artifact.Architecture, Abi: artifact.ABI,
 			Entrypoint: artifact.Entrypoint, Signature: append([]byte(nil), artifact.Signature...),
+			RuntimeRequirements: cloneStrings(artifact.RuntimeRequirements),
 		},
 	}
 	if job.Task.Timeout > 0 {
@@ -1683,8 +1783,19 @@ type nodeSetScore struct {
 }
 
 func selectNodeSetWithTopology(job domain.Job, nodes []domain.Node, count int, snapshot *domain.TopologySnapshot) ([]domain.Node, bool) {
+	result := selectNodeSetWithTopologyDetailed(job, nodes, count, snapshot, 100_000)
+	return result.nodes, len(result.nodes) == count
+}
+
+type nodeSetSearchResult struct {
+	nodes           []domain.Node
+	visited         int
+	budgetExhausted bool
+}
+
+func selectNodeSetWithTopologyDetailed(job domain.Job, nodes []domain.Node, count int, snapshot *domain.TopologySnapshot, limit int) nodeSetSearchResult {
 	if count < 2 {
-		return nil, false
+		return nodeSetSearchResult{}
 	}
 	candidates := make([]domain.Node, 0, len(nodes))
 	for _, node := range nodes {
@@ -1693,7 +1804,7 @@ func selectNodeSetWithTopology(job domain.Job, nodes []domain.Node, count int, s
 		}
 	}
 	if len(candidates) < count {
-		return nil, false
+		return nodeSetSearchResult{}
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
 	index := buildTopologyPairIndex(snapshot)
@@ -1731,56 +1842,60 @@ func selectNodeSetWithTopology(job domain.Job, nodes []domain.Node, count int, s
 			best, bestScore = append([]domain.Node(nil), selected...), score
 		}
 	}
-	if best == nil {
-		// Greedy expansion is fast and normally yields the best fabric, but a
-		// high-bandwidth dead-end can hide an otherwise feasible clique. Run a
-		// bounded deterministic backtracking pass before leaving the job queued.
-		best = findFeasibleNodeSet(job, candidates, count, index, 100_000)
-		if best == nil {
-			return nil, false
-		}
+	// Greedy expansion supplies an incumbent quickly. Deterministic bounded
+	// backtracking then ranks every visited complete set, so the result is exact
+	// when the budget is not exhausted and explicitly approximate otherwise.
+	search := findBestNodeSet(job, candidates, count, index, limit, best, bestScore)
+	if len(search.nodes) == 0 {
+		return search
 	}
-	sort.Slice(best, func(i, j int) bool { return best[i].ID < best[j].ID })
-	return best, true
+	sort.Slice(search.nodes, func(i, j int) bool { return search.nodes[i].ID < search.nodes[j].ID })
+	return search
 }
 
-func findFeasibleNodeSet(job domain.Job, candidates []domain.Node, count int, pairs topologyPairIndex, limit int) []domain.Node {
+func findBestNodeSet(job domain.Job, candidates []domain.Node, count int, pairs topologyPairIndex, limit int, incumbent []domain.Node, incumbentScore nodeSetScore) nodeSetSearchResult {
 	if count < 1 || len(candidates) < count || limit < 1 {
-		return nil
+		return nodeSetSearchResult{}
 	}
-	visited := 0
+	result := nodeSetSearchResult{nodes: append([]domain.Node(nil), incumbent...)}
+	bestScore := incumbentScore
 	selected := make([]domain.Node, 0, count)
-	var search func(int) bool
-	search = func(start int) bool {
+	var search func(int)
+	search = func(start int) {
 		if len(selected) == count {
-			return true
+			score, feasible := scoreNodeSetIndexed(job, selected, pairs)
+			if feasible && (len(result.nodes) == 0 || betterNodeSetScore(score, bestScore)) {
+				result.nodes, bestScore = append([]domain.Node(nil), selected...), score
+			}
+			return
 		}
 		if len(selected)+len(candidates)-start < count {
-			return false
+			return
 		}
-		for index := start; index < len(candidates) && visited < limit; index++ {
-			visited++
+		for index := start; index < len(candidates); index++ {
+			if result.visited >= limit {
+				result.budgetExhausted = true
+				return
+			}
+			result.visited++
 			selected = append(selected, candidates[index])
 			_, feasible := scoreNodeSetIndexed(job, selected, pairs)
-			if feasible && search(index+1) {
-				return true
+			if feasible {
+				search(index + 1)
 			}
 			selected = selected[:len(selected)-1]
+			if result.budgetExhausted {
+				return
+			}
 		}
-		return false
 	}
-	if !search(0) {
-		return nil
-	}
-	return append([]domain.Node(nil), selected...)
-}
-
-func scoreNodeSet(job domain.Job, nodes []domain.Node, snapshot *domain.TopologySnapshot) (nodeSetScore, bool) {
-	return scoreNodeSetIndexed(job, nodes, buildTopologyPairIndex(snapshot))
+	search(0)
+	return result
 }
 
 func scoreNodeSetIndexed(job domain.Job, nodes []domain.Node, index topologyPairIndex) (nodeSetScore, bool) {
 	score := nodeSetScore{bottleneck: math.MaxInt64}
+	selectedPaths := make(map[string]string, len(nodes))
 	for _, node := range nodes {
 		score.priority += int64(node.ComputePriority)
 		score.pressure += nodePressure(node)
@@ -1807,6 +1922,16 @@ func scoreNodeSetIndexed(job domain.Job, nodes []domain.Node, index topologyPair
 			if pair.health == "healthy" {
 				score.healthyPaths++
 			}
+			if job.Task.Placement.MinimumNetworkBits > 0 && pair.enforcePath {
+				for nodeID, signature := range map[string]string{
+					nodes[left].ID: pair.pathFor(nodes[left].ID), nodes[right].ID: pair.pathFor(nodes[right].ID),
+				} {
+					if signature == "" || selectedPaths[nodeID] != "" && selectedPaths[nodeID] != signature {
+						return nodeSetScore{}, false
+					}
+					selectedPaths[nodeID] = signature
+				}
+			}
 		}
 	}
 	if score.bottleneck == math.MaxInt64 {
@@ -1816,10 +1941,27 @@ func scoreNodeSetIndexed(job domain.Job, nodes []domain.Node, index topologyPair
 }
 
 type topologyPairValue struct {
-	capacity int64
-	latency  int64
-	health   string
-	edgeID   string
+	capacity        int64
+	latency         int64
+	health          string
+	edgeID          string
+	sourceID        string
+	sourceInterface string
+	sourceAddress   string
+	targetID        string
+	targetInterface string
+	targetAddress   string
+	enforcePath     bool
+}
+
+func (pair topologyPairValue) pathFor(nodeID string) string {
+	if nodeID == pair.sourceID {
+		return pair.sourceInterface + "\x00" + pair.sourceAddress
+	}
+	if nodeID == pair.targetID {
+		return pair.targetInterface + "\x00" + pair.targetAddress
+	}
+	return ""
 }
 
 type topologyPairIndex map[string]topologyPairValue
@@ -1836,33 +1978,40 @@ func buildTopologyPairIndex(snapshot *domain.TopologySnapshot) topologyPairIndex
 	if snapshot == nil {
 		return index
 	}
-	primary := make(map[string]string, len(snapshot.PathSelections))
+	edges := make(map[string]domain.TopologyEdge, len(snapshot.Edges))
+	for _, edge := range snapshot.Edges {
+		edges[edge.ID] = edge
+	}
+	selected := make(map[string]bool, len(snapshot.PathSelections))
 	for _, selection := range snapshot.PathSelections {
-		primary[topologyPairKey(selection.SourceID, selection.TargetID)] = selection.PrimaryEdgeID
+		key := topologyPairKey(selection.SourceID, selection.TargetID)
+		selected[key] = true
+		edge, found := edges[selection.PrimaryEdgeID]
+		if !found {
+			continue
+		}
+		candidate := topologyPairValue{capacity: selection.EffectiveCapacityBits, latency: topologyLatency(selection.EffectiveLatencyMicros),
+			health: selection.Health, edgeID: selection.PrimaryEdgeID, sourceID: selection.SourceID, targetID: selection.TargetID,
+			enforcePath: edge.Type == "probe"}
+		candidate.sourceInterface, candidate.sourceAddress = endpointPath(edge, selection.SourceID)
+		candidate.targetInterface, candidate.targetAddress = endpointPath(edge, selection.TargetID)
+		if candidate.targetInterface == "" && selection.PrimaryReverseEdgeID != "" {
+			candidate.targetInterface, candidate.targetAddress = endpointPath(edges[selection.PrimaryReverseEdgeID], selection.TargetID)
+		}
+		index[key] = candidate
 	}
 	for _, edge := range snapshot.Edges {
 		if edge.Health == "critical" {
 			continue
 		}
 		key := topologyPairKey(edge.SourceID, edge.TargetID)
-		candidate := topologyPairValue{capacity: edge.CapacityBits, latency: topologyLatency(edge.LatencyMicros), health: edge.Health, edgeID: edge.ID}
-		preferred := primary[key]
-		current, found := index[key]
-		if preferred != "" {
-			if edge.ID == preferred {
-				index[key] = candidate
-				continue
-			}
-			if found && current.edgeID == preferred {
-				continue
-			}
-			if !found || topologyHealthRank(edge.Health) > topologyHealthRank(current.health) ||
-				(topologyHealthRank(edge.Health) == topologyHealthRank(current.health) && (candidate.capacity > current.capacity ||
-					(candidate.capacity == current.capacity && candidate.latency < current.latency))) {
-				index[key] = candidate
-			}
+		if selected[key] {
 			continue
 		}
+		candidate := topologyPairValue{capacity: edge.CapacityBits, latency: topologyLatency(edge.LatencyMicros), health: edge.Health, edgeID: edge.ID,
+			sourceID: edge.SourceID, sourceInterface: edge.SourceInterface, sourceAddress: edge.SourceAddress,
+			targetID: edge.TargetID, targetInterface: edge.TargetInterface, targetAddress: edge.TargetAddress}
+		current, found := index[key]
 		if !found || topologyHealthRank(edge.Health) > topologyHealthRank(current.health) ||
 			(topologyHealthRank(edge.Health) == topologyHealthRank(current.health) && (candidate.capacity > current.capacity ||
 				(candidate.capacity == current.capacity && candidate.latency < current.latency))) {
@@ -1870,6 +2019,16 @@ func buildTopologyPairIndex(snapshot *domain.TopologySnapshot) topologyPairIndex
 		}
 	}
 	return index
+}
+
+func endpointPath(edge domain.TopologyEdge, nodeID string) (string, string) {
+	if edge.SourceID == nodeID {
+		return edge.SourceInterface, edge.SourceAddress
+	}
+	if edge.TargetID == nodeID {
+		return edge.TargetInterface, edge.TargetAddress
+	}
+	return "", ""
 }
 
 // A non-positive probe latency means that the value is unavailable. Keep that
@@ -1952,31 +2111,27 @@ func preferredNodePath(nodeID string, nodes []domain.Node, snapshot *domain.Topo
 	for _, node := range nodes {
 		selected[node.ID] = true
 	}
-	var best domain.TopologyEdge
-	found := false
 	if snapshot != nil {
-		for _, edge := range snapshot.Edges {
-			peerID, interfaceName, address := "", "", ""
-			switch {
-			case edge.SourceID == nodeID:
-				peerID, interfaceName, address = edge.TargetID, edge.SourceInterface, edge.SourceAddress
-			case edge.TargetID == nodeID:
-				peerID, interfaceName, address = edge.SourceID, edge.TargetInterface, edge.TargetAddress
+		index := buildTopologyPairIndex(snapshot)
+		peers := make([]string, 0, len(selected))
+		for peerID := range selected {
+			if peerID != nodeID {
+				peers = append(peers, peerID)
 			}
-			if peerID == "" || !selected[peerID] || interfaceName == "" || address == "" {
+		}
+		sort.Strings(peers)
+		for _, peerID := range peers {
+			pair, ok := index[topologyPairKey(nodeID, peerID)]
+			if !ok {
 				continue
 			}
-			if !found || topologyHealthRank(edge.Health) > topologyHealthRank(best.Health) ||
-				(topologyHealthRank(edge.Health) == topologyHealthRank(best.Health) && (edge.CapacityBits > best.CapacityBits ||
-					(edge.CapacityBits == best.CapacityBits && edge.LatencyMicros < best.LatencyMicros))) {
-				best, found = edge, true
-				if edge.TargetID == nodeID {
-					best.SourceInterface, best.SourceAddress = interfaceName, address
-				}
+			parts := strings.SplitN(pair.pathFor(nodeID), "\x00", 2)
+			if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+				return parts[0], parts[1]
 			}
 		}
 	}
-	return best.SourceInterface, best.SourceAddress
+	return "", ""
 }
 
 // NodeFitsJob is exported for transactional repositories to repeat the decision
@@ -2015,6 +2170,9 @@ func nodeMatchesJob(node domain.Node, job domain.Job) bool {
 		requiredArchitecture = artifact.Architecture
 	}
 	if requiredArchitecture != "" && node.Architecture != requiredArchitecture {
+		return false
+	}
+	if !runtimecompat.Satisfies(artifact.RuntimeRequirements, node.RuntimeFacts) {
 		return false
 	}
 	for key, value := range job.Task.Placement.RequiredLabels {

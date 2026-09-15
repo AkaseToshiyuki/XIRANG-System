@@ -41,12 +41,17 @@ type TopologyEdge struct {
 // independently observed links. XIRANG intentionally does not add their
 // capacities unless an explicit multipath data plane is introduced.
 type NetworkPathSelection struct {
-	SourceID              string   `json:"sourceId"`
-	TargetID              string   `json:"targetId"`
-	PrimaryEdgeID         string   `json:"primaryEdgeId"`
-	FallbackEdgeIDs       []string `json:"fallbackEdgeIds,omitempty"`
-	EffectiveCapacityBits int64    `json:"effectiveCapacityBits,omitempty"`
-	Policy                string   `json:"policy"`
+	SourceID               string   `json:"sourceId"`
+	TargetID               string   `json:"targetId"`
+	PrimaryEdgeID          string   `json:"primaryEdgeId"`
+	PrimaryReverseEdgeID   string   `json:"primaryReverseEdgeId,omitempty"`
+	FallbackEdgeIDs        []string `json:"fallbackEdgeIds,omitempty"`
+	FallbackReverseEdgeIDs []string `json:"fallbackReverseEdgeIds,omitempty"`
+	EffectiveCapacityBits  int64    `json:"effectiveCapacityBits,omitempty"`
+	EffectiveLatencyMicros int64    `json:"effectiveLatencyMicros,omitempty"`
+	Health                 string   `json:"health,omitempty"`
+	Bidirectional          bool     `json:"bidirectional"`
+	Policy                 string   `json:"policy"`
 }
 
 type TopologyRoute struct {

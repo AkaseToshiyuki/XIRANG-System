@@ -22,6 +22,9 @@ var (
 	auditBucket               = []byte("audit_events")
 	assignmentsBucket         = []byte("assignment_reports")
 	jobsBucket                = []byte("jobs")
+	jobsByOwnerBucket         = []byte("jobs_by_owner")
+	activeJobsBucket          = []byte("jobs_active")
+	jobsFinishedBucket        = []byte("jobs_finished")
 	jobAssignmentsBucket      = []byte("job_assignments")
 	queuePoliciesBucket       = []byte("queue_policies")
 	discoveryScansBucket      = []byte("discovery_scans")
@@ -76,7 +79,7 @@ func Open(path string) (*Store, error) {
 			return err
 		}
 		for _, bucket := range [][]byte{
-			assignmentsBucket, jobsBucket, jobAssignmentsBucket, queuePoliciesBucket,
+			assignmentsBucket, jobsBucket, jobsByOwnerBucket, activeJobsBucket, jobsFinishedBucket, jobAssignmentsBucket, queuePoliciesBucket,
 			discoveryScansBucket, discoveryCandidatesBucket,
 			buildsBucket, buildSettingsBucket, apiTokensBucket, apiTokenDigestsBucket, usersBucket, usernamesBucket,
 			userGroupsBucket, accessSettingsBucket, sharedSpacesBucket, jobTemplatesBucket, schemaMetadataBucket,
@@ -89,12 +92,15 @@ func Open(path string) (*Store, error) {
 		metadata := transaction.Bucket(schemaMetadataBucket)
 		version := metadata.Get([]byte("version"))
 		if version == nil {
-			return metadata.Put([]byte("version"), []byte(currentSchemaVersion))
+			if err := metadata.Put([]byte("version"), []byte(currentSchemaVersion)); err != nil {
+				return err
+			}
+			return backfillJobIndexes(transaction)
 		}
 		if string(version) != currentSchemaVersion {
 			return errors.New("unsupported control-plane schema version " + string(version))
 		}
-		return nil
+		return backfillJobIndexes(transaction)
 	}); err != nil {
 		_ = database.Close()
 		return nil, err

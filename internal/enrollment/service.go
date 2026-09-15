@@ -18,6 +18,7 @@ import (
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
 	"github.com/xirang-grid/xirang/internal/domain"
 	"github.com/xirang-grid/xirang/internal/pki"
+	"github.com/xirang-grid/xirang/internal/runtimecompat"
 )
 
 type Service struct {
@@ -145,6 +146,7 @@ func (service *Service) Register(ctx context.Context, presentedToken, csrPEM str
 		Architecture:  inventory.Architecture,
 		Distribution:  inventory.Distribution,
 		KernelVersion: inventory.KernelVersion,
+		RuntimeFacts:  cloneTextValues(inventory.RuntimeFacts),
 		AgentVersion:  inventory.AgentVersion,
 		CPUModel:      inventory.CPUModel, CPUFeatures: append([]string(nil), inventory.CPUFeatures...),
 		CPUBenchmarkScore: inventory.CPUBenchmarkScore, ComputeWeight: inventory.ComputeWeight,
@@ -191,7 +193,17 @@ func (service *Service) Register(ctx context.Context, presentedToken, csrPEM str
 }
 
 func (service *Service) ListNodes(ctx context.Context) ([]domain.Node, error) {
-	return service.repository.ListNodes(ctx)
+	nodes, err := service.repository.ListNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	active := make([]domain.Node, 0, len(nodes))
+	for _, node := range nodes {
+		if node.RemovedAt == nil {
+			active = append(active, node)
+		}
+	}
+	return active, nil
 }
 
 func (service *Service) GetNode(ctx context.Context, id string) (domain.Node, error) {
@@ -505,12 +517,16 @@ func (service *Service) ConfirmNodeMode(ctx context.Context, id, commandID strin
 }
 
 func (service *Service) RequestCertificateRotation(ctx context.Context, id, commandID, rotationID string) (domain.Node, error) {
+	return service.requestCertificateRotation(ctx, id, commandID, rotationID, "bootstrap-admin", "admin", false)
+}
+
+func (service *Service) requestCertificateRotation(ctx context.Context, id, commandID, rotationID, actorID, actorType string, automatic bool) (domain.Node, error) {
 	if commandID == "" || rotationID == "" {
 		return domain.Node{}, fmt.Errorf("%w: certificate rotation command IDs are required", ErrInvalidRequest)
 	}
 	now := service.now().UTC()
-	audit, err := service.auditEvent("bootstrap-admin", "admin", "certificate.rotation_requested", id, map[string]string{
-		"commandId": commandID, "rotationId": rotationID,
+	audit, err := service.auditEvent(actorID, actorType, "certificate.rotation_requested", id, map[string]string{
+		"commandId": commandID, "rotationId": rotationID, "automatic": strconv.FormatBool(automatic),
 	})
 	if err != nil {
 		return domain.Node{}, err
@@ -525,6 +541,46 @@ func (service *Service) RequestCertificateRotation(ctx context.Context, id, comm
 		node.UpdatedAt = now
 		return nil
 	}, audit)
+}
+
+// RequestExpiringCertificateRotations persists rotation commands for active
+// node certificates that are approaching expiry. Persisting before enqueueing
+// makes the commands recoverable after a controller restart.
+func (service *Service) RequestExpiringCertificateRotations(ctx context.Context, rotateBefore time.Duration) ([]domain.Node, error) {
+	if rotateBefore <= 0 {
+		return nil, fmt.Errorf("%w: certificate rotation window must be positive", ErrInvalidRequest)
+	}
+	nodes, err := service.repository.ListNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := service.now().UTC()
+	deadline := now.Add(rotateBefore)
+	requested := make([]domain.Node, 0)
+	for _, node := range nodes {
+		if node.CertificateNotAfter == nil || !now.Before(*node.CertificateNotAfter) || node.CertificateNotAfter.After(deadline) ||
+			node.CertificateSerial == "" || node.CertificateRevokedAt != nil || node.PendingCertificateSerial != "" ||
+			node.PendingCertificateCommandID != "" || node.Status == domain.NodeStatusPendingApproval || node.Status == domain.NodeStatusRejected {
+			continue
+		}
+		commandText, err := randomText(service.random, 18)
+		if err != nil {
+			return requested, err
+		}
+		rotationText, err := randomText(service.random, 18)
+		if err != nil {
+			return requested, err
+		}
+		updated, err := service.requestCertificateRotation(ctx, node.ID, "command_"+commandText, "rotation_"+rotationText, "xirangd", "system", true)
+		if errors.Is(err, ErrInvalidState) {
+			continue
+		}
+		if err != nil {
+			return requested, err
+		}
+		requested = append(requested, updated)
+	}
+	return requested, nil
 }
 
 func (service *Service) ConfirmCertificateRotation(ctx context.Context, id, commandID string, accepted bool, reason string) (domain.Node, error) {
@@ -716,6 +772,42 @@ func (service *Service) RevokeCertificate(ctx context.Context, id string) (domai
 	}, audit)
 }
 
+// RemoveNode retires an inactive node from operational views while retaining
+// its immutable identity and historical references for audit and job records.
+// A connected or potentially recoverable node must first complete its normal
+// lifecycle transition to offline; rejected enrollments may be removed directly.
+func (service *Service) RemoveNode(ctx context.Context, id string) (domain.Node, error) {
+	now := service.now().UTC()
+	audit, err := service.auditEvent("bootstrap-admin", "admin", "node.removed", id, nil)
+	if err != nil {
+		return domain.Node{}, err
+	}
+	node, err := service.repository.UpdateNode(ctx, id, func(node *domain.Node) error {
+		if node.RemovedAt != nil || (node.Status != domain.NodeStatusOffline && node.Status != domain.NodeStatusRejected) {
+			return ErrInvalidState
+		}
+		if node.CertificateRevokedAt == nil {
+			node.CertificateRevokedAt = &now
+		}
+		node.Status = domain.NodeStatusRemoved
+		node.DesiredStatus = ""
+		node.PendingModeCommandID = ""
+		node.PendingManagementCommandID = ""
+		node.DesiredManagementPanel = nil
+		node.PendingCertificateSerial = ""
+		node.PendingCertificateNotAfter = nil
+		node.PendingCertificateCommandID = ""
+		node.PendingCertificateRotationID = ""
+		node.RemovedAt = &now
+		node.UpdatedAt = now
+		return nil
+	}, audit)
+	if err == nil {
+		service.publishNode(node)
+	}
+	return node, err
+}
+
 func (service *Service) ListAuditEvents(ctx context.Context, limit int) ([]domain.AuditEvent, error) {
 	return service.repository.ListAuditEvents(ctx, limit)
 }
@@ -836,12 +928,29 @@ func (service *Service) ReportHardwarePerformance(ctx context.Context, nodeID, c
 	}, nil)
 }
 
+func (service *Service) ReportRuntimeFacts(ctx context.Context, nodeID string, facts map[string]string) (domain.Node, error) {
+	if nodeID == "" || runtimecompat.ValidateFacts(facts) != nil {
+		return domain.Node{}, ErrInvalidRequest
+	}
+	cloned := cloneTextValues(facts)
+	return service.updateNode(ctx, nodeID, func(node *domain.Node) error {
+		node.RuntimeFacts = cloned
+		node.UpdatedAt = service.now().UTC()
+		return nil
+	}, nil)
+}
+
 func (service *Service) ListAssignmentReports(ctx context.Context, limit int) ([]domain.AssignmentReport, error) {
 	return service.repository.ListAssignmentReports(ctx, limit)
 }
 
 func (service *Service) updateNode(ctx context.Context, id string, update func(*domain.Node) error, audit *domain.AuditEvent) (domain.Node, error) {
-	node, err := service.repository.UpdateNode(ctx, id, update, audit)
+	node, err := service.repository.UpdateNode(ctx, id, func(node *domain.Node) error {
+		if node.RemovedAt != nil {
+			return ErrInvalidState
+		}
+		return update(node)
+	}, audit)
 	if err == nil {
 		service.publishNode(node)
 	}
@@ -895,7 +1004,7 @@ func validateInventory(inventory domain.InventorySummary) error {
 		strings.TrimSpace(inventory.Architecture) == "" || inventory.CPUCount <= 0 || inventory.MemoryBytes <= 0 ||
 		inventory.EphemeralStorageBytes < 0 || len(inventory.CPUModel) > 512 || strings.ContainsRune(inventory.CPUModel, '\x00') ||
 		len(inventory.CPUFeatures) > 1024 || inventory.CPUBenchmarkScore < 0 || inventory.CPUBenchmarkScore > 1_000_000 ||
-		inventory.ComputeWeight < 0 || inventory.ComputeWeight > 1_000_000 {
+		inventory.ComputeWeight < 0 || inventory.ComputeWeight > 1_000_000 || runtimecompat.ValidateFacts(inventory.RuntimeFacts) != nil {
 		return fmt.Errorf("%w: incomplete or unsupported inventory", ErrInvalidRequest)
 	}
 	for _, feature := range inventory.CPUFeatures {
@@ -939,6 +1048,17 @@ func validateHardwareTopology(numa []domain.NUMANode, deviceTopology map[string]
 		}
 	}
 	return nil
+}
+
+func cloneTextValues(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func validCPUList(value string) bool {

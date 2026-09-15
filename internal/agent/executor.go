@@ -26,6 +26,7 @@ import (
 	"time"
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
+	"github.com/xirang-grid/xirang/internal/runtimecompat"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -126,6 +127,7 @@ type NativeExecutor struct {
 	artifactMu         sync.RWMutex
 	artifactController *url.URL
 	artifactHTTPClient *http.Client
+	runtimeFacts       map[string]string
 }
 
 var artifactCacheMu sync.Mutex
@@ -261,7 +263,7 @@ func OpenIsolatedNativeExecutor(directory string, config ExecutorIsolationConfig
 
 func openNativeExecutor(directory string) (*NativeExecutor, error) {
 	if directory == "" {
-		return nil, errors.New("Agent state directory is required")
+		return nil, errors.New("an Agent state directory is required")
 	}
 	if err := os.MkdirAll(filepath.Join(directory, "assignments"), 0o700); err != nil {
 		return nil, err
@@ -277,6 +279,7 @@ func openNativeExecutor(directory string) (*NativeExecutor, error) {
 		updates:            make(chan *xirangv1.AssignmentUpdate, maxAssignmentUpdates),
 		logs:               make(chan *xirangv1.AssignmentLogSnapshot, maxAssignmentLogUpdates),
 		usage:              make(chan *xirangv1.AssignmentUsageSnapshot, maxAssignmentLogUpdates),
+		runtimeFacts:       collectRuntimeFacts(strings.TrimSpace(readText("/proc/sys/kernel/osrelease"))),
 	}
 	data, err := os.ReadFile(filepath.Join(directory, assignmentStateFile))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1306,7 +1309,10 @@ func validateRunAssignment(command *xirangv1.RunAssignment) error {
 	if command.User != "" || command.Group != "" {
 		return errors.New("per-assignment user and group require the Phase 3 privilege-isolation backend")
 	}
-	if command.Resources != nil && (command.Resources.MilliCpu < 0 || command.Resources.EphemeralStorageBytes < 0) {
+	// EphemeralStorageBytes is unsigned on the wire, so it was compared against
+	// a bound it can never cross. Only the signed CPU quantity can arrive
+	// negative.
+	if command.Resources != nil && command.Resources.MilliCpu < 0 {
 		return errors.New("resource request contains unsupported or negative quantities")
 	}
 	if command.Resources != nil {
@@ -1404,6 +1410,11 @@ func (executor *NativeExecutor) validateRunAssignment(command *xirangv1.RunAssig
 		}
 		if !trusted {
 			return errors.New("artifact signature is not trusted")
+		}
+	}
+	if command != nil && command.Artifact != nil {
+		if compatible, reason := runtimecompat.Compatible(command.Artifact.RuntimeRequirements, executor.runtimeFacts); !compatible {
+			return fmt.Errorf("artifact runtime contract is not satisfied: %s", reason)
 		}
 	}
 	return validateRunAssignment(command)

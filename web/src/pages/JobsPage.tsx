@@ -3,6 +3,7 @@ import { cancelJob, createJobTemplate, deleteJobTemplate, getJobs, getJobTemplat
 import type { Job, JobStatus, JobTemplate } from "../api/contracts";
 import { formatBytes, formatCoreCount, relativeTime } from "../lib/format";
 import { usePreferences } from "../app/preferences";
+import { templateDescription, templateName } from "../app/builtinTemplates";
 import { emptyJobScriptDraft, parseJobScript, serializeJobScript, type JobScriptDraft } from "../lib/jobScript";
 
 const starterScriptZH = `XIRANG 1
@@ -273,8 +274,8 @@ export function JobsPage({ token, isAdmin }: { token: string; isAdmin: boolean }
     </header>
 
     <section className="job-template-picker" aria-labelledby="job-template-title">
-      <div><span className="eyebrow">{t("可用模板", "Available templates")}</span><h2 id="job-template-title">{t("从管理员模板开始", "Start from an administrator template")}</h2><p>{selectedTemplate?.description || (templatesLoading ? t("正在读取模板…", "Loading templates…") : templates.length ? t("选择模板后载入编辑器，提交前仍可修改所有字段。", "Load a template into the editor; every field remains editable before submission.") : t("管理员尚未发布任务模板，仍可打开或直接编辑脚本。", "No template has been published; you can still open or edit a script directly."))}</p></div>
-      <label><span>{t("任务模板", "Job template")}</span><select value={selectedTemplateID} disabled={!templates.length} onChange={(event) => setSelectedTemplateID(event.target.value)}><option value="">{templates.length ? t("请选择", "Select") : t("暂无模板", "No templates")}</option>{templates.map((template) => <option value={template.id} key={template.id}>{template.name}</option>)}</select></label>
+      <div><span className="eyebrow">{t("可用模板", "Available templates")}</span><h2 id="job-template-title">{t("从管理员模板开始", "Start from an administrator template")}</h2><p>{(selectedTemplate && templateDescription(selectedTemplate, language)) || (templatesLoading ? t("正在读取模板…", "Loading templates…") : templates.length ? t("选择模板后载入编辑器，提交前仍可修改所有字段。", "Load a template into the editor; every field remains editable before submission.") : t("管理员尚未发布任务模板，仍可打开或直接编辑脚本。", "No template has been published; you can still open or edit a script directly."))}</p></div>
+      <label><span>{t("任务模板", "Job template")}</span><select value={selectedTemplateID} disabled={!templates.length} onChange={(event) => setSelectedTemplateID(event.target.value)}><option value="">{templates.length ? t("请选择", "Select") : t("暂无模板", "No templates")}</option>{templates.map((template) => <option value={template.id} key={template.id}>{templateName(template, language)}</option>)}</select></label>
       <button className="primary-button" type="button" disabled={!selectedTemplate} onClick={useTemplate}>{t("载入并编辑", "Load and edit")}<span>→</span></button>
     </section>
 

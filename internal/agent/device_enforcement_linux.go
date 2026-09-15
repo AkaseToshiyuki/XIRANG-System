@@ -93,7 +93,7 @@ func (group *assignmentCgroup) authorizeDevices(requested map[string]int64, numa
 			if !strings.HasPrefix(path, "/dev/") {
 				continue
 			}
-			if groupManagerDevicePathAllowed(group, resource, path) == false {
+			if !groupManagerDevicePathAllowed(group, resource, path) {
 				continue
 			}
 			rule, statErr := deviceRuleForPath(path)

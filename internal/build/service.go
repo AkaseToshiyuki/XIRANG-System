@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/xirang-grid/xirang/internal/domain"
+	"github.com/xirang-grid/xirang/internal/runtimecompat"
 )
 
 var (
@@ -271,6 +272,15 @@ func (service *Service) RotateSigningKey(ctx context.Context, actor domain.Princ
 }
 
 func (service *Service) Submit(ctx context.Context, recipe domain.BuildRecipe, actor domain.Principal) (domain.Build, error) {
+	if recipe.RuntimeRequirements == nil {
+		recipe.RuntimeRequirements = make(map[string]string)
+	}
+	if _, present := recipe.RuntimeRequirements["os"]; !present {
+		recipe.RuntimeRequirements["os"] = "linux"
+	}
+	if _, present := recipe.RuntimeRequirements["arch"]; !present && recipe.Architecture != "" {
+		recipe.RuntimeRequirements["arch"] = recipe.Architecture
+	}
 	if recipe.Application != "" {
 		recipe.Application = strings.TrimSpace(recipe.Application)
 		recipe.Variant = strings.TrimSpace(recipe.Variant)
@@ -482,7 +492,8 @@ func (service *Service) ResolveApplication(ctx context.Context, application stri
 		variants = append(variants, domain.NativeArtifactVariant{
 			BuildID: build.ID, Variant: artifact.Variant, NodeIDs: append([]string(nil), artifact.RuntimeNodeIDs...),
 			Artifact: domain.NativeArtifact{URI: artifact.URI, SHA256: artifact.SHA256, Architecture: artifact.Architecture,
-				ABI: artifact.ABI, Entrypoint: artifact.Entrypoint, Signature: signature},
+				ABI: artifact.ABI, Entrypoint: artifact.Entrypoint, Signature: signature,
+				RuntimeRequirements: cloneStringValues(artifact.RuntimeRequirements)},
 		})
 	}
 	if len(variants) == 0 {
@@ -672,7 +683,7 @@ func (service *Service) validateRecipe(ctx context.Context, recipe domain.BuildR
 		(!recipe.CrossCompile && recipe.Architecture != builderArchitecture) || recipe.Architecture == "" ||
 		len(buildSteps(recipe)) == 0 || len(buildSteps(recipe)) > 16 || len(recipe.Environment) > 128 ||
 		(recipe.SourceSHA256 != "" && len(recipe.SourceSHA256) != 64) || recipe.MilliCPU < 10 || recipe.MemoryBytes <= 0 ||
-		recipe.Timeout <= 0 || recipe.Timeout > 2*time.Hour {
+		recipe.Timeout <= 0 || recipe.Timeout > 2*time.Hour || runtimecompat.ValidateRequirements(recipe.RuntimeRequirements) != nil {
 		return "", "", "", nil, ErrInvalidRequest
 	}
 	if recipe.Application != "" {
@@ -938,8 +949,20 @@ func (service *Service) finalizeArtifact(build domain.Build, output string, expe
 		ABI: abi, Toolchain: build.Recipe.Toolchain, SBOMURI: sbomURI,
 		Application: build.Recipe.Application, Variant: build.Recipe.Variant,
 		Entrypoint: build.Recipe.RuntimeEntrypoint, RuntimeNodeIDs: append([]string(nil), build.Recipe.RuntimeNodeIDs...),
-		RoutingUpdatedAt: &routingUpdatedAt,
+		RuntimeRequirements: cloneStringValues(build.Recipe.RuntimeRequirements),
+		RoutingUpdatedAt:    &routingUpdatedAt,
 	}, nil
+}
+
+func cloneStringValues(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func loadOrCreateSigningKey(path string) (ed25519.PrivateKey, ed25519.PublicKey, error) {
@@ -1003,10 +1026,6 @@ func persistSigningKey(path string, privateKey ed25519.PrivateKey) error {
 	return directoryHandle.Sync()
 }
 
-func hashTree(root string) (string, error) {
-	return hashTreeContext(context.Background(), root)
-}
-
 func hashTreeContext(ctx context.Context, root string) (string, error) {
 	hash := sha256.New()
 	var paths []string
@@ -1049,15 +1068,6 @@ func hashTreeContext(ctx context.Context, root string) (string, error) {
 		}
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func copyTree(source, destination string, shared ...bool) error {
-	sharedWorkspace := len(shared) > 0 && shared[0]
-	return copyTreeOwned(source, destination, sharedWorkspace, -1, -1)
-}
-
-func copyTreeOwned(source, destination string, sharedWorkspace bool, sharedUID, sharedGID int) error {
-	return copyTreeOwnedContext(context.Background(), source, destination, sharedWorkspace, sharedUID, sharedGID)
 }
 
 func copyTreeOwnedContext(ctx context.Context, source, destination string, sharedWorkspace bool, sharedUID, sharedGID int) error {

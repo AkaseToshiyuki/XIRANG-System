@@ -1,0 +1,40 @@
+name: production-recovery-drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  postgresql-ha-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.6"
+          cache: true
+      - name: Install PostgreSQL tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql postgresql-client
+          echo "XIRANG_HA_PG_BIN=$(pg_config --bindir)" >> "$GITHUB_ENV"
+      - name: Exercise leadership, failover, backup and restore
+        env:
+          XIRANG_HA_KEEP: "1"
+          XIRANG_HA_WORK_DIR: ${{ runner.temp }}/xirang-ha-drill
+        run: make ha-drill
+      - name: Preserve drill evidence
+        # The work directory includes ephemeral credentials and database state.
+        # Preserve it only within the canonical private repository.
+        if: always() && github.event.repository.private
+        uses: actions/upload-artifact@v7
+        with:
+          name: postgresql-ha-recovery-${{ github.run_id }}
+          path: ${{ runner.temp }}/xirang-ha-drill
+          if-no-files-found: warn
+          retention-days: 14

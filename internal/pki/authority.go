@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,7 +27,21 @@ type Authority struct {
 	directory   string
 	certificate *x509.Certificate
 	privateKey  *ecdsa.PrivateKey
+
+	// serverMu guards the cached control-plane certificate and the hosts it
+	// was issued for, so it can be reissued while the listeners are serving.
+	serverMu    sync.Mutex
+	serverHosts []string
+	serverPair  *tls.Certificate
 }
+
+const (
+	serverCertificateLifetime = 90 * 24 * time.Hour
+	// A controller is expected to run for months at a time. Reissuing well
+	// before expiry means the swap happens during normal operation rather than
+	// at the moment agents and browsers would start rejecting the listener.
+	serverCertificateRenewBefore = 30 * 24 * time.Hour
+)
 
 type IssuedCertificate struct {
 	CertificatePEM   string
@@ -46,10 +61,41 @@ func OpenOrCreate(directory string, serverHosts []string) (*Authority, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := authority.issueServerCertificate(serverHosts); err != nil {
+	authority.serverHosts = append([]string(nil), serverHosts...)
+	if _, err := authority.ServerCertificate(); err != nil {
 		return nil, err
 	}
 	return authority, nil
+}
+
+// ServerCertificate returns the control-plane certificate, issuing a fresh one
+// when none is loaded or the current one is near expiry. Certificates used to
+// be issued only at process start, so a controller that stayed up beyond their
+// lifetime began serving an expired certificate and every agent, which verifies
+// the listener against this CA, lost its control stream until a restart.
+func (authority *Authority) ServerCertificate() (*tls.Certificate, error) {
+	authority.serverMu.Lock()
+	defer authority.serverMu.Unlock()
+	if authority.serverPair != nil && authority.serverPair.Leaf != nil &&
+		time.Now().Before(authority.serverPair.Leaf.NotAfter.Add(-serverCertificateRenewBefore)) {
+		return authority.serverPair, nil
+	}
+	if err := authority.issueServerCertificate(authority.serverHosts); err != nil {
+		return nil, err
+	}
+	pair, err := tls.LoadX509KeyPair(authority.ServerCertificatePath(), authority.ServerKeyPath())
+	if err != nil {
+		return nil, err
+	}
+	if pair.Leaf == nil {
+		leaf, parseErr := x509.ParseCertificate(pair.Certificate[0])
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		pair.Leaf = leaf
+	}
+	authority.serverPair = &pair
+	return authority.serverPair, nil
 }
 
 func (authority *Authority) CAPath() string { return filepath.Join(authority.directory, "ca.crt") }
@@ -73,6 +119,11 @@ func (authority *Authority) TLSConfig() (*tls.Config, error) {
 		MinVersion: tls.VersionTLS13,
 		ClientCAs:  pool,
 		ClientAuth: tls.VerifyClientCertIfGiven,
+		// Resolved per handshake so a renewal reaches live listeners without a
+		// restart.
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return authority.ServerCertificate()
+		},
 	}, nil
 }
 
@@ -209,7 +260,7 @@ func (authority *Authority) issueServerCertificate(hosts []string) error {
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: "XIRANG Control Plane", Organization: []string{"XIRANG"}},
-		NotBefore:    time.Now().Add(-5 * time.Minute), NotAfter: time.Now().Add(90 * 24 * time.Hour),
+		NotBefore:    time.Now().Add(-5 * time.Minute), NotAfter: time.Now().Add(serverCertificateLifetime),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,

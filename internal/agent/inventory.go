@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -22,6 +23,7 @@ type Inventory struct {
 	Architecture          string                      `json:"architecture"`
 	Distribution          string                      `json:"distribution,omitempty"`
 	KernelVersion         string                      `json:"kernelVersion,omitempty"`
+	RuntimeFacts          map[string]string           `json:"runtimeFacts,omitempty"`
 	AgentVersion          string                      `json:"agentVersion"`
 	CPUCount              int                         `json:"cpuCount"`
 	CPUModel              string                      `json:"cpuModel,omitempty"`
@@ -71,12 +73,14 @@ func CollectInventory() (Inventory, error) {
 	}
 	cpu := detectCPUCapability()
 	devices := collectAccelerators("/sys/class/drm", "/proc/driver/nvidia/gpus")
+	kernelVersion := strings.TrimSpace(readText("/proc/sys/kernel/osrelease"))
 	return Inventory{
 		Hostname:              hostname,
 		OS:                    runtime.GOOS,
 		Architecture:          runtime.GOARCH,
 		Distribution:          distributionName("/etc/os-release"),
-		KernelVersion:         strings.TrimSpace(readText("/proc/sys/kernel/osrelease")),
+		KernelVersion:         kernelVersion,
+		RuntimeFacts:          collectRuntimeFacts(kernelVersion),
 		AgentVersion:          version.Version,
 		CPUCount:              runtime.NumCPU(),
 		CPUModel:              cpu.Model,
@@ -90,6 +94,20 @@ func CollectInventory() (Inventory, error) {
 		Devices:               devices,
 		NUMATopology:          collectNUMATopology("/sys/devices/system/node"),
 	}, nil
+}
+
+func collectRuntimeFacts(kernelVersion string) map[string]string {
+	facts := map[string]string{"os": runtime.GOOS, "arch": runtime.GOARCH}
+	if kernelVersion != "" {
+		facts["kernel.version"] = kernelVersion
+	}
+	if output, err := exec.Command("getconf", "GNU_LIBC_VERSION").Output(); err == nil {
+		parts := strings.Fields(strings.TrimSpace(string(output)))
+		if len(parts) >= 2 {
+			facts["libc.family"], facts["libc.version"] = strings.ToLower(parts[0]), parts[1]
+		}
+	}
+	return facts
 }
 
 func availableFilesystemBytes() int64 {

@@ -147,6 +147,12 @@ func main() {
 		}
 	case "node-configure":
 		err = configureNode(api, flag.Args()[1:])
+	case "remove-node":
+		if flag.NArg() < 2 {
+			err = errors.New("usage: xirangctl remove-node <node-id>")
+		} else {
+			err = api.deleteAndPrint("/api/v1/nodes/" + url.PathEscape(flag.Arg(1)))
+		}
 	case "revoke-certificate":
 		if flag.NArg() < 2 {
 			err = errors.New("usage: xirangctl revoke-certificate <node-id>")
@@ -170,7 +176,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: xirangctl [global flags] <status|nodes|jobs|submit-job|submit-file|cancel-job|usage|usage-users|billing-rates|billing-rate-create|inventory|observations|topology|token|discovery-scan|candidates|candidate-approve|candidate-reject|builds|build-workers|submit-build|build-signing-key|rotate-build-signing-key|access-me|api-tokens|api-token-create|api-token-revoke|backups|backup-create|backup-verify|approve|reject|mode|node-configure|rotate-certificate|revoke-certificate|audit|version>")
+	fmt.Fprintln(os.Stderr, "usage: xirangctl [global flags] <status|nodes|jobs|submit-job|submit-file|cancel-job|usage|usage-users|billing-rates|billing-rate-create|inventory|observations|topology|token|discovery-scan|candidates|candidate-approve|candidate-reject|builds|build-workers|submit-build|build-signing-key|rotate-build-signing-key|access-me|api-tokens|api-token-create|api-token-revoke|backups|backup-create|backup-verify|approve|reject|mode|node-configure|remove-node|rotate-certificate|revoke-certificate|audit|version>")
 }
 
 func getUsage(api client, arguments []string, allUsers bool) error {
@@ -490,6 +496,10 @@ func (api client) postAndPrint(path string, payload any, authenticated bool) err
 
 func (api client) putAndPrint(path string, payload any, authenticated bool) error {
 	return api.sendJSONAndPrint(http.MethodPut, path, payload, authenticated)
+}
+
+func (api client) deleteAndPrint(path string) error {
+	return api.sendJSONAndPrint(http.MethodDelete, path, nil, true)
 }
 
 func (api client) sendJSONAndPrint(method, path string, payload any, authenticated bool) error {

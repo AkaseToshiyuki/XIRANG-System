@@ -60,13 +60,13 @@ func loadCommandState(directory string) (commandState, error) {
 		return commandState{}, fmt.Errorf("decode Agent command state: %w", err)
 	}
 	if _, ok := nodeModeFromText(state.Mode); !ok {
-		return commandState{}, errors.New("Agent command state has an invalid node mode")
+		return commandState{}, errors.New("the Agent command state has an invalid node mode")
 	}
 	if len(state.Acknowledgements) > commandLedgerSize {
 		state.Acknowledgements = state.Acknowledgements[len(state.Acknowledgements)-commandLedgerSize:]
 	}
 	if pending := state.PendingCertificateRotation; pending != nil && (pending.MessageID == "" || pending.RotationID == "" || pending.PreviousIdentity == "") {
-		return commandState{}, errors.New("Agent command state has an invalid pending certificate rotation")
+		return commandState{}, errors.New("the Agent command state has an invalid pending certificate rotation")
 	}
 	return state, nil
 }

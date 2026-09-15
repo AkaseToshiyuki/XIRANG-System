@@ -63,6 +63,7 @@ func Enroll(ctx context.Context, serverURL, token, caFile, stateDirectory string
 		Inventory: domain.InventorySummary{
 			Hostname: inventory.Hostname, OS: inventory.OS, Architecture: inventory.Architecture,
 			Distribution: inventory.Distribution, KernelVersion: inventory.KernelVersion,
+			RuntimeFacts: cloneDeviceAttributes(inventory.RuntimeFacts),
 			AgentVersion: inventory.AgentVersion, CPUCount: inventory.CPUCount, MemoryBytes: inventory.MemoryBytes,
 			CPUModel: inventory.CPUModel, CPUFeatures: inventory.CPUFeatures,
 			CPUBenchmarkScore: inventory.CPUBenchmarkScore, ComputeWeight: inventory.ComputeWeight,

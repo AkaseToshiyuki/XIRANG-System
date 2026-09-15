@@ -2,7 +2,7 @@
 
 [English](USAGE.md) | [简体中文](USAGE.zh-CN.md)
 
-Applies to XIRANG **1.0.1**.
+Applies to XIRANG **1.1.0**.
 
 ## Quick start
 
