@@ -5,7 +5,7 @@ import { formatBytes, formatCoreCount, relativeTime } from "../lib/format";
 import { usePreferences } from "../app/preferences";
 import { SharedPathPicker } from "../components/SharedPathPicker";
 
-const initial = { name: "", application: "", variant: "", runtimeNodeIds: [] as string[], runtimeEntrypoint: "bin/app", sourceSpaceId: "", sourcePath: "", architecture: "", builderArchitecture: "", workerId: "", crossCompile: false, command: "", artifactPath: "bin/app", outputSpaceId: "", outputPath: "builds/app", toolchain: "", cpu: "2", memoryGiB: "2", timeout: "1800" };
+const initial = { name: "", application: "", variant: "", runtimeNodeIds: [] as string[], runtimeEntrypoint: "bin/app", runtimeRequirements: "{}", sourceSpaceId: "", sourcePath: "", architecture: "", builderArchitecture: "", workerId: "", crossCompile: false, command: "", artifactPath: "bin/app", outputSpaceId: "", outputPath: "builds/app", toolchain: "", cpu: "2", memoryGiB: "2", timeout: "1800" };
 
 export function BuildsPage({ token }: { token: string }) {
   const { refreshMs, t } = usePreferences();
@@ -47,7 +47,7 @@ export function BuildsPage({ token }: { token: string }) {
       if (form.application && (!form.variant || !form.outputSpaceId || form.runtimeNodeIds.length === 0)) throw new Error(t("应用构建必须填写变体、选择共享输出空间并映射至少一个运行节点", "Application builds require a variant, a shared output space, and at least one runtime node"));
       await submitBuild({
         name: form.name, sourceSpaceId: form.sourceSpaceId, sourcePath: form.sourcePath,
-        application: form.application, variant: form.variant, runtimeNodeIds: form.runtimeNodeIds, runtimeEntrypoint: form.runtimeEntrypoint,
+        application: form.application, variant: form.variant, runtimeNodeIds: form.runtimeNodeIds, runtimeEntrypoint: form.runtimeEntrypoint, runtimeRequirements: parseRuntimeRequirements(form.runtimeRequirements),
         architecture: form.architecture, builderArchitecture: form.crossCompile ? form.builderArchitecture : form.architecture,
         workerId: form.workerId, crossCompile: form.crossCompile, steps: parseBuildSteps(form.command), outputPath: form.artifactPath, outputSpaceId: form.outputSpaceId, publishPath: form.outputPath,
         toolchain: form.toolchain, milliCpu: Number(form.cpu) * 1000, memoryBytes: Number(form.memoryGiB) * 1024 ** 3,
@@ -109,7 +109,7 @@ export function BuildsPage({ token }: { token: string }) {
       <div>{form.crossCompile && <BuildSelect label={t("编译机架构", "Builder architecture")} value={form.builderArchitecture} options={architectures.filter((arch) => workers.some((worker) => worker.architecture === arch))} set={(value) => setForm({ ...form, builderArchitecture: value, workerId: "" })} placeholder={t("请选择", "Select")} />}<BuildSelect label={t("执行节点", "Build node")} value={form.workerId} options={eligibleWorkers.map((worker) => worker.id)} set={(value) => setForm({ ...form, workerId: value })} placeholder={eligibleWorkers.length ? t("自动选择符合条件的节点", "Automatically select an eligible node") : t("没有符合条件的节点", "No eligible node")} required={false} /></div>
       <BuildArea label={t("构建步骤（每行一个 argv 命令，不经 shell）", "Build steps (one argv command per line, no shell)")} value={form.command} set={(value) => setForm({ ...form, command: value })} />
       <div><BuildField label={t("构建产物相对路径", "Build artifact relative path")} value={form.artifactPath} set={(value) => setForm({ ...form, artifactPath: value })} /><BuildPathField label={t("共享输出相对路径", "Shared output relative path")} value={form.outputPath} set={(value) => setForm({ ...form, outputPath: value })} browse={() => setPathPicker("output")} /></div>
-      {form.application && <fieldset className="build-runtime-targets"><legend>{t("运行节点映射", "Runtime node mapping")}</legend><BuildField label={t("运行入口", "Runtime entrypoint")} value={form.runtimeEntrypoint} set={(value) => setForm({ ...form, runtimeEntrypoint: value })} /><div className="build-node-options">{compatibleRuntimeNodes.map((node) => <label key={node.id}><input type="checkbox" checked={form.runtimeNodeIds.includes(node.id)} onChange={(event) => setForm({ ...form, runtimeNodeIds: event.target.checked ? [...form.runtimeNodeIds, node.id] : form.runtimeNodeIds.filter((id) => id !== node.id) })} /><span><strong>{node.name}</strong><small>{node.architecture} · {gpuSummary(node, t)}</small></span></label>)}</div></fieldset>}
+      {form.application && <fieldset className="build-runtime-targets"><legend>{t("运行时契约与节点映射", "Runtime contract and node mapping")}</legend><BuildField label={t("运行入口", "Runtime entrypoint")} value={form.runtimeEntrypoint} set={(value) => setForm({ ...form, runtimeEntrypoint: value })} /><BuildArea label={t("额外运行时需求（JSON；版本可用 >=、<=、>、<）", "Additional runtime requirements (JSON; versions may use >=, <=, >, <)")} value={form.runtimeRequirements} set={(value) => setForm({ ...form, runtimeRequirements: value })} /><div className="build-node-options">{compatibleRuntimeNodes.map((node) => <label key={node.id}><input type="checkbox" checked={form.runtimeNodeIds.includes(node.id)} onChange={(event) => setForm({ ...form, runtimeNodeIds: event.target.checked ? [...form.runtimeNodeIds, node.id] : form.runtimeNodeIds.filter((id) => id !== node.id) })} /><span><strong>{node.name}</strong><small>{node.architecture} · {gpuSummary(node, t)}</small></span></label>)}</div></fieldset>}
       <div><BuildField label={t("内存 (G)", "Memory (G)")} value={form.memoryGiB} set={(value) => setForm({ ...form, memoryGiB: value })} type="number" /><BuildField label={t("超时 (秒)", "Timeout (seconds)")} value={form.timeout} set={(value) => setForm({ ...form, timeout: value })} type="number" /></div>
       <button className="primary-button" disabled={busy}>{busy ? t("正在提交…", "Submitting…") : t("进入原生构建池", "Submit to native build pool")}<span>→</span></button>
     </form>}
@@ -127,6 +127,14 @@ export function BuildsPage({ token }: { token: string }) {
 
 function BuildField({ label, value, set, type = "text", required = true }: { label: string; value: string; set: (value: string) => void; type?: string; required?: boolean }) {
   return <label><span>{label}</span><input type={type} value={value} onChange={(event) => set(event.target.value)} required={required} /></label>;
+}
+
+function parseRuntimeRequirements(value: string): Record<string, string> {
+  const parsed: unknown = JSON.parse(value);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object" || Object.values(parsed).some((item) => typeof item !== "string")) {
+    throw new Error("Runtime requirements must be a JSON object whose values are strings");
+  }
+  return parsed as Record<string, string>;
 }
 function BuildPathField({ label, value, set, browse }: { label: string; value: string; set: (value: string) => void; browse: () => void }) { return <label><span>{label}</span><div className="build-path-input"><input value={value} onChange={(event) => set(event.target.value)} required /><button type="button" onClick={browse} aria-label={label}>◇</button></div></label>; }
 function BuildArea({ label, value, set }: { label: string; value: string; set: (value: string) => void }) { return <label><span>{label}</span><textarea value={value} onChange={(event) => set(event.target.value)} rows={4} required /></label>; }

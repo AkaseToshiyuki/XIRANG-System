@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  一个面向异构计算集群的自扩展编排与调度平台。
+  面向异构 Linux 集群的原生编排与调度平台。
 </p>
 
 <p align="center">
@@ -20,7 +20,9 @@ XIRANG 将处理器、加速卡、存储和网络条件各异的 Linux 服务器
 管理的集群。用户可通过统一的网页界面接入节点、查看运行状态与网络拓扑、
 管理共享空间，并提交原生计算任务。
 
-当前稳定版本：**1.0.1**。
+当前稳定版本：**1.1.0**。详见[版本说明](docs/user/RELEASE_NOTES.zh-CN.md)。
+
+**文献引用:** Haochen Yang. *XIRANG: Native Build-to-Placement Contracts for Heterogeneous Linux Clusters*. Preprint, 2026. [PDF](https://github.com/AkaseToshiyuki/XIRANG-System/releases/download/v1.1.0/xirang-preprint.pdf).
 
 ## 特点与优势
 
@@ -28,12 +30,11 @@ XIRANG 将处理器、加速卡、存储和网络条件各异的 Linux 服务器
   之间可用的网络路径。
 - **状态一目了然**：集中查看节点健康度、资源占用、温度、链路、协商速率与
   备用路径。
-- **智能任务调度**：根据节点能力、用户组配额与运行时长上限、任务优先级、
+- **资源感知调度**：根据节点能力、用户组配额与运行时长上限、任务优先级、
   硬件需求和管理员偏好安排任务；单节点不可能满足的请求会立即返回错误。
 - **用量与费用核算**：按用户查看实测 CPU、内存、GPU 和工作区用量，并由
   管理员通过按生效日期保存的计费标准计算费用。
-- **原生硬件性能**：计算任务直接在 Linux 上运行，不要求额外部署容器运行时，
-  减少对硬件监测与性能的影响。
+- **原生执行**：计算任务直接在 Linux 上运行，不要求额外部署容器运行时。
 - **共享空间管理**：可将存储路径分配给全体节点、一个节点分组或一组指定节点。
 - **适合多用户使用**：支持首次管理员创建、注册审批、权限隔离、个人任务、
   用户组配额和仅管理员可用的节点操作。
@@ -59,7 +60,7 @@ cd XIRANG-System
 也可以安装已经下载到本机的预构建包：
 
 ```bash
-./install.sh --archive /path/to/xirang-1.0.1-linux-amd64.tar.gz
+./install.sh --archive /path/to/xirang-1.1.0-linux-amd64.tar.gz
 ```
 
 支持范围、端口、自动化参数和故障排查请参阅
@@ -86,7 +87,7 @@ https://控制节点IP:8899
 ```bash
 make verify
 make web-install web-build
-make package-native VERSION=1.0.1
+make package-native VERSION=1.1.0
 ```
 
 公开双语手册位于 [`docs/user`](docs/user)。

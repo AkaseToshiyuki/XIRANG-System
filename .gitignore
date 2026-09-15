@@ -1,6 +1,7 @@
 # Go
 /bin/
 /dist/
+/build/local-repair/
 *.test
 *.out
 coverage.*
@@ -16,6 +17,8 @@ coverage.*
 # Runtime data
 /.data/
 *.log
+__pycache__/
+*.pyc
 
 # Editors and OS
 .idea/

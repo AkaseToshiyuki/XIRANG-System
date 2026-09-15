@@ -81,6 +81,7 @@ export function TopologyPage({ token }: { token: string }) {
   const links = useMemo(() => buildObservedLinks(nodes, rates, topology, strongestPrimary.current), [nodes, rates, topology]);
   useEffect(() => {
     for (const link of links) {
+      if (link.health === "offline") continue;
       const current = strongestPrimary.current[link.id];
       if (!current || (link.negotiatedBits ?? 0) >= current.capacity) {
         strongestPrimary.current[link.id] = { capacity: link.negotiatedBits ?? 0, path: link.primaryPath ?? link.primaryInterface ?? "" };
@@ -118,9 +119,9 @@ export function TopologyPage({ token }: { token: string }) {
               return <g key={link.id} className={selectedLink?.id === link.id ? "graph-edge-group selected" : "graph-edge-group"} onClick={() => setSelection({ kind: "link", id: link.id })}>
                 <line className="graph-edge-hitbox" x1={source.x} y1={source.y} x2={target.x} y2={target.y} />
                 <line className={`graph-edge graph-edge--managed graph-edge--managed-${link.health}`} style={{ strokeWidth: edgeStrokeWidth((link.forwardBits ?? 0) + (link.reverseBits ?? 0)) }} x1={source.x} y1={source.y} x2={target.x} y2={target.y} />
-                <text className="graph-link-rate" x={midpoint.x} y={midpoint.y - 15} textAnchor="middle">↑ {formatRate(link.forwardBits, t)} · ↓ {formatRate(link.reverseBits, t)}</text>
-                <text className="graph-link-capacity" x={midpoint.x} y={midpoint.y + 3} textAnchor="middle">{t("协商", "Negotiated")} {formatRate(link.negotiatedBits, t)}</text>
-                {link.fallback !== "none" && <text className={`graph-link-fallback graph-link-fallback--${link.fallback}`} x={midpoint.x} y={midpoint.y + 20} textAnchor="middle">{link.fallback === "active" ? t("主链路失效", "Primary link failed") : t(`${link.fallbackInterfaces.length} 条备用链路可用`, `${link.fallbackInterfaces.length} fallback links available`)}</text>}
+                <text className="graph-link-rate" x={midpoint.x} y={midpoint.y - 15} textAnchor="middle">↑ {formatLinkRate(link, link.forwardBits, t)} · ↓ {formatLinkRate(link, link.reverseBits, t)}</text>
+                <text className="graph-link-capacity" x={midpoint.x} y={midpoint.y + 3} textAnchor="middle">{negotiatedLabel(link, t, t("协商", "Negotiated"))}</text>
+                {link.fallback !== "none" && <text className={`graph-link-fallback graph-link-fallback--${link.fallback}`} x={midpoint.x} y={midpoint.y + 20} textAnchor="middle">{link.fallback === "active" ? t("主链路失效", "Primary link failed") : fallbackAvailableLabel(link.fallbackInterfaces.length, t)}</text>}
               </g>;
             })}
             {nodes.map((node) => {
@@ -140,8 +141,8 @@ export function TopologyPage({ token }: { token: string }) {
       <article className="topology-list managed-link-list">
         <header><div><span className="eyebrow">{t("检查连接明细", "Inspect link details")}</span><h2>{t("双向速率与链路选择", "Bidirectional rates and path selection")}</h2></div><small>{t("最新采样", "Latest sample")}</small></header>
         {links.map((link) => <button type="button" key={link.id} onClick={() => setSelection({ kind: "link", id: link.id })}>
-          <strong>{link.source.name} <b>↔</b> {link.target.name}</strong><span>{link.primaryPath ?? link.primaryInterface ?? t("接口待识别", "Interface pending")} · {t("协商", "negotiated")} {formatRate(link.negotiatedBits, t)}</span>
-          <small>{link.source.name} → {formatRate(link.forwardBits, t)} · {link.target.name} → {formatRate(link.reverseBits, t)} · {fallbackLabel(link, t)}{link.fallbackPaths.length ? t(` · 备用：${link.fallbackPaths.join("；")}`, ` · fallback: ${link.fallbackPaths.join("; ")}`) : ""}</small>
+          <strong>{link.source.name} <b>↔</b> {link.target.name}</strong><span>{linkPathLabel(link, t)} · {negotiatedLabel(link, t, t("协商", "negotiated"))}</span>
+          <small>{link.source.name} → {formatLinkRate(link, link.forwardBits, t)} · {link.target.name} → {formatLinkRate(link, link.reverseBits, t)} · {fallbackLabel(link, t)}{link.fallbackPaths.length ? t(` · 备用：${link.fallbackPaths.join("；")}`, ` · fallback: ${link.fallbackPaths.join("; ")}`) : ""}</small>
         </button>)}
       </article>
     </>}
@@ -150,14 +151,14 @@ export function TopologyPage({ token }: { token: string }) {
 
 function TopologyInspector({ node, link, rate, t }: { node: ClusterNode | null; link: ManagedLink | null; rate?: NodeRate; t: (zh: string, en: string) => string }) {
   if (link) return <aside className="topology-inspector"><span className="eyebrow">{t("连接详情", "Link details")}</span><h2>{link.source.name} ↔ {link.target.name}</h2><div className={`health-badge health-badge--managed-${link.health}`}><i />{linkHealthLabel(link.health, t)}</div><dl>
-    <div><dt>{link.source.name} → {link.target.name}</dt><dd>{formatRate(link.forwardBits, t)}</dd></div><div><dt>{link.target.name} → {link.source.name}</dt><dd>{formatRate(link.reverseBits, t)}</dd></div>
-    <div><dt>{t("主接口", "Primary interface")}</dt><dd>{link.primaryInterface ?? t("等待识别", "Pending detection")}</dd></div><div><dt>{t("协商速率", "Negotiated rate")}</dt><dd>{formatRate(link.negotiatedBits, t)}</dd></div>
-    <div><dt>{t("Ping 延迟", "Ping latency")}</dt><dd>{formatLatency(link.latencyMicros, t)}</dd></div>
+    <div><dt>{link.source.name} → {link.target.name}</dt><dd>{formatLinkRate(link, link.forwardBits, t)}</dd></div><div><dt>{link.target.name} → {link.source.name}</dt><dd>{formatLinkRate(link, link.reverseBits, t)}</dd></div>
+    <div><dt>{t("主接口", "Primary interface")}</dt><dd>{link.health === "offline" ? unavailableLabel(t) : link.primaryInterface ?? t("等待识别", "Pending detection")}</dd></div><div><dt>{t("协商速率", "Negotiated rate")}</dt><dd>{formatLinkRate(link, link.negotiatedBits, t)}</dd></div>
+    <div><dt>{t("Ping 延迟", "Ping latency")}</dt><dd>{link.health === "offline" ? unavailableLabel(t) : formatLatency(link.latencyMicros, t)}</dd></div>
     <div><dt>Fallback</dt><dd>{fallbackLabel(link, t)}</dd></div><div><dt>{t("备用接口", "Fallback interfaces")}</dt><dd>{link.fallbackInterfaces.join(t("、", ", ")) || t("无", "None")}</dd></div>
     <div><dt>{t("最新采样", "Latest sample")}</dt><dd>{link.observedAt ? relativeTime(link.observedAt) : t("等待遥测", "Waiting for telemetry")}</dd></div>
   </dl><p>{t("链路由两端内核路由或邻居证据验证；双向速率来自两端接口连续采样，协商速率来自网卡报告值。", "Links are verified by routing or neighbor evidence at both endpoints. Bidirectional rates come from consecutive interface samples and negotiated rates from NIC reports.")}</p></aside>;
   if (node) return <aside className="topology-inspector"><span className="eyebrow">{t("节点详情", "Node details")}</span><h2>{node.name}</h2><div className={`vertex-kind vertex-kind--managed-${nodeVisualState(node)}`}>{node.status}</div><dl>
-    <div><dt>{t("角色", "Roles")}</dt><dd>{roleText(node, t)}</dd></div><div><dt>{t("架构", "Architecture")}</dt><dd>{node.architecture}</dd></div><div><dt>{t("接收速率", "Receive rate")}</dt><dd>{formatRate(rate?.receivedBits, t)}</dd></div><div><dt>{t("发送速率", "Transmit rate")}</dt><dd>{formatRate(rate?.transmittedBits, t)}</dd></div><div><dt>{t("最后在线", "Last seen")}</dt><dd>{relativeTime(node.lastSeenAt)}</dd></div>
+    <div><dt>{t("角色", "Roles")}</dt><dd>{roleText(node, t)}</dd></div><div><dt>{t("架构", "Architecture")}</dt><dd>{node.architecture}</dd></div><div><dt>{t("接收速率", "Receive rate")}</dt><dd>{nodeAccessUnavailable(node) ? unavailableLabel(t) : formatRate(rate?.receivedBits, t)}</dd></div><div><dt>{t("发送速率", "Transmit rate")}</dt><dd>{nodeAccessUnavailable(node) ? unavailableLabel(t) : formatRate(rate?.transmittedBits, t)}</dd></div><div><dt>{t("最后在线", "Last seen")}</dt><dd>{relativeTime(node.lastSeenAt)}</dd></div>
   </dl></aside>;
   return <aside className="topology-inspector topology-inspector--empty"><div className="inspector-symbol">⌖</div><h2>{t("检查节点或连接", "Inspect a node or link")}</h2><p>{t("点击图中的节点或连接查看当前状态。", "Select a node or link in the graph to inspect its current state.")}</p></aside>;
 }
@@ -198,19 +199,21 @@ export function buildObservedLinks(nodes: ClusterNode[], rates: Record<string, N
       if (!selected) continue;
       const fallbacks = paths.filter((_, index) => index !== (selectedIndex >= 0 ? selectedIndex : 0));
       const linkID = `${source.id}:${target.id}`;
+      const health = linkHealth(source, target);
+      const accessible = health !== "offline";
       const primaryFailed = topology.edges.some((edge) => edgeConnects(edge, source.id, target.id) && edge.health === "critical" &&
         (edge.capacityBits ?? 0) > (selected.capacityBits ?? 0)) || (previousPrimary[linkID]?.capacity ?? 0) > (selected.capacityBits ?? 0);
       links.push({
         id: linkID, source, target,
-        forwardBits: selected.forwardBits, reverseBits: selected.reverseBits,
-        negotiatedBits: selected.capacityBits, latencyMicros: selected.latencyMicros,
-        primaryInterface: interfacePathLabel(selected),
-        primaryPath: pathLabel(selected),
-        fallbackInterfaces: fallbacks.map(interfacePathLabel),
-        fallbackPaths: fallbacks.map((item) => `${pathLabel(item)} (${formatRate(item.capacityBits)} · ${formatLatency(item.latencyMicros)})`),
-        fallback: primaryFailed ? "active" : fallbacks.length ? "available" : "none",
+        forwardBits: accessible ? selected.forwardBits : undefined, reverseBits: accessible ? selected.reverseBits : undefined,
+        negotiatedBits: accessible ? selected.capacityBits : undefined, latencyMicros: accessible ? selected.latencyMicros : undefined,
+        primaryInterface: accessible ? interfacePathLabel(selected) : undefined,
+        primaryPath: accessible ? pathLabel(selected) : undefined,
+        fallbackInterfaces: accessible ? fallbacks.map(interfacePathLabel) : [],
+        fallbackPaths: accessible ? fallbacks.map((item) => `${pathLabel(item)} (${formatRate(item.capacityBits)} · ${formatLatency(item.latencyMicros)})`) : [],
+        fallback: accessible ? primaryFailed ? "active" : fallbacks.length ? "available" : "none" : "none",
         observedAt: newestTimestamp(rates[source.id]?.observedAt, rates[target.id]?.observedAt),
-        health: linkHealth(source, target),
+        health,
       });
     }
   }
@@ -365,6 +368,24 @@ function newestTimestamp(left?: string, right?: string) {
   return Date.parse(left) >= Date.parse(right) ? left : right;
 }
 
+// "1 fallback links available" was the plural falling out of a template string.
+// The Chinese measure word does not inflect, so only the English side branches.
+function fallbackAvailableLabel(count: number, t: (zh: string, en: string) => string) {
+  return t(`${count} 条备用链路可用`, count === 1 ? "1 fallback link available" : `${count} fallback links available`);
+}
+
+function linkRateSampled(link: ManagedLink, rate: number | undefined) {
+  return link.health !== "offline" && rate !== undefined;
+}
+
+// formatLinkRate returns either a rate or a status phrase, so "Negotiated" was
+// running straight into "Waiting for sample" as though it were one sentence.
+// A separator keeps the field name and its state readable as two things.
+function negotiatedLabel(link: ManagedLink, t: (zh: string, en: string) => string, heading: string) {
+  const value = formatLinkRate(link, link.negotiatedBits, t);
+  return linkRateSampled(link, link.negotiatedBits) ? `${heading} ${value}` : `${heading} · ${value}`;
+}
+
 function ipv4Number(value: string) {
   const parts = value.split(".").map(Number);
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return undefined;
@@ -373,7 +394,7 @@ function ipv4Number(value: string) {
 
 function effectiveRoles(node: ClusterNode) { return node.roles?.length ? node.roles : ["compute"]; }
 function roleText(node: ClusterNode, t: (zh: string, en: string) => string) { return effectiveRoles(node).map((role) => t(({ management: "管理", compute: "计算", storage: "存储" }[role] ?? role), ({ management: "Management", compute: "Compute", storage: "Storage" }[role] ?? role))).join(" · "); }
-function fallbackLabel(link: ManagedLink, t: (zh: string, en: string) => string) { return link.fallback === "active" ? t("主链路失效，备用链路已接管", "Primary link failed; fallback is active") : link.fallback === "available" ? t(`${link.fallbackInterfaces.length} 条备用链路可用`, `${link.fallbackInterfaces.length} fallback links available`) : t("无备用链路", "No fallback link"); }
+function fallbackLabel(link: ManagedLink, t: (zh: string, en: string) => string) { return link.health === "offline" ? t("节点不可访问，备用链路状态未知", "Node unavailable; fallback status unknown") : link.fallback === "active" ? t("主链路失效，备用链路已接管", "Primary link failed; fallback is active") : link.fallback === "available" ? fallbackAvailableLabel(link.fallbackInterfaces.length, t) : t("无备用链路", "No fallback link"); }
 function findPathSelection(topology: TopologySnapshot, sourceID: string, targetID: string) {
   return (topology.pathSelections ?? []).find((selection) =>
     selection.sourceId === sourceID && selection.targetId === targetID ||
@@ -388,8 +409,9 @@ function pathMatchesEdge(path: DiscoveredPath, edge: TopologySnapshot["edges"][n
   const targetInterface = forward ? edge.targetInterface : edge.sourceInterface;
   return (!sourceInterface || path.source.name === sourceInterface) && (!targetInterface || path.target.name === targetInterface);
 }
-function linkHealth(source: ClusterNode, target: ClusterNode): ManagedLink["health"] { return source.status === "offline" || target.status === "offline" ? "offline" : source.status === "ready" && target.status === "ready" ? "healthy" : "attention"; }
-function nodeVisualState(node: ClusterNode): "ready" | "attention" | "offline" { return node.status === "offline" ? "offline" : node.status === "ready" ? "ready" : "attention"; }
+function nodeAccessUnavailable(node: ClusterNode) { return ["offline", "unreachable", "removed", "rejected"].includes(node.status); }
+function linkHealth(source: ClusterNode, target: ClusterNode): ManagedLink["health"] { return nodeAccessUnavailable(source) || nodeAccessUnavailable(target) ? "offline" : source.status === "ready" && target.status === "ready" ? "healthy" : "attention"; }
+function nodeVisualState(node: ClusterNode): "ready" | "attention" | "offline" { return nodeAccessUnavailable(node) ? "offline" : node.status === "ready" ? "ready" : "attention"; }
 function linkHealthLabel(health: ManagedLink["health"], t: (zh: string, en: string) => string) { return t(health === "healthy" ? "连接正常" : health === "attention" ? "节点受限" : "连接不可用", health === "healthy" ? "Healthy" : health === "attention" ? "Node restricted" : "Unavailable"); }
 function layoutNodes(nodes: ClusterNode[]): Record<string, Position> {
   const result: Record<string, Position> = {};
@@ -406,6 +428,9 @@ function layoutNodes(nodes: ClusterNode[]): Record<string, Position> {
 }
 function edgeStrokeWidth(rate: number) { return !rate ? 2 : Math.min(7, 2 + Math.log10(rate + 1) * .55); }
 function formatRate(rate?: number, t?: (zh: string, en: string) => string) { return rate === undefined ? (t ? t("等待采样", "Waiting for sample") : "—") : formatBitRate(rate); }
+function unavailableLabel(t: (zh: string, en: string) => string) { return t("不可用", "Unavailable"); }
+function formatLinkRate(link: ManagedLink, rate: number | undefined, t: (zh: string, en: string) => string) { return link.health === "offline" ? unavailableLabel(t) : formatRate(rate, t); }
+function linkPathLabel(link: ManagedLink, t: (zh: string, en: string) => string) { return link.health === "offline" ? t("节点不可访问", "Node unavailable") : link.primaryPath ?? link.primaryInterface ?? t("接口待识别", "Interface pending"); }
 function pathLabel(path: DiscoveredPath) {
   const source = path.sourceAddress ? `${path.source.name} ${path.sourceAddress}` : path.source.name;
   const target = path.targetAddress ? `${path.target.name} ${path.targetAddress}` : path.target.name;

@@ -2,7 +2,7 @@
 
 [English](DEPLOYMENT.md) | [简体中文](DEPLOYMENT.zh-CN.md)
 
-适用于 XIRANG **1.0.1**。
+适用于 XIRANG **1.1.0**。
 
 本指南使用预构建原生包部署控制节点或被控节点，不需要容器运行时。
 
@@ -32,7 +32,7 @@ cd XIRANG
 2. 仅在缺少系统工具时调用软件包管理器安装依赖。
 3. 通过标准 `sudo` 提示请求系统安装权限。
 4. 从 GitHub Release 下载与本机架构匹配的包。
-5. 使用 Release 中的 `SHA256SUMS` 校验包。
+5. 先校验 Release 的 `SHA256SUMS` 签名，再用它校验安装包。
 6. 启用已有 NTP 客户端，或安装 Chrony，并确认时间已经同步。
 7. 安装服务并进入控制节点或被控节点初始化向导。
 
@@ -48,22 +48,37 @@ mTLS 证书有效期、OIDC 会话、遥测排序和用量核算要求主机具�
 安装指定 Release：
 
 ```bash
-./install.sh --version 1.0.1
+./install.sh --version 1.1.0
 ```
 
-安装已下载的包时，安装器会读取同目录下的 `SHA256SUMS`：
+安装已下载的包时，安装器会读取同目录下的 `SHA256SUMS` 和 `SHA256SUMS.sig`：
 
 ```bash
-./install.sh --archive ~/Downloads/xirang-1.0.1-linux-amd64.tar.gz
+./install.sh --archive ~/Downloads/xirang-1.1.0-linux-amd64.tar.gz
 ```
 
 如果没有校验文件，必须显式提供可信的 SHA-256：
 
 ```bash
 ./install.sh \
-  --archive ~/Downloads/xirang-1.0.1-linux-amd64.tar.gz \
+  --archive ~/Downloads/xirang-1.1.0-linux-amd64.tar.gz \
   --sha256 EXPECTED_SHA256
 ```
+
+## Release 的信任来源
+
+每个 Release 都会发布 `SHA256SUMS.sig`，即校验清单的 Ed25519 签名。安装器在读取
+任何一条校验和之前，先用内嵌在 `install.sh` 中的公钥验证该签名；签名缺失或不匹配
+时安装会中止。
+
+仅有校验和不足以建立信任：安装包和校验清单来自同一个 GitHub Release、经由同一条
+通道下发，能替换其中一个的攻击者同样能替换另一个。签名才让被替换的 Release 可被
+发现，因为伪造签名需要私钥，而私钥不会离开发布流水线。
+
+验证签名需要 OpenSSL 1.1.1 或更高版本，安装器会将其纳入自动安装的主机工具。
+
+使用 `--sha256` 等同于在带外建立信任——由你自己断言一个已知摘要——因此会取代签名
+校验。离线安装，或安装签名机制引入之前发布的版本时使用该参数。
 
 ## 初始化控制节点
 

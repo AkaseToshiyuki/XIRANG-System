@@ -2,7 +2,7 @@
 
 [English](OPERATIONS.md) | [简体中文](OPERATIONS.zh-CN.md)
 
-Applies to XIRANG **1.0.1**.
+Applies to XIRANG **1.1.0**.
 
 This runbook covers backups, recovery, upgrades, and rollback. Perform disruptive
 steps during a maintenance window and keep recovery points on storage independent

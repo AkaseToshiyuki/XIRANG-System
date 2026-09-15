@@ -46,8 +46,36 @@ import (
 	"github.com/xirang-grid/xirang/pkg/version"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// agentServerOptions are the transport limits applied to the Agent control
+// plane. They are separated from the listener so an interoperability test can
+// build a server that matches production exactly.
+func agentServerOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.MaxRecvMsgSize(1 << 20), grpc.MaxSendMsgSize(1 << 20),
+		// An Agent holds one bidirectional control stream. The cap sits well
+		// above that and bounds what a single misbehaving connection can make
+		// the controller allocate.
+		grpc.MaxConcurrentStreams(16),
+		// Agents configure no keepalive of their own, so this rejects only a
+		// client pinging faster than any legitimate one would, and refuses
+		// pings from a connection carrying no stream at all.
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             30 * time.Second,
+			PermitWithoutStream: false,
+		}),
+		// Reclaim streams whose peer vanished without closing the connection,
+		// which TCP alone can leave established for a long time.
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    60 * time.Second,
+			Timeout: 20 * time.Second,
+		}),
+	}
+}
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "__xirang-build-exec" {
@@ -63,6 +91,7 @@ func main() {
 	unreachableAfter := flag.Duration("node-unreachable-after", 30*time.Second, "heartbeat age before marking a node unreachable")
 	offlineAfter := flag.Duration("node-offline-after", 2*time.Minute, "heartbeat age before marking a node offline")
 	reconcileInterval := flag.Duration("node-reconcile-interval", 5*time.Second, "node heartbeat reconciliation interval")
+	certificateRotateBefore := flag.Duration("node-certificate-rotate-before", 7*24*time.Hour, "automatically rotate node certificates this long before expiry")
 	dataDirectory := flag.String("data-dir", ".data/xirang", "control-plane state directory")
 	webRoot := flag.String("web-root", "/usr/local/share/xirang/web", "compiled Web console directory (empty disables Web serving)")
 	jobArtifactRoot := flag.String("job-artifact-root", "/srv/xirang/XirangShare/.xirang/artifacts", "versioned system Job artifact directory on shared storage")
@@ -116,8 +145,8 @@ func main() {
 		return
 	}
 	if *agentHeartbeatInterval < time.Second || *unreachableAfter <= 2**agentHeartbeatInterval ||
-		*offlineAfter <= *unreachableAfter || *reconcileInterval <= 0 {
-		_, _ = os.Stderr.WriteString("heartbeat must be at least 1s, unreachable-after must exceed two heartbeats, and offline-after must exceed unreachable-after\n")
+		*offlineAfter <= *unreachableAfter || *reconcileInterval <= 0 || *certificateRotateBefore <= 0 {
+		_, _ = os.Stderr.WriteString("heartbeat must be at least 1s, unreachable-after must exceed two heartbeats, offline-after must exceed unreachable-after, and certificate rotation window must be positive\n")
 		os.Exit(2)
 	}
 	if *telemetrySamplesPerNode < 1 || *telemetrySamplesPerNode > 100_000 {
@@ -413,17 +442,15 @@ func main() {
 		logger.Error("listen for Agent control streams", "error", err)
 		os.Exit(1)
 	}
-	serverCertificate, err := tls.LoadX509KeyPair(authority.ServerCertificatePath(), authority.ServerKeyPath())
-	if err != nil {
-		logger.Error("load Agent control-stream certificate", "error", err)
-		os.Exit(1)
-	}
 	agentTLS := tlsConfig.Clone()
 	agentTLS.ClientAuth = tls.RequireAndVerifyClientCert
-	agentTLS.Certificates = []tls.Certificate{serverCertificate}
-	agentServer := grpc.NewServer(
+	// Certificates is deliberately left empty. crypto/tls consults
+	// GetCertificate only when a client sends SNI or when Certificates is
+	// empty, and Agents dial the controller by address, so a static entry here
+	// would pin the listener to the certificate loaded at startup and defeat
+	// renewal.
+	agentServer := grpc.NewServer(append(agentServerOptions(),
 		grpc.Creds(credentials.NewTLS(agentTLS)),
-		grpc.MaxRecvMsgSize(1<<20), grpc.MaxSendMsgSize(1<<20),
 		grpc.StreamInterceptor(func(service any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 			err := handler(service, stream)
 			if err != nil && !errors.Is(err, context.Canceled) {
@@ -435,7 +462,7 @@ func main() {
 			}
 			return err
 		}),
-	)
+	)...)
 	xirangv1.RegisterAgentControlServer(agentServer, agentControl)
 
 	stop := make(chan os.Signal, 1)
@@ -443,12 +470,14 @@ func main() {
 	httpErrors := make(chan error, 1)
 	agentErrors := make(chan error, 1)
 	go func() {
-		httpErrors <- application.ListenAndServeTLS(authority.ServerCertificatePath(), authority.ServerKeyPath())
+		// Empty paths: the certificate comes from the authority through
+		// TLSConfig.GetCertificate, which reissues it before it expires.
+		httpErrors <- application.ListenAndServeTLS("", "")
 	}()
 	go func() { agentErrors <- agentServer.Serve(agentListener) }()
 	reconcileContext, stopReconciler := context.WithCancel(context.Background())
 	defer stopReconciler()
-	go reconcileNodes(reconcileContext, enrollmentService, *reconcileInterval, *unreachableAfter, *offlineAfter, logger)
+	go reconcileNodes(reconcileContext, enrollmentService, commandHub, *reconcileInterval, *unreachableAfter, *offlineAfter, *certificateRotateBefore, logger)
 	go reconcileSharedSpaces(reconcileContext, sharedSpaceService, sharedSpaceReconcile, logger)
 	go alerting.RunEvaluator(reconcileContext, topologyService, telemetryService, alertService, *alertEvaluationInterval, func(err error) {
 		logger.Error("evaluate interface alerts", "error", err)
@@ -517,22 +546,45 @@ func reconcileSharedSpaces(ctx context.Context, service *clusterops.Service, req
 	}
 }
 
-func reconcileNodes(ctx context.Context, service *enrollment.Service, interval, unreachableAfter, offlineAfter time.Duration, logger *slog.Logger) {
+func reconcileNodes(ctx context.Context, service *enrollment.Service, commands *controlstream.Hub, interval, unreachableAfter, offlineAfter, certificateRotateBefore time.Duration, logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	reconcile := func() {
+		changed, err := service.ReconcileStaleNodes(ctx, unreachableAfter, offlineAfter)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("reconcile stale nodes", "error", err)
+			return
+		}
+		for _, node := range changed {
+			logger.Warn("node heartbeat state changed", "node", node.ID, "status", node.Status, "lastSeenAt", node.LastSeenAt)
+		}
+		rotations, err := service.RequestExpiringCertificateRotations(ctx, certificateRotateBefore)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("request expiring node certificate rotations", "error", err)
+			return
+		}
+		for _, node := range rotations {
+			message := &xirangv1.ControlMessage{
+				MessageId: node.PendingCertificateCommandID, SentAt: timestamppb.Now(),
+				Payload: &xirangv1.ControlMessage_RotateCertificate{RotateCertificate: &xirangv1.RotateCertificate{
+					RotationId: node.PendingCertificateRotationID,
+				}},
+			}
+			if err := commands.Enqueue(node.ID, message); err != nil {
+				_, _ = service.ConfirmCertificateRotation(ctx, node.ID, node.PendingCertificateCommandID, false, "automatic command enqueue failed")
+				logger.Error("enqueue automatic certificate rotation", "node", node.ID, "error", err)
+				continue
+			}
+			logger.Info("requested automatic node certificate rotation", "node", node.ID, "notAfter", node.CertificateNotAfter)
+		}
+	}
+	reconcile()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			changed, err := service.ReconcileStaleNodes(ctx, unreachableAfter, offlineAfter)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				logger.Error("reconcile stale nodes", "error", err)
-				continue
-			}
-			for _, node := range changed {
-				logger.Warn("node heartbeat state changed", "node", node.ID, "status", node.Status, "lastSeenAt", node.LastSeenAt)
-			}
+			reconcile()
 		}
 	}
 }

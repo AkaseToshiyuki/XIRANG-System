@@ -59,9 +59,11 @@ does not advance the version. Administrators query the latest snapshot at
 `GET /topology` or a retained version at `GET /topology?version=N`.
 
 The latest response overlays inventory line rates and deterministic
-`single-best-healthy` selections for parallel endpoint links. Capacity is the
-selected link's capacity, never the sum; remaining non-critical links are ordered
-fallbacks. This is control-plane policy metadata and does not rewrite host routes.
+`single-best-healthy` selections for parallel endpoint links. Probe capacity is
+positive only for exact reciprocal address observations; its effective value is
+the smaller directional declaration and its latency is the larger directional
+median. Parallel physical links are ordered fallbacks and are never summed. This
+is control-plane policy metadata and does not rewrite host routes.
 
 Contract compatibility rules:
 

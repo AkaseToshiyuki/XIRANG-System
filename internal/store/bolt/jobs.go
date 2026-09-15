@@ -1,6 +1,7 @@
 package bolt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,16 +19,11 @@ func (store *Store) CreateJob(ctx context.Context, job domain.Job) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	encoded, err := json.Marshal(job)
-	if err != nil {
-		return err
-	}
 	return store.database.Update(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket(jobsBucket)
-		if bucket.Get([]byte(job.ID)) != nil {
+		if tx.Bucket(jobsBucket).Get([]byte(job.ID)) != nil {
 			return scheduler.ErrConflict
 		}
-		return bucket.Put([]byte(job.ID), encoded)
+		return putJob(tx, job)
 	})
 }
 
@@ -47,6 +43,147 @@ func (store *Store) GetJob(ctx context.Context, id string) (domain.Job, error) {
 }
 
 func (store *Store) ListJobs(ctx context.Context, limit int) ([]domain.Job, error) {
+	return store.listJobs(ctx, "", limit, false)
+}
+
+// ListJobsForOwner returns only the given owner's jobs in the standard listing
+// order. It reads the owner index rather than scanning every job, so the cost
+// follows how much work that one owner has submitted instead of how large the
+// cluster's history has grown. Selecting the owner before applying the limit is
+// also what keeps a caller's page from being crowded out by other owners' jobs.
+func (store *Store) ListJobsForOwner(ctx context.Context, ownerID string, limit int) ([]domain.Job, error) {
+	return store.listOwnedJobs(ctx, ownerID, limit, false)
+}
+
+// ListActiveJobsForOwner returns every non-terminal job belonging to an owner.
+// It is deliberately unbounded: quota accounting that silently drops jobs past
+// a fixed window under-counts usage and lets the quota be exceeded.
+func (store *Store) ListActiveJobsForOwner(ctx context.Context, ownerID string) ([]domain.Job, error) {
+	return store.listOwnedJobs(ctx, ownerID, 0, true)
+}
+
+// ListAllJobs returns every job with no limit. The scheduler needs the complete
+// history: dependency resolution has to see a prerequisite that already
+// succeeded, and fair-share accounting decays the usage of finished jobs.
+func (store *Store) ListAllJobs(ctx context.Context) ([]domain.Job, error) {
+	return store.listJobs(ctx, "", 0, false)
+}
+
+// ListActiveJobs returns every non-terminal job in the cluster, read from the
+// active index so the cost follows the live working set rather than the whole
+// history.
+func (store *Store) ListActiveJobs(ctx context.Context) ([]domain.Job, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	jobs := make([]domain.Job, 0)
+	err := store.database.View(func(tx *bbolt.Tx) error {
+		records := tx.Bucket(jobsBucket)
+		return tx.Bucket(activeJobsBucket).ForEach(func(id, _ []byte) error {
+			job, ok, err := jobByIndexedID(records, id)
+			if err != nil || !ok {
+				return err
+			}
+			jobs = append(jobs, job)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sortJobsForListing(jobs)
+	return jobs, nil
+}
+
+// ListJobsFinishedSince returns the jobs that reached a terminal state at or
+// after the given instant, read from the completion index so the cost follows
+// the window asked for rather than the whole history.
+func (store *Store) ListJobsFinishedSince(ctx context.Context, since time.Time) ([]domain.Job, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	lower := finishedIndexKey(since, "")
+	jobs := make([]domain.Job, 0)
+	err := store.database.View(func(tx *bbolt.Tx) error {
+		records := tx.Bucket(jobsBucket)
+		cursor := tx.Bucket(jobsFinishedBucket).Cursor()
+		for key, _ := cursor.Seek(lower); key != nil; key, _ = cursor.Next() {
+			separator := bytes.IndexByte(key, 0)
+			if separator < 0 {
+				continue
+			}
+			job, ok, err := jobByIndexedID(records, key[separator+1:])
+			if err != nil || !ok {
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			jobs = append(jobs, job)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sortJobsForListing(jobs)
+	return jobs, nil
+}
+
+func (store *Store) listOwnedJobs(ctx context.Context, ownerID string, limit int, activeOnly bool) ([]domain.Job, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if ownerID == "" {
+		return []domain.Job{}, nil
+	}
+	jobs := make([]domain.Job, 0)
+	err := store.database.View(func(tx *bbolt.Tx) error {
+		owned := tx.Bucket(jobsByOwnerBucket).Bucket([]byte(ownerID))
+		if owned == nil {
+			return nil
+		}
+		records := tx.Bucket(jobsBucket)
+		return owned.ForEach(func(id, _ []byte) error {
+			job, ok, err := jobByIndexedID(records, id)
+			if err != nil || !ok {
+				return err
+			}
+			if activeOnly && job.Status.Terminal() {
+				return nil
+			}
+			jobs = append(jobs, job)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sortJobsForListing(jobs)
+	if limit > 0 && len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
+	return jobs, nil
+}
+
+// jobByIndexedID loads the record an index entry points at. A missing record
+// means the index outlived its job, which is reported as absent rather than as
+// an error so one stale entry cannot fail an entire listing.
+func jobByIndexedID(records *bbolt.Bucket, id []byte) (domain.Job, bool, error) {
+	encoded := records.Get(id)
+	if encoded == nil {
+		return domain.Job{}, false, nil
+	}
+	var job domain.Job
+	if err := json.Unmarshal(encoded, &job); err != nil {
+		return domain.Job{}, false, err
+	}
+	return job, true, nil
+}
+
+// listJobs walks the job bucket, keeping only the records the caller asked for.
+// A limit of zero or less returns every match.
+func (store *Store) listJobs(ctx context.Context, ownerID string, limit int, activeOnly bool) ([]domain.Job, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -57,10 +194,30 @@ func (store *Store) ListJobs(ctx context.Context, limit int) ([]domain.Job, erro
 			if err := json.Unmarshal(encoded, &job); err != nil {
 				return err
 			}
+			if ownerID != "" && job.OwnerID != ownerID {
+				return nil
+			}
+			if activeOnly && job.Status.Terminal() {
+				return nil
+			}
 			jobs = append(jobs, job)
 			return nil
 		})
 	})
+	if err != nil {
+		return nil, err
+	}
+	sortJobsForListing(jobs)
+	if limit > 0 && len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
+	return jobs, nil
+}
+
+// sortJobsForListing orders queued work first by descending priority so the
+// scheduler and the console agree on what is next, then everything else newest
+// first.
+func sortJobsForListing(jobs []domain.Job) {
 	sort.Slice(jobs, func(i, j int) bool {
 		if jobs[i].Status == domain.JobStatusQueued && jobs[j].Status == domain.JobStatusQueued && jobs[i].Priority != jobs[j].Priority {
 			return jobs[i].Priority > jobs[j].Priority
@@ -73,10 +230,6 @@ func (store *Store) ListJobs(ctx context.Context, limit int) ([]domain.Job, erro
 		}
 		return jobs[i].CreatedAt.After(jobs[j].CreatedAt)
 	})
-	if len(jobs) > limit {
-		jobs = jobs[:limit]
-	}
-	return jobs, err
 }
 
 func (store *Store) UpdateGroupJobStorageQuota(ctx context.Context, groupID string, quotaBytes int64, now time.Time) ([]domain.Job, error) {
@@ -85,8 +238,10 @@ func (store *Store) UpdateGroupJobStorageQuota(ctx context.Context, groupID stri
 	}
 	updated := []domain.Job{}
 	err := store.database.Update(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket(jobsBucket)
-		return bucket.ForEach(func(key, encoded []byte) error {
+		// bbolt leaves the result undefined if the bucket being iterated is
+		// modified during ForEach, so the matches are collected first and
+		// written afterwards.
+		if err := tx.Bucket(jobsBucket).ForEach(func(_, encoded []byte) error {
 			var job domain.Job
 			if err := json.Unmarshal(encoded, &job); err != nil {
 				return err
@@ -95,18 +250,22 @@ func (store *Store) UpdateGroupJobStorageQuota(ctx context.Context, groupID stri
 				return nil
 			}
 			job.StorageQuotaBytes, job.UpdatedAt = quotaBytes, now.UTC()
-			replacement, err := json.Marshal(job)
-			if err != nil {
-				return err
-			}
-			if err := bucket.Put(key, replacement); err != nil {
-				return err
-			}
 			updated = append(updated, job)
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+		for _, job := range updated {
+			if err := putJob(tx, job); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
-	return updated, err
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 func (store *Store) UpdateUserJobStorageQuota(ctx context.Context, ownerID string, quotaBytes int64, now time.Time) ([]domain.Job, error) {
@@ -115,8 +274,10 @@ func (store *Store) UpdateUserJobStorageQuota(ctx context.Context, ownerID strin
 	}
 	updated := []domain.Job{}
 	err := store.database.Update(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket(jobsBucket)
-		return bucket.ForEach(func(key, encoded []byte) error {
+		// bbolt leaves the result undefined if the bucket being iterated is
+		// modified during ForEach, so the matches are collected first and
+		// written afterwards.
+		if err := tx.Bucket(jobsBucket).ForEach(func(_, encoded []byte) error {
 			var job domain.Job
 			if err := json.Unmarshal(encoded, &job); err != nil {
 				return err
@@ -125,18 +286,22 @@ func (store *Store) UpdateUserJobStorageQuota(ctx context.Context, ownerID strin
 				return nil
 			}
 			job.StorageQuotaBytes, job.UpdatedAt = quotaBytes, now.UTC()
-			replacement, err := json.Marshal(job)
-			if err != nil {
-				return err
-			}
-			if err := bucket.Put(key, replacement); err != nil {
-				return err
-			}
 			updated = append(updated, job)
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+		for _, job := range updated {
+			if err := putJob(tx, job); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
-	return updated, err
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 func (store *Store) SetGroupJobsSuspended(ctx context.Context, groupID string, suspended bool, reason string, now time.Time) ([]domain.Job, error) {
@@ -145,8 +310,9 @@ func (store *Store) SetGroupJobsSuspended(ctx context.Context, groupID string, s
 	}
 	updated := []domain.Job{}
 	err := store.database.Update(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket(jobsBucket)
-		return bucket.ForEach(func(key, encoded []byte) error {
+		// Matches are collected before anything is written: bbolt leaves the
+		// result undefined if the iterated bucket is modified during ForEach.
+		if err := tx.Bucket(jobsBucket).ForEach(func(_, encoded []byte) error {
 			var job domain.Job
 			if err := json.Unmarshal(encoded, &job); err != nil {
 				return err
@@ -181,18 +347,22 @@ func (store *Store) SetGroupJobsSuspended(ctx context.Context, groupID string, s
 					job.BlockReason = groupDisabledBlockReason(reason, remaining, now)
 				}
 			}
-			replacement, err := json.Marshal(job)
-			if err != nil {
-				return err
-			}
-			if err := bucket.Put(key, replacement); err != nil {
-				return err
-			}
 			updated = append(updated, job)
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+		for _, job := range updated {
+			if err := putJob(tx, job); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
-	return updated, err
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 func groupDisabledBlockReason(reason string, groups []string, now time.Time) *domain.JobBlockReason {
@@ -1120,7 +1290,111 @@ func putJob(tx *bbolt.Tx, job domain.Job) error {
 	if err != nil {
 		return err
 	}
-	return tx.Bucket(jobsBucket).Put([]byte(job.ID), encoded)
+	records := tx.Bucket(jobsBucket)
+	// The finished index is keyed by completion time, so whatever entry the
+	// stored revision of this job produced has to be located before it is
+	// overwritten. A retried job loses its FinishedAt entirely, which is why
+	// the previous value cannot be derived from the new one.
+	previousFinish, err := storedFinishedAt(records.Get([]byte(job.ID)))
+	if err != nil {
+		return err
+	}
+	if err := records.Put([]byte(job.ID), encoded); err != nil {
+		return err
+	}
+	return indexJob(tx, job, previousFinish)
+}
+
+func storedFinishedAt(encoded []byte) (*time.Time, error) {
+	if encoded == nil {
+		return nil, nil
+	}
+	var record struct {
+		FinishedAt *time.Time `json:"finishedAt"`
+	}
+	if err := json.Unmarshal(encoded, &record); err != nil {
+		return nil, err
+	}
+	return record.FinishedAt, nil
+}
+
+// finishedIndexKey orders completions by time. The timestamp is fixed width so
+// the keys sort chronologically as bytes, which is what lets a range scan start
+// at an arbitrary instant.
+func finishedIndexKey(at time.Time, jobID string) []byte {
+	nanoseconds := at.UTC().UnixNano()
+	if nanoseconds < 0 {
+		nanoseconds = 0
+	}
+	return fmt.Appendf(nil, "%020d\x00%s", nanoseconds, jobID)
+}
+
+// indexJob keeps the owner, active and finished indexes in step with one job
+// record. An owner is fixed at submission and never reassigned, so that index
+// needs no previous state; the finished index is keyed by completion time and
+// does, which the caller supplies.
+func indexJob(tx *bbolt.Tx, job domain.Job, previousFinish *time.Time) error {
+	if job.OwnerID != "" {
+		owned, err := tx.Bucket(jobsByOwnerBucket).CreateBucketIfNotExists([]byte(job.OwnerID))
+		if err != nil {
+			return err
+		}
+		if err := owned.Put([]byte(job.ID), nil); err != nil {
+			return err
+		}
+	}
+	active := tx.Bucket(activeJobsBucket)
+	if job.Status.Terminal() {
+		if err := active.Delete([]byte(job.ID)); err != nil {
+			return err
+		}
+	} else if err := active.Put([]byte(job.ID), nil); err != nil {
+		return err
+	}
+	finished := tx.Bucket(jobsFinishedBucket)
+	if previousFinish != nil {
+		if err := finished.Delete(finishedIndexKey(*previousFinish, job.ID)); err != nil {
+			return err
+		}
+	}
+	if job.Status.Terminal() && job.FinishedAt != nil {
+		return finished.Put(finishedIndexKey(*job.FinishedAt, job.ID), nil)
+	}
+	return nil
+}
+
+// jobIndexVersion identifies the shape of the secondary indexes. Raising it
+// rebuilds them on the next open, which is how a database written before an
+// index existed acquires it.
+const jobIndexVersion = "2"
+
+// backfillJobIndexes rebuilds every job index from the job records. The indexes
+// are dropped first so a rebuild cannot leave entries behind from an earlier
+// layout. Writing to other buckets while iterating jobsBucket is safe; only the
+// iterated bucket must be left alone.
+func backfillJobIndexes(tx *bbolt.Tx) error {
+	metadata := tx.Bucket(schemaMetadataBucket)
+	if string(metadata.Get([]byte("job_index_version"))) == jobIndexVersion {
+		return nil
+	}
+	for _, name := range [][]byte{jobsByOwnerBucket, activeJobsBucket, jobsFinishedBucket} {
+		if err := tx.DeleteBucket(name); err != nil && !errors.Is(err, bbolt.ErrBucketNotFound) {
+			return err
+		}
+		if _, err := tx.CreateBucket(name); err != nil {
+			return err
+		}
+	}
+	if err := tx.Bucket(jobsBucket).ForEach(func(_, encoded []byte) error {
+		var job domain.Job
+		if err := json.Unmarshal(encoded, &job); err != nil {
+			return err
+		}
+		return indexJob(tx, job, nil)
+	}); err != nil {
+		return err
+	}
+	return metadata.Put([]byte("job_index_version"), []byte(jobIndexVersion))
 }
 
 func putNode(tx *bbolt.Tx, node domain.Node) error {

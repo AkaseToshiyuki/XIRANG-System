@@ -102,6 +102,10 @@ type HardwarePerformanceReporter interface {
 	ReportHardwarePerformance(context.Context, string, string, []string, float64, float64) (domain.Node, error)
 }
 
+type RuntimeFactsReporter interface {
+	ReportRuntimeFacts(context.Context, string, map[string]string) (domain.Node, error)
+}
+
 type NodeModeHeartbeater interface {
 	HeartbeatWithMode(context.Context, string, string, domain.NodeStatus) (domain.Node, error)
 }
@@ -533,6 +537,11 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 				if reporter, ok := server.nodes.(HardwarePerformanceReporter); ok {
 					if _, err := reporter.ReportHardwarePerformance(stream.Context(), nodeID, inventory.CpuModel, inventory.CpuFeatures, inventory.CpuBenchmarkScore, inventory.ComputeWeight); err != nil {
 						return status.Error(codes.Unavailable, "persist hardware performance")
+					}
+				}
+				if reporter, ok := server.nodes.(RuntimeFactsReporter); ok {
+					if _, err := reporter.ReportRuntimeFacts(stream.Context(), nodeID, inventory.RuntimeFacts); err != nil {
+						return status.Error(codes.Unavailable, "persist runtime facts")
 					}
 				}
 				server.refreshNetworkProbeTargets(stream.Context())

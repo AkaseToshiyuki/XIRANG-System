@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useState } from "react";
 import { getNodes, getPrincipal, getSetupStatus, getTelemetryInterval, getVersion, loginLocalUser, registerLocalUser, setupAdmin, updateTelemetryInterval } from "../api/client";
 import type { AccessPrincipal, VersionInfo } from "../api/contracts";
 import { OverviewPage } from "../pages/OverviewPage";
@@ -193,6 +193,26 @@ export function App() {
     </main>;
   }
 
+  // A Record keyed by Page makes the console exhaustive by type: adding a
+  // navigation entry without a matching view becomes a compile error rather
+  // than a silent fall-through to the empty state.
+  const isAdministrator = principal?.role === "admin";
+  const pageViews: Record<Page, () => ReactNode> = {
+    Overview: () => <OverviewPage token={token} onNavigate={navigate} />,
+    Topology: () => <TopologyPage token={token} />,
+    Alerts: () => <AlertsPage token={token} />,
+    Nodes: () => <NodesPage token={token} isAdmin={isAdministrator} />,
+    Enrollment: () => <EnrollmentPage token={token} />,
+    Jobs: () => <JobsPage token={token} isAdmin={isAdministrator} />,
+    Queues: () => <QueuesPage token={token} />,
+    Builds: () => <BuildsPage token={token} />,
+    Storage: () => <StoragePage token={token} isAdmin={isAdministrator} />,
+    Accounting: () => <AccountingPage token={token} isAdmin={isAdministrator} />,
+    Terminal: () => <TerminalPage token={token} />,
+    Access: () => <AccessPage token={token} />,
+  };
+  const activeView = pageViews[active];
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -228,7 +248,7 @@ export function App() {
           </button>
         </div>
         <PageErrorBoundary key={`${active}-${language}`} page={active} language={language}>
-          {active === "Overview" ? <OverviewPage token={token} onNavigate={navigate} /> : active === "Topology" ? <TopologyPage token={token} /> : active === "Alerts" ? <AlertsPage token={token} /> : active === "Nodes" ? <NodesPage token={token} isAdmin={principal?.role === "admin"} /> : active === "Enrollment" ? <EnrollmentPage token={token} /> : active === "Jobs" ? <JobsPage token={token} isAdmin={principal?.role === "admin"} /> : active === "Queues" ? <QueuesPage token={token} /> : active === "Builds" ? <BuildsPage token={token} /> : active === "Storage" ? <StoragePage token={token} isAdmin={principal?.role === "admin"} /> : active === "Accounting" ? <AccountingPage token={token} isAdmin={principal?.role === "admin"} /> : active === "Terminal" ? <TerminalPage token={token} /> : active === "Access" ? <AccessPage token={token} /> : (
+          {activeView ? activeView() : (
             <section className="empty-state">
               <span className="eyebrow">{t("页面不可用", "Page unavailable")}</span>
               <h1>{active}</h1>

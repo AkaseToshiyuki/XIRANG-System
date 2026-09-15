@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { getNodeInventory, getNodeObservations, getNodes, revokeNodeCertificate, rotateNodeCertificate, setNodeMode, setNodeTaints, updateNodeConfiguration, updateNodeStatus, watchNodes } from "../api/client";
+import { getNodeInventory, getNodeObservations, getNodes, removeNode, revokeNodeCertificate, rotateNodeCertificate, setNodeMode, setNodeTaints, updateNodeConfiguration, updateNodeStatus, watchNodes } from "../api/client";
 import type { ClusterNode, NodeInventorySnapshot, NodeResourceObservation } from "../api/contracts";
 import { clockTime, formatByteRate, formatBytes, networkDirectionBytesPerSecond, percentage, relativeTime } from "../lib/format";
 import { usePreferences } from "../app/preferences";
@@ -51,6 +51,10 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
       try {
         setLive(true);
         await watchNodes(token, (node) => {
+          if (node.removedAt) {
+            setNodes((current) => current.filter((item) => item.id !== node.id));
+            return;
+          }
           setNodes((current) => current.some((item) => item.id === node.id)
             ? current.map((item) => item.id === node.id ? node : item)
             : [...current, node]);
@@ -135,6 +139,23 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
   async function revoke(node: ClusterNode) {
     if (!window.confirm(`Revoke the certificate for ${node.name}? The Agent will immediately lose access.`)) return;
     await updateNode(node, () => revokeNodeCertificate(node.id, token), "Certificate revocation failed");
+  }
+
+  async function remove(node: ClusterNode) {
+    const confirmed = window.confirm(t(
+      `从集群中移除“${node.name}”？节点将从运行视图中消失，证书会被吊销，但任务和审计历史会保留。`,
+      `Remove “${node.name}” from the cluster? The node disappears from operational views and its certificate is revoked, while job and audit history are retained.`,
+    ));
+    if (!confirmed) return;
+    setError("");
+    try {
+      const removed = await removeNode(node.id, token);
+      setNodes((current) => current.filter((item) => item.id !== removed.id));
+      setResources((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== removed.id)));
+      setInventories((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== removed.id)));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t("节点移除失败", "Node removal failed"));
+    }
   }
 
   function rotateCertificate(node: ClusterNode) {
@@ -246,6 +267,7 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
               <button type="button" onClick={(event) => { const menu = event.currentTarget.closest("details"); if (menu) menu.open = false; openConfiguration(node); }}>{t("角色、连接与优先级", "Roles, access and priority")}</button>
               <button type="button" onClick={(event) => { const menu = event.currentTarget.closest("details"); if (menu) menu.open = false; openTaintEditor(node); }}>{t("调度约束", "Scheduling constraints")}</button>
               {node.certificateSerial && !node.certificateRevokedAt && node.status !== "pending_approval" && <><button type="button" disabled={Boolean(node.pendingCertificateCommandId)} onClick={() => void rotateCertificate(node)}>{node.pendingCertificateCommandId ? t("轮换中…", "Rotating…") : t("轮换证书", "Rotate certificate")}</button><button type="button" className="danger" onClick={() => void revoke(node)}>{t("吊销证书", "Revoke certificate")}</button></>}
+              {(node.status === "offline" || node.status === "rejected") && <button type="button" className="danger" onClick={() => void remove(node)}>{t("移除节点", "Remove node")}</button>}
             </div></details>}
           </span>
         </div>{isAdmin && configurationEditorID === node.id && <div className="node-editor node-configuration-editor">

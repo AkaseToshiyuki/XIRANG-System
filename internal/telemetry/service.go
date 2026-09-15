@@ -9,6 +9,7 @@ import (
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
 	"github.com/xirang-grid/xirang/internal/domain"
+	"github.com/xirang-grid/xirang/internal/runtimecompat"
 )
 
 var (
@@ -39,7 +40,7 @@ func (service *Service) ReportInventory(ctx context.Context, nodeID string, obse
 		!validText(snapshot.Distribution, 512) || !validText(snapshot.KernelVersion, 256) ||
 		!validText(snapshot.CpuModel, 512) || len(snapshot.CpuFeatures) > 1024 || !validTextSlice(snapshot.CpuFeatures, 64) ||
 		!validMetric(snapshot.CpuBenchmarkScore, 0, 1_000_000) || !validMetric(snapshot.ComputeWeight, 0, 1_000_000) ||
-		len(snapshot.NetworkInterfaces) > 256 || len(snapshot.Devices) > 256 || len(snapshot.NumaNodes) > 1024 || !validTextMap(snapshot.Labels, 256, 256, 1024) ||
+		len(snapshot.NetworkInterfaces) > 256 || len(snapshot.Devices) > 256 || len(snapshot.NumaNodes) > 1024 || !validTextMap(snapshot.Labels, 256, 256, 1024) || runtimecompat.ValidateFacts(snapshot.RuntimeFacts) != nil ||
 		invalidObservedAt(observedAt, service.now()) {
 		return ErrInvalidReport
 	}
@@ -50,6 +51,7 @@ func (service *Service) ReportInventory(ctx context.Context, nodeID string, obse
 		CPUModel: snapshot.CpuModel, CPUFeatures: append([]string(nil), snapshot.CpuFeatures...),
 		CPUBenchmarkScore: snapshot.CpuBenchmarkScore, ComputeWeight: snapshot.ComputeWeight,
 		Labels: cloneTextMap(snapshot.Labels), ObservedAt: observedAt.UTC(), ReceivedAt: service.now().UTC(),
+		RuntimeFacts: cloneTextMap(snapshot.RuntimeFacts),
 	}
 	for _, networkInterface := range snapshot.NetworkInterfaces {
 		if networkInterface == nil || !validIdentifier(networkInterface.Name, 64) || !validText(networkInterface.MacAddress, 64) ||

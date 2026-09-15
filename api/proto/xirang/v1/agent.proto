@@ -102,6 +102,7 @@ message InventorySnapshot {
   repeated string cpu_features = 12;
   double cpu_benchmark_score = 13;
   double compute_weight = 14;
+	map<string, string> runtime_facts = 15;
 }
 
 message NUMANode {
@@ -265,6 +266,7 @@ message NativeArtifact {
   string abi = 4;
   string entrypoint = 5;
   bytes signature = 6;
+	map<string, string> runtime_requirements = 7;
 }
 
 message CancelAssignment {

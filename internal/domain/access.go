@@ -18,6 +18,12 @@ type APIToken struct {
 	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
 	RevokedAt  *time.Time `json:"revokedAt,omitempty"`
 	UserID     string     `json:"userId,omitempty"`
+	// Interactive marks a browser session issued by password login, which
+	// always tracks the account's current role. An automation token keeps the
+	// narrower role it was minted with and is additionally capped by the
+	// owning account's role. Absent in records written before this field
+	// existed, which are automation tokens.
+	Interactive bool `json:"interactive,omitempty"`
 }
 
 type Principal struct {

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xirang-grid/xirang/internal/domain"
@@ -86,7 +87,25 @@ type AccessService struct {
 	groupRoles    map[string]string
 	now           func() time.Time
 	passwordSlots chan struct{}
+	loginMu       sync.Mutex
+	loginFailures map[string]loginAttemptState
 }
+
+// loginAttemptState backs a per-account sign-in backoff. Rate limiting by peer
+// address alone does not slow an attacker who rotates source addresses, and the
+// Argon2 concurrency limit turns a guessing loop into a denial of service
+// against everyone else's sign-in rather than a defence.
+type loginAttemptState struct {
+	failures  int
+	notBefore time.Time
+}
+
+const (
+	loginFailureThreshold = 5
+	loginBackoffBase      = 2 * time.Second
+	loginBackoffMaximum   = 15 * time.Minute
+	loginFailureCapacity  = 4096
+)
 
 type principalContextKey struct{}
 
@@ -126,13 +145,25 @@ func NewAccessService(repository AccessRepository, oidc OIDCVerifier, groupRoles
 	return &AccessService{
 		repository: repository, accounts: accounts, oidc: oidc, groupRoles: cloned,
 		now: time.Now, passwordSlots: make(chan struct{}, 4),
+		loginFailures: map[string]loginAttemptState{},
 	}
 }
 
 func (service *AccessService) Roles() []domain.Role {
-	roles := make([]domain.Role, len(builtInRoles))
-	copy(roles, builtInRoles)
+	roles := make([]domain.Role, 0, len(builtInRoles))
+	for index := range builtInRoles {
+		roles = append(roles, cloneRole(builtInRoles[index]))
+	}
 	return roles
+}
+
+// cloneRole detaches a role from the package-level table. Copying the struct
+// alone leaves Permissions aliasing the shared backing array, which would let
+// any caller — including every Principal handed a role's permission slice —
+// rewrite the permissions of a built-in role for the whole process.
+func cloneRole(role domain.Role) domain.Role {
+	role.Permissions = append([]string(nil), role.Permissions...)
+	return role
 }
 
 func (service *AccessService) CreateToken(ctx context.Context, name, role string, ttl time.Duration, actor domain.Principal) (CreatedAPIToken, error) {
@@ -150,9 +181,12 @@ func (service *AccessService) CreateToken(ctx context.Context, name, role string
 	}
 	secret := "xat." + base64.RawURLEncoding.EncodeToString(idBytes) + "." + base64.RawURLEncoding.EncodeToString(randomBytes)
 	now := service.now().UTC()
+	// Binding the owning account lets Authenticate refuse the token once that
+	// account is disabled or demoted, instead of leaving it valid until its
+	// natural expiry. A bootstrap actor has no account and stays unbound.
 	token := domain.APIToken{
 		ID: "api_" + base64.RawURLEncoding.EncodeToString(idBytes), Name: name, Role: role,
-		Subject: actor.Subject, CreatedAt: now, ExpiresAt: now.Add(ttl),
+		Subject: actor.Subject, UserID: actor.UserID, CreatedAt: now, ExpiresAt: now.Add(ttl),
 	}
 	if err := service.repository.CreateAPIToken(ctx, token, sha256.Sum256([]byte(secret)), domain.AuditEvent{
 		ID: "api_token_created_" + token.ID, ActorType: actor.AuthMethod, ActorID: actor.Subject,
@@ -247,6 +281,12 @@ func (service *AccessService) Login(ctx context.Context, username, password stri
 	if service.accounts == nil {
 		return CreatedAPIToken{}, ErrUnauthorized
 	}
+	// The backoff is keyed by the submitted name, whether or not an account
+	// exists under it, so a locked-out name reveals nothing about who is real.
+	attemptKey := strings.ToLower(strings.TrimSpace(username))
+	if err := service.checkLoginBackoff(attemptKey); err != nil {
+		return CreatedAPIToken{}, err
+	}
 	select {
 	case service.passwordSlots <- struct{}{}:
 		defer func() { <-service.passwordSlots }()
@@ -259,8 +299,10 @@ func (service *AccessService) Login(ctx context.Context, username, password stri
 	}
 	passwordValid := verifyPassword(password, passwordHash)
 	if err != nil || !passwordValid || user.Status != domain.UserStatusActive {
+		service.recordLoginFailure(attemptKey)
 		return CreatedAPIToken{}, ErrUnauthorized
 	}
+	service.clearLoginFailures(attemptKey)
 	randomBytes, idBytes := make([]byte, 32), make([]byte, 12)
 	if _, err := rand.Read(randomBytes); err != nil {
 		return CreatedAPIToken{}, err
@@ -273,6 +315,7 @@ func (service *AccessService) Login(ctx context.Context, username, password stri
 	token := domain.APIToken{
 		ID: "session_" + base64.RawURLEncoding.EncodeToString(idBytes), Name: "web session",
 		Role: user.Role, Subject: user.Username, UserID: user.ID, CreatedAt: now, ExpiresAt: now.Add(12 * time.Hour),
+		Interactive: true,
 	}
 	if err := service.repository.CreateAPIToken(ctx, token, sha256.Sum256([]byte(secret)), domain.AuditEvent{
 		ID: "user_login_" + token.ID, ActorType: "local_password", ActorID: user.ID,
@@ -281,6 +324,62 @@ func (service *AccessService) Login(ctx context.Context, username, password stri
 		return CreatedAPIToken{}, err
 	}
 	return CreatedAPIToken{Token: token, Secret: secret}, nil
+}
+
+// checkLoginBackoff refuses a sign-in that arrives inside the penalty window
+// earned by earlier failures for the same name.
+func (service *AccessService) checkLoginBackoff(key string) error {
+	if key == "" {
+		return ErrUnauthorized
+	}
+	service.loginMu.Lock()
+	defer service.loginMu.Unlock()
+	if service.now().Before(service.loginFailures[key].notBefore) {
+		return fmt.Errorf("%w: too many failed sign-in attempts, retry later", ErrUnauthorized)
+	}
+	return nil
+}
+
+// recordLoginFailure lengthens the penalty window for a name, doubling it on
+// each failure past the threshold up to a ceiling.
+func (service *AccessService) recordLoginFailure(key string) {
+	if key == "" {
+		return
+	}
+	now := service.now()
+	service.loginMu.Lock()
+	defer service.loginMu.Unlock()
+	// Names whose penalty has already elapsed hold no useful state, so
+	// collecting them keeps an attacker from growing the map with invented
+	// names. The capacity check is the backstop when they all remain active.
+	if len(service.loginFailures) >= loginFailureCapacity {
+		for name, state := range service.loginFailures {
+			if !now.Before(state.notBefore) {
+				delete(service.loginFailures, name)
+			}
+		}
+	}
+	if len(service.loginFailures) >= loginFailureCapacity {
+		if _, tracked := service.loginFailures[key]; !tracked {
+			return
+		}
+	}
+	state := service.loginFailures[key]
+	state.failures++
+	if state.failures >= loginFailureThreshold {
+		penalty := loginBackoffBase << min(state.failures-loginFailureThreshold, 20)
+		if penalty > loginBackoffMaximum || penalty <= 0 {
+			penalty = loginBackoffMaximum
+		}
+		state.notBefore = now.Add(penalty)
+	}
+	service.loginFailures[key] = state
+}
+
+func (service *AccessService) clearLoginFailures(key string) {
+	service.loginMu.Lock()
+	defer service.loginMu.Unlock()
+	delete(service.loginFailures, key)
 }
 
 func (service *AccessService) ListUsers(ctx context.Context) ([]domain.User, error) {
@@ -294,6 +393,21 @@ func (service *AccessService) UpdateUser(ctx context.Context, id string, status 
 	if service.accounts == nil || (status != "" && status != domain.UserStatusActive && status != domain.UserStatusRejected && status != domain.UserStatusDisabled) ||
 		(role != "" && role != "user" && role != "admin") {
 		return domain.User{}, ErrInvalid
+	}
+	// Only an administrator reaches this call, so demoting another account can
+	// never remove the last administrator. Self-demotion and self-disabling
+	// can, and are the one-click path to locking every operator out of the
+	// cluster. A bootstrap actor owns no account, so it keeps that escape
+	// hatch and can always restore an administrator.
+	demotes := role != "" && role != "admin"
+	deactivates := status != "" && status != domain.UserStatusActive
+	if actor.UserID != "" && actor.UserID == id && (demotes || deactivates) {
+		return domain.User{}, fmt.Errorf("%w: an administrator cannot demote or disable their own account", ErrForbidden)
+	}
+	if demotes || deactivates {
+		if err := service.ensureAnotherAdministratorRemains(ctx, id); err != nil {
+			return domain.User{}, err
+		}
 	}
 	now := service.now().UTC()
 	return service.accounts.UpdateUser(ctx, id, func(user *domain.User) error {
@@ -312,6 +426,33 @@ func (service *AccessService) UpdateUser(ctx context.Context, id string, status 
 		ID: "user_updated_" + id + "_" + strconv.FormatInt(now.UnixNano(), 10), ActorType: actor.AuthMethod, ActorID: actor.Subject,
 		Action: "access.user.updated", TargetKind: "user", TargetID: id, Outcome: "succeeded", OccurredAt: now,
 	})
+}
+
+// ensureAnotherAdministratorRemains refuses a change that would leave the
+// cluster with no active administrator account. It is a safety net rather than
+// a transactional invariant: two administrators demoting each other at the same
+// instant can still race, which is why UpdateUser also forbids self-demotion.
+func (service *AccessService) ensureAnotherAdministratorRemains(ctx context.Context, excludedID string) error {
+	users, err := service.accounts.ListUsers(ctx)
+	if err != nil {
+		return err
+	}
+	target, found := domain.User{}, false
+	for _, user := range users {
+		if user.ID == excludedID {
+			target, found = user, true
+			break
+		}
+	}
+	if !found || target.Role != "admin" || target.Status != domain.UserStatusActive {
+		return nil
+	}
+	for _, user := range users {
+		if user.ID != excludedID && user.Role == "admin" && user.Status == domain.UserStatusActive {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: the last active administrator cannot be demoted or disabled", ErrForbidden)
 }
 
 func (service *AccessService) PutUserGroups(ctx context.Context, id string, groupIDs []string, actor domain.Principal) (domain.User, error) {
@@ -556,16 +697,27 @@ func (service *AccessService) Authenticate(ctx context.Context, bearer string) (
 			return domain.Principal{}, ErrUnauthorized
 		}
 		role := roleByName(token.Role)
+		if role == nil {
+			return domain.Principal{}, ErrUnauthorized
+		}
 		var account domain.User
 		if token.UserID != "" && service.accounts != nil {
 			account, _, err = service.accounts.GetUser(ctx, token.UserID)
 			if err != nil || account.Status != domain.UserStatusActive {
 				return domain.Principal{}, ErrUnauthorized
 			}
-			role = roleByName(account.Role)
-		}
-		if role == nil {
-			return domain.Principal{}, ErrUnauthorized
+			accountRole := roleByName(account.Role)
+			if accountRole == nil {
+				return domain.Principal{}, ErrUnauthorized
+			}
+			// A browser session follows the account's current role in both
+			// directions. An automation token never gains privilege from its
+			// owner's role, only loses it: minting a narrow token from an
+			// administrator account must stay narrow, while demoting that
+			// account must immediately narrow the token further.
+			if token.Interactive || roleRank(accountRole.Name) < roleRank(role.Name) {
+				role = accountRole
+			}
 		}
 		now := service.now().UTC()
 		_, _ = service.repository.UpdateAPIToken(context.WithoutCancel(ctx), token.ID, func(current *domain.APIToken) error {
@@ -695,12 +847,13 @@ func (service *AccessService) RevokeGroupSessions(ctx context.Context, groupID s
 func roleByName(name string) *domain.Role {
 	for index := range builtInRoles {
 		if builtInRoles[index].Name == name {
-			role := builtInRoles[index]
+			role := cloneRole(builtInRoles[index])
 			return &role
 		}
 	}
 	return nil
 }
+
 func roleRank(name string) int {
 	switch name {
 	case "viewer":

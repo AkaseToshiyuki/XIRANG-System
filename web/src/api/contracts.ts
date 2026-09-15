@@ -49,6 +49,7 @@ export interface NativeArtifact {
   abi?: string;
   signature?: string;
   entrypoint: string;
+  runtimeRequirements?: Record<string, string>;
 }
 
 export interface Job {
@@ -103,6 +104,8 @@ export interface Job {
     state: "preparing" | "ready" | "running" | "canceling" | "succeeded" | "failed" | "canceled";
     worldSize: number;
     launcher: "native" | "openmpi" | "mpich" | "intelmpi";
+    selectionOptimal: boolean;
+    selectionSearchStates?: number;
     members: Array<{
       nodeId: string;
       assignmentId: string;
@@ -309,7 +312,8 @@ export interface NativeBuild {
     application?: string;
     variant?: string;
     runtimeNodeIds?: string[];
-    runtimeEntrypoint?: string;
+		runtimeEntrypoint?: string;
+		runtimeRequirements?: Record<string, string>;
     sourcePath: string;
     sourceSha256: string;
     architecture: string;
@@ -341,7 +345,8 @@ export interface NativeBuild {
     application?: string;
     variant?: string;
     entrypoint?: string;
-    runtimeNodeIds?: string[];
+		runtimeNodeIds?: string[];
+		runtimeRequirements?: Record<string, string>;
     routingUpdatedAt?: string;
   };
   createdAt: string;
@@ -431,14 +436,15 @@ export interface ClusterNode {
   status: string;
   desiredStatus?: string;
   pendingModeCommandId?: string;
-	pendingManagementCommandId?: string;
-	desiredManagementPanel?: boolean;
-	managementPanelEnabled?: boolean;
-	managementPanelStatus?: string;
+  pendingManagementCommandId?: string;
+  desiredManagementPanel?: boolean;
+  managementPanelEnabled?: boolean;
+  managementPanelStatus?: string;
   os: string;
   architecture: string;
   distribution?: string;
   kernelVersion?: string;
+  runtimeFacts?: Record<string, string>;
   agentVersion?: string;
   capabilities?: string[];
   cpuModel?: string;
@@ -461,6 +467,7 @@ export interface ClusterNode {
   pendingCertificateCommandId?: string;
   pendingCertificateRotationId?: string;
   certificateRevokedAt?: string;
+  removedAt?: string;
   capacity: ResourceVector;
   allocatable: ResourceVector;
   allocated: ResourceVector;
@@ -514,6 +521,7 @@ export interface NodeInventorySnapshot {
   distribution?: string;
   kernelVersion?: string;
   architecture: string;
+  runtimeFacts?: Record<string, string>;
   logicalCpuCount: number;
   cpuModel?: string;
   cpuFeatures?: string[];
@@ -589,8 +597,13 @@ export interface NetworkPathSelection {
   sourceId: string;
   targetId: string;
   primaryEdgeId: string;
+  primaryReverseEdgeId?: string;
   fallbackEdgeIds?: string[];
+  fallbackReverseEdgeIds?: string[];
   effectiveCapacityBits?: number;
+  effectiveLatencyMicros?: number;
+  health?: "healthy" | "degraded" | "critical";
+  bidirectional: boolean;
   policy: "single-best-healthy";
 }
 

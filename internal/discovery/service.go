@@ -387,16 +387,16 @@ func (service *Service) probeAgentStatus(ctx context.Context, address string, po
 		len(status.Hostname) > 255 || len(status.Architecture) > 64 || len(status.AgentVersion) > 64 ||
 		status.CPUCount < 1 || status.CPUCount > 1_000_000 || status.MemoryBytes < 1 ||
 		status.Fingerprint != fingerprint || !status.PairingRequired || len(status.Interfaces) > 256 {
-		return domain.DiscoveryCandidate{}, errors.New("Agent bootstrap status is invalid")
+		return domain.DiscoveryCandidate{}, errors.New("the Agent bootstrap status is invalid")
 	}
 	for _, networkInterface := range status.Interfaces {
 		if networkInterface.Name == "" || len(networkInterface.Name) > 64 || len(networkInterface.Addresses) > 64 ||
 			networkInterface.SpeedBitsPerSecond > 1_000_000_000_000_000 {
-			return domain.DiscoveryCandidate{}, errors.New("Agent bootstrap interface status is invalid")
+			return domain.DiscoveryCandidate{}, errors.New("the Agent bootstrap interface status is invalid")
 		}
 		for _, rawAddress := range networkInterface.Addresses {
 			if _, err := netip.ParsePrefix(rawAddress); err != nil {
-				return domain.DiscoveryCandidate{}, errors.New("Agent bootstrap interface address is invalid")
+				return domain.DiscoveryCandidate{}, errors.New("the Agent bootstrap interface address is invalid")
 			}
 		}
 	}
@@ -453,7 +453,7 @@ func (service *Service) enrollCandidate(ctx context.Context, candidate domain.Di
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("Agent bootstrap returned HTTP %d", response.StatusCode)
+		return "", fmt.Errorf("the Agent bootstrap endpoint returned HTTP %d", response.StatusCode)
 	}
 	var result struct {
 		NodeID string `json:"nodeId"`
@@ -462,7 +462,7 @@ func (service *Service) enrollCandidate(ctx context.Context, candidate domain.Di
 		return "", err
 	}
 	if result.NodeID == "" {
-		return "", errors.New("Agent bootstrap omitted the enrolled node ID")
+		return "", errors.New("the Agent bootstrap response omitted the enrolled node ID")
 	}
 	return result.NodeID, nil
 }

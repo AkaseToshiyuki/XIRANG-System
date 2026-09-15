@@ -2,7 +2,7 @@
 
 [English](DEPLOYMENT.md) | [简体中文](DEPLOYMENT.zh-CN.md)
 
-Applies to XIRANG **1.0.1**.
+Applies to XIRANG **1.1.0**.
 
 This guide installs a prebuilt native release. A container runtime is not
 required.
@@ -32,7 +32,7 @@ The installer:
 2. installs missing host tools with the detected package manager;
 3. requests system privileges through the standard `sudo` prompt;
 4. downloads the matching GitHub Release package;
-5. verifies it against the release `SHA256SUMS`;
+5. verifies the release `SHA256SUMS` signature, then the package against it;
 6. enables an existing NTP client or installs Chrony and confirms synchronization;
 7. installs services and starts the controller/node setup wizard.
 
@@ -50,23 +50,43 @@ host before enrollment. `--skip-dependencies` never silently disables this check
 Install a specific release:
 
 ```bash
-./install.sh --version 1.0.1
+./install.sh --version 1.1.0
 ```
 
-Install a downloaded package. The installer reads `SHA256SUMS` from the same
-directory:
+Install a downloaded package. The installer reads `SHA256SUMS` and
+`SHA256SUMS.sig` from the same directory:
 
 ```bash
-./install.sh --archive ~/Downloads/xirang-1.0.1-linux-amd64.tar.gz
+./install.sh --archive ~/Downloads/xirang-1.1.0-linux-amd64.tar.gz
 ```
 
 If no checksum file is present, supply a trusted SHA-256 value:
 
 ```bash
 ./install.sh \
-  --archive ~/Downloads/xirang-1.0.1-linux-amd64.tar.gz \
+  --archive ~/Downloads/xirang-1.1.0-linux-amd64.tar.gz \
   --sha256 EXPECTED_SHA256
 ```
+
+## How a release is trusted
+
+Every release publishes `SHA256SUMS.sig`, an Ed25519 signature over the checksum
+manifest. The installer verifies it against a public key embedded in
+`install.sh` before it reads a single checksum, and refuses to continue when the
+signature is absent or does not match.
+
+The checksum alone cannot establish trust, because the package and the manifest
+arrive over the same channel from the same GitHub Release: whoever can replace
+one can replace the other. The signature is what makes a substituted release
+detectable, because producing it requires the private key, which never leaves
+the release workflow.
+
+Verifying requires OpenSSL 1.1.1 or newer, which the installer adds to the host
+tools it installs.
+
+Passing `--sha256` establishes the same trust out of band — you assert a digest
+you already have — and therefore replaces the signature check. Use it for an
+air-gapped install, or to install a release published before signing existed.
 
 ## Initialize a controller
 

@@ -22,6 +22,7 @@ type BuildRecipe struct {
 	Variant             string            `json:"variant,omitempty"`
 	RuntimeNodeIDs      []string          `json:"runtimeNodeIds,omitempty"`
 	RuntimeEntrypoint   string            `json:"runtimeEntrypoint,omitempty"`
+	RuntimeRequirements map[string]string `json:"runtimeRequirements,omitempty"`
 	SourcePath          string            `json:"sourcePath"`
 	SourceSHA256        string            `json:"sourceSha256"`
 	Architecture        string            `json:"architecture"`
@@ -42,19 +43,20 @@ type BuildRecipe struct {
 }
 
 type BuildArtifact struct {
-	URI              string     `json:"uri"`
-	SHA256           string     `json:"sha256"`
-	Signature        string     `json:"signature"`
-	PublicKey        string     `json:"publicKey"`
-	Architecture     string     `json:"architecture"`
-	ABI              string     `json:"abi"`
-	Toolchain        string     `json:"toolchain"`
-	SBOMURI          string     `json:"sbomUri"`
-	Application      string     `json:"application,omitempty"`
-	Variant          string     `json:"variant,omitempty"`
-	Entrypoint       string     `json:"entrypoint,omitempty"`
-	RuntimeNodeIDs   []string   `json:"runtimeNodeIds,omitempty"`
-	RoutingUpdatedAt *time.Time `json:"routingUpdatedAt,omitempty"`
+	URI                 string            `json:"uri"`
+	SHA256              string            `json:"sha256"`
+	Signature           string            `json:"signature"`
+	PublicKey           string            `json:"publicKey"`
+	Architecture        string            `json:"architecture"`
+	ABI                 string            `json:"abi"`
+	Toolchain           string            `json:"toolchain"`
+	SBOMURI             string            `json:"sbomUri"`
+	Application         string            `json:"application,omitempty"`
+	Variant             string            `json:"variant,omitempty"`
+	Entrypoint          string            `json:"entrypoint,omitempty"`
+	RuntimeNodeIDs      []string          `json:"runtimeNodeIds,omitempty"`
+	RuntimeRequirements map[string]string `json:"runtimeRequirements,omitempty"`
+	RoutingUpdatedAt    *time.Time        `json:"routingUpdatedAt,omitempty"`
 }
 
 type Build struct {

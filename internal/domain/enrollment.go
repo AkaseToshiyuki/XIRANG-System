@@ -26,6 +26,7 @@ type InventorySummary struct {
 	Architecture          string                      `json:"architecture"`
 	Distribution          string                      `json:"distribution,omitempty"`
 	KernelVersion         string                      `json:"kernelVersion,omitempty"`
+	RuntimeFacts          map[string]string           `json:"runtimeFacts,omitempty"`
 	AgentVersion          string                      `json:"agentVersion,omitempty"`
 	CPUCount              int                         `json:"cpuCount"`
 	CPUModel              string                      `json:"cpuModel,omitempty"`

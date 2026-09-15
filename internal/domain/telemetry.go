@@ -24,6 +24,7 @@ type NodeInventorySnapshot struct {
 	Distribution      string                     `json:"distribution,omitempty"`
 	KernelVersion     string                     `json:"kernelVersion,omitempty"`
 	Architecture      string                     `json:"architecture"`
+	RuntimeFacts      map[string]string          `json:"runtimeFacts,omitempty"`
 	LogicalCPUCount   uint32                     `json:"logicalCpuCount"`
 	CPUModel          string                     `json:"cpuModel,omitempty"`
 	CPUFeatures       []string                   `json:"cpuFeatures,omitempty"`

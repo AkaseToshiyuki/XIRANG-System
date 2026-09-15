@@ -168,6 +168,10 @@ func (service *Service) List(ctx context.Context) ([]domain.SharedSpace, error) 
 			spaces[index].CapacityError = "source node unavailable"
 			continue
 		}
+		if nodeUnavailable(source) {
+			spaces[index].CapacityError = "source node has been removed or rejected"
+			continue
+		}
 		statsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		output, statsErr := service.runner.Run(statsCtx, source, "stats", spaces[index].ID, spaces[index].SourcePath)
 		cancel()
@@ -257,7 +261,7 @@ func (service *Service) applyLocked(ctx context.Context, requested domain.Shared
 	if err != nil {
 		return domain.SharedSpace{}, err
 	}
-	if !source.HasRole(domain.NodeRoleStorage) || source.ManagementAddress == "" || source.SSHUser == "" {
+	if nodeUnavailable(source) || !source.HasRole(domain.NodeRoleStorage) || source.ManagementAddress == "" || source.SSHUser == "" {
 		return domain.SharedSpace{}, fmt.Errorf("%w: source must be a storage node with SSH access", ErrInvalid)
 	}
 	nodes, err := service.nodes.ListNodes(ctx)
@@ -309,10 +313,20 @@ func (service *Service) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if created, ensureErr := service.ensureDefaultLocked(ctx, nodes, spaces); ensureErr != nil {
+	if ensured, changed, ensureErr := service.ensureDefaultLocked(ctx, nodes, spaces); ensureErr != nil {
 		return ensureErr
-	} else if created.ID != "" {
-		spaces = append(spaces, created)
+	} else if changed {
+		replaced := false
+		for index := range spaces {
+			if spaces[index].ID == ensured.ID {
+				spaces[index] = ensured
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			spaces = append(spaces, ensured)
+		}
 	}
 	var failures []error
 	for _, space := range spaces {
@@ -323,25 +337,38 @@ func (service *Service) Reconcile(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-func (service *Service) ensureDefaultLocked(ctx context.Context, nodes []domain.Node, spaces []domain.SharedSpace) (domain.SharedSpace, error) {
+func (service *Service) ensureDefaultLocked(ctx context.Context, nodes []domain.Node, spaces []domain.SharedSpace) (domain.SharedSpace, bool, error) {
 	if !safePath(service.defaultSourcePath) || !safePath(service.defaultMountPath) {
-		return domain.SharedSpace{}, nil
+		return domain.SharedSpace{}, false, nil
 	}
 	for _, space := range spaces {
 		if space.ID == "share_default" {
-			return domain.SharedSpace{}, nil
+			currentSource, sourceErr := service.nodes.GetNode(ctx, space.SourceNodeID)
+			if sourceErr == nil && defaultSourceEligible(currentSource) && nodeListed(nodes, currentSource.ID) {
+				return domain.SharedSpace{}, false, nil
+			}
+			preferredAddress := ""
+			if sourceErr == nil {
+				preferredAddress = currentSource.ManagementAddress
+			}
+			replacement, ok := selectDefaultSource(nodes, preferredAddress)
+			if !ok {
+				return domain.SharedSpace{}, false, nil
+			}
+			space.SourceNodeID = replacement.ID
+			space.Status = "applying"
+			space.Results = nil
+			space.UpdatedAt = service.now().UTC()
+			if err := service.repository.PutSharedSpace(ctx, space); err != nil {
+				return domain.SharedSpace{}, false, err
+			}
+			service.invalidateCapacity(space.ID)
+			return space, true, nil
 		}
 	}
-	var source domain.Node
-	for _, node := range nodes {
-		if node.HasRole(domain.NodeRoleManagement) && node.HasRole(domain.NodeRoleStorage) &&
-			node.ManagementAddress != "" && node.SSHUser != "" && node.Status != domain.NodeStatusRejected {
-			source = node
-			break
-		}
-	}
-	if source.ID == "" {
-		return domain.SharedSpace{}, nil
+	source, ok := selectDefaultSource(nodes, "")
+	if !ok {
+		return domain.SharedSpace{}, false, nil
 	}
 	now := service.now().UTC()
 	space := domain.SharedSpace{
@@ -351,14 +378,21 @@ func (service *Service) ensureDefaultLocked(ctx context.Context, nodes []domain.
 		FileOwners: map[string]domain.SharedFileOwner{}, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := service.repository.PutSharedSpace(ctx, space); err != nil {
-		return domain.SharedSpace{}, err
+		return domain.SharedSpace{}, false, err
 	}
-	return space, nil
+	return space, true, nil
 }
 
 func (service *Service) reconcileSpaceLocked(ctx context.Context, space domain.SharedSpace, nodes []domain.Node) (domain.SharedSpace, error) {
 	source, err := service.nodes.GetNode(ctx, space.SourceNodeID)
 	if err != nil {
+		space.Status = "failed"
+		space.UpdatedAt = service.now().UTC()
+		_ = service.repository.PutSharedSpace(ctx, space)
+		return space, err
+	}
+	if nodeUnavailable(source) {
+		err = errors.New("shared-space source node has been removed or rejected")
 		space.Status = "failed"
 		space.UpdatedAt = service.now().UTC()
 		_ = service.repository.PutSharedSpace(ctx, space)
@@ -407,6 +441,11 @@ func (service *Service) reconcileSpaceLocked(ctx context.Context, space domain.S
 			status = "degraded"
 			continue
 		}
+		if nodeNotOnline(target) {
+			results = append(results, domain.SharedSpaceNodeResult{NodeID: nodeID, Status: "unmount_failed", Message: "node is offline or unreachable"})
+			status = "degraded"
+			continue
+		}
 		if target.ID != source.ID || space.SourcePath != space.MountPath {
 			if _, unmountErr := service.runner.Run(ctx, target, "unmount", space.ID, space.MountPath); unmountErr != nil {
 				results = append(results, domain.SharedSpaceNodeResult{NodeID: nodeID, Status: "unmount_failed", Message: unmountErr.Error()})
@@ -425,6 +464,8 @@ func (service *Service) reconcileSpaceLocked(ctx context.Context, space domain.S
 		switch {
 		case !sourceExported:
 			result.Status, result.Message = "failed", "source export is unavailable"
+		case nodeNotOnline(target):
+			result.Status, result.Message = "failed", "node is offline or unreachable"
 		case target.ManagementAddress == "" || target.SSHUser == "":
 			result.Status, result.Message = "failed", "SSH access is not configured"
 		case target.ID == source.ID && space.SourcePath == space.MountPath:
@@ -566,7 +607,7 @@ func selectTargets(nodes []domain.Node, space domain.SharedSpace) []domain.Node 
 	}
 	result := []domain.Node{}
 	for _, node := range nodes {
-		if node.Status == domain.NodeStatusRejected {
+		if nodeUnavailable(node) {
 			continue
 		}
 		switch space.Target {
@@ -583,6 +624,40 @@ func selectTargets(nodes []domain.Node, space domain.SharedSpace) []domain.Node 
 		}
 	}
 	return result
+}
+
+func nodeUnavailable(node domain.Node) bool {
+	return node.RemovedAt != nil || node.Status == domain.NodeStatusRemoved || node.Status == domain.NodeStatusRejected
+}
+
+func nodeNotOnline(node domain.Node) bool {
+	return node.Status == domain.NodeStatusOffline || node.Status == domain.NodeStatusUnreachable
+}
+
+func nodeListed(nodes []domain.Node, id string) bool {
+	_, ok := nodeByID(nodes, id)
+	return ok
+}
+
+func defaultSourceEligible(node domain.Node) bool {
+	return !nodeUnavailable(node) && node.HasRole(domain.NodeRoleManagement) && node.HasRole(domain.NodeRoleStorage) &&
+		node.ManagementAddress != "" && node.SSHUser != ""
+}
+
+func selectDefaultSource(nodes []domain.Node, preferredAddress string) (domain.Node, bool) {
+	var fallback domain.Node
+	for _, node := range nodes {
+		if !defaultSourceEligible(node) {
+			continue
+		}
+		if preferredAddress != "" && node.ManagementAddress == preferredAddress {
+			return node, true
+		}
+		if fallback.ID == "" || (fallback.Status != domain.NodeStatusReady && node.Status == domain.NodeStatusReady) {
+			fallback = node
+		}
+	}
+	return fallback, fallback.ID != ""
 }
 
 func safePath(value string) bool {

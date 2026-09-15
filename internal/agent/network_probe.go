@@ -11,14 +11,19 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	maxNetworkProbePairs = 4096
-	networkProbeWorkers  = 8
-	networkProbeTimeout  = 1500 * time.Millisecond
+	maxNetworkProbePairs         = 4096
+	networkProbeWorkers          = 8
+	networkProbeTimeout          = 1500 * time.Millisecond
+	networkProbeCollectionBudget = 30 * time.Second
+	networkProbeSamples          = 3
 )
+
+var networkProbeCursor atomic.Uint64
 
 var pingTimePattern = regexp.MustCompile(`time([=<])([0-9]+(?:\.[0-9]+)?)\s*ms`)
 
@@ -52,42 +57,62 @@ type networkProbePair struct {
 type pingProbe func(context.Context, netip.Addr, netip.Addr) (time.Duration, error)
 
 func CollectNetworkPathProbes(ctx context.Context, localInterfaces []NetworkInterfaceInventory, targets []NetworkProbeTarget) []PathProbeObservation {
-	return collectNetworkPathProbes(ctx, localInterfaces, targets, runPingProbe)
+	offset := networkProbeCursor.Add(maxNetworkProbePairs) - maxNetworkProbePairs
+	return collectNetworkPathProbesWindow(ctx, localInterfaces, targets, runPingProbe, offset)
 }
 
 func collectNetworkPathProbes(ctx context.Context, localInterfaces []NetworkInterfaceInventory, targets []NetworkProbeTarget, probe pingProbe) []PathProbeObservation {
-	pairs := make([]networkProbePair, 0)
-	seen := make(map[string]struct{})
+	return collectNetworkPathProbesWindow(ctx, localInterfaces, targets, probe, 0)
+}
+
+func collectNetworkPathProbesWindow(ctx context.Context, localInterfaces []NetworkInterfaceInventory, targets []NetworkProbeTarget, probe pingProbe, offset uint64) []PathProbeObservation {
+	collectionContext, cancelCollection := context.WithTimeout(ctx, networkProbeCollectionBudget)
+	defer cancelCollection()
+	type localEndpoint struct {
+		inventory NetworkInterfaceInventory
+		address   netip.Addr
+	}
+	type targetEndpoint struct {
+		target  NetworkProbeTarget
+		address netip.Addr
+	}
+	locals := make([]localEndpoint, 0)
+	remotes := make([]targetEndpoint, 0)
+	seenLocal, seenRemote := make(map[string]bool), make(map[string]bool)
 	for _, localInterface := range localInterfaces {
 		for _, rawLocal := range localInterface.Addresses {
 			local, ok := probeAddress(rawLocal)
-			if !ok {
-				continue
-			}
-			for _, target := range targets {
-				remote, ok := probeAddress(target.Address)
-				if !ok || local.BitLen() != remote.BitLen() {
-					continue
-				}
-				key := strings.Join([]string{
-					localInterface.Name, local.String(), target.NodeID, target.InterfaceName, remote.String(),
-				}, "\x00")
-				if _, exists := seen[key]; exists {
-					continue
-				}
-				seen[key] = struct{}{}
-				pairs = append(pairs, networkProbePair{source: localInterface, local: local, target: target, remote: remote})
-				if len(pairs) >= maxNetworkProbePairs {
-					break
-				}
-			}
-			if len(pairs) >= maxNetworkProbePairs {
-				break
+			key := localInterface.Name + "\x00" + local.String()
+			if ok && !seenLocal[key] {
+				seenLocal[key] = true
+				locals = append(locals, localEndpoint{localInterface, local})
 			}
 		}
-		if len(pairs) >= maxNetworkProbePairs {
-			break
+	}
+	for _, target := range targets {
+		remote, ok := probeAddress(target.Address)
+		key := target.NodeID + "\x00" + target.InterfaceName + "\x00" + remote.String()
+		if ok && !seenRemote[key] {
+			seenRemote[key] = true
+			remotes = append(remotes, targetEndpoint{target, remote})
 		}
+	}
+	sort.Slice(locals, func(i, j int) bool {
+		return locals[i].inventory.Name+"\x00"+locals[i].address.String() < locals[j].inventory.Name+"\x00"+locals[j].address.String()
+	})
+	sort.Slice(remotes, func(i, j int) bool {
+		return remotes[i].target.NodeID+"\x00"+remotes[i].target.InterfaceName+"\x00"+remotes[i].address.String() < remotes[j].target.NodeID+"\x00"+remotes[j].target.InterfaceName+"\x00"+remotes[j].address.String()
+	})
+	pairs := make([]networkProbePair, 0)
+	total := uint64(len(locals)) * uint64(len(remotes))
+	for scanned := uint64(0); scanned < total && len(pairs) < maxNetworkProbePairs; scanned++ {
+		flat := (offset + scanned) % total
+		local := locals[flat/uint64(len(remotes))]
+		remote := remotes[flat%uint64(len(remotes))]
+		if local.address.BitLen() != remote.address.BitLen() {
+			continue
+		}
+		pairs = append(pairs, networkProbePair{source: local.inventory, local: local.address, target: remote.target, remote: remote.address})
 	}
 	results := make(chan PathProbeObservation, len(pairs))
 	work := make(chan networkProbePair)
@@ -98,8 +123,8 @@ func collectNetworkPathProbes(ctx context.Context, localInterfaces []NetworkInte
 		go func() {
 			defer workers.Done()
 			for pair := range work {
-				probeContext, cancel := context.WithTimeout(ctx, networkProbeTimeout)
-				latency, err := probe(probeContext, pair.local, pair.remote)
+				probeContext, cancel := context.WithTimeout(collectionContext, networkProbeTimeout)
+				latency, err := sampleNetworkProbe(probeContext, pair.local, pair.remote, probe)
 				cancel()
 				result := PathProbeObservation{
 					TargetNodeID:    pair.target.NodeID,
@@ -125,7 +150,7 @@ func collectNetworkPathProbes(ctx context.Context, localInterfaces []NetworkInte
 		for _, pair := range pairs {
 			select {
 			case work <- pair:
-			case <-ctx.Done():
+			case <-collectionContext.Done():
 				return
 			}
 		}
@@ -140,6 +165,30 @@ func collectNetworkPathProbes(ctx context.Context, localInterfaces []NetworkInte
 		return pathProbeSortKey(observations[left]) < pathProbeSortKey(observations[right])
 	})
 	return observations
+}
+
+func sampleNetworkProbe(ctx context.Context, source, target netip.Addr, probe pingProbe) (time.Duration, error) {
+	latencies := make([]time.Duration, 0, networkProbeSamples)
+	var lastErr error
+	for sample := 0; sample < networkProbeSamples; sample++ {
+		latency, err := probe(ctx, source, target)
+		if err == nil {
+			latencies = append(latencies, latency)
+		} else {
+			lastErr = err
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if len(latencies) < networkProbeSamples/2+1 {
+		if lastErr == nil {
+			lastErr = errors.New("insufficient successful samples")
+		}
+		return 0, lastErr
+	}
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	return latencies[len(latencies)/2], nil
 }
 
 func probeAddress(raw string) (netip.Addr, bool) {

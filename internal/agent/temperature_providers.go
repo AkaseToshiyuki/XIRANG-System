@@ -95,7 +95,7 @@ type redfishThermalResponse struct {
 func (provider RedfishTemperatureProvider) ReadCPUTemperature(ctx context.Context) (CPUTemperatureReading, error) {
 	parsed, err := url.Parse(provider.URL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || provider.Username == "" || provider.Password == "" {
-		return CPUTemperatureReading{}, errors.New("Redfish provider requires an HTTPS URL and credentials")
+		return CPUTemperatureReading{}, errors.New("the Redfish provider requires an HTTPS URL and credentials")
 	}
 	requestContext, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
@@ -111,11 +111,11 @@ func (provider RedfishTemperatureProvider) ReadCPUTemperature(ctx context.Contex
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return CPUTemperatureReading{}, fmt.Errorf("Redfish temperature query: %w", err)
+		return CPUTemperatureReading{}, fmt.Errorf("query the Redfish temperature service: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return CPUTemperatureReading{}, fmt.Errorf("Redfish temperature query returned %d", response.StatusCode)
+		return CPUTemperatureReading{}, fmt.Errorf("the Redfish temperature query returned HTTP %d", response.StatusCode)
 	}
 	var payload redfishThermalResponse
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 1<<20))
@@ -133,7 +133,7 @@ func (provider RedfishTemperatureProvider) ReadCPUTemperature(ctx context.Contex
 		}
 	}
 	if maximum == 0 {
-		return CPUTemperatureReading{}, errors.New("Redfish returned no healthy CPU temperature sensor")
+		return CPUTemperatureReading{}, errors.New("the Redfish service returned no healthy CPU temperature sensor")
 	}
 	return CPUTemperatureReading{Celsius: maximum, Source: "redfish", Confidence: "medium"}, nil
 }
@@ -190,7 +190,7 @@ func redfishHTTPClient(caPath string) (*http.Client, error) {
 			roots = x509.NewCertPool()
 		}
 		if !roots.AppendCertsFromPEM(certificate) {
-			return nil, errors.New("Redfish CA file contains no certificates")
+			return nil, errors.New("the Redfish CA file contains no certificates")
 		}
 		tlsConfig.RootCAs = roots
 	}

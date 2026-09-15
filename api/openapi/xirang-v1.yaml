@@ -229,6 +229,20 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Node" }
         "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: removeNode
+      summary: Remove an offline or rejected node from operational views
+      description: Revokes any remaining node certificate and retains a tombstone so audit and historical job references remain valid.
+      responses:
+        "200":
+          description: Removed node tombstone
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Node is not offline or rejected, or was already removed }
   /nodes/{nodeId}/inventory:
     parameters:
       - $ref: "#/components/parameters/NodeId"
@@ -1857,13 +1871,15 @@ components:
       description: Optional gang allocation. The product of nodes and tasksPerNode cannot exceed 4096.
     Allocation:
       type: object
-      required: [id, attempt, state, worldSize, launcher, members, hosts, taskGroups, createdAt, updatedAt]
+      required: [id, attempt, state, worldSize, launcher, selectionOptimal, members, hosts, taskGroups, createdAt, updatedAt]
       properties:
         id: { type: string }
         attempt: { type: integer, format: int32, minimum: 1 }
         state: { type: string, enum: [preparing, ready, running, canceling, succeeded, failed, canceled] }
         worldSize: { type: integer, format: int32, minimum: 2, maximum: 4096 }
         launcher: { type: string, enum: [native, openmpi, mpich, intelmpi] }
+        selectionOptimal: { type: boolean, description: True when the bounded gang search examined every candidate extension within its search space. }
+        selectionSearchStates: { type: integer, minimum: 0, description: Candidate extensions visited by the gang selector. }
         members:
           type: array
           minItems: 2
@@ -2104,6 +2120,11 @@ components:
         variant: { type: string, maxLength: 128, description: Hardware/software build variant such as amd64-nvidia. }
         runtimeNodeIds: { type: array, minItems: 1, maxItems: 1024, uniqueItems: true, items: { type: string } }
         runtimeEntrypoint: { type: string, description: Executable path inside the published output. }
+        runtimeRequirements:
+          type: object
+          maxProperties: 64
+          description: Exact values or ordered numeric-version expressions (for example, libc.version >=2.17) checked by both scheduler and Agent.
+          additionalProperties: { type: string, minLength: 1, maxLength: 256 }
         sourcePath: { type: string }
         sourceSpaceId: { type: string, description: Active shared space containing sourcePath. }
         sourceSha256: { type: string, pattern: "^[a-fA-F0-9]{64}$", description: Optional caller pin; the controller always computes and records the source-tree digest. }
@@ -2156,6 +2177,7 @@ components:
             variant: { type: string }
             entrypoint: { type: string }
             runtimeNodeIds: { type: array, items: { type: string } }
+            runtimeRequirements: { type: object, additionalProperties: { type: string } }
             routingUpdatedAt: { type: string, format: date-time }
         createdAt: { type: string, format: date-time }
         startedAt: { type: string, format: date-time }
@@ -2331,6 +2353,7 @@ components:
         architecture: { type: string }
         distribution: { type: string }
         kernelVersion: { type: string }
+        runtimeFacts: { type: object, additionalProperties: { type: string } }
         agentVersion: { type: string }
         capabilities:
           type: array
@@ -2373,6 +2396,7 @@ components:
         architecture: { type: string }
         distribution: { type: string }
         kernelVersion: { type: string }
+        runtimeFacts: { type: object, additionalProperties: { type: string } }
         agentVersion: { type: string }
         cpuModel: { type: string }
         cpuFeatures:
@@ -2388,6 +2412,7 @@ components:
         pendingCertificateCommandId: { type: string }
         pendingCertificateRotationId: { type: string }
         certificateRevokedAt: { type: string, format: date-time }
+        removedAt: { type: string, format: date-time }
         labels:
           type: object
           additionalProperties: { type: string }
@@ -2562,6 +2587,7 @@ components:
         distribution: { type: string }
         kernelVersion: { type: string }
         architecture: { type: string }
+        runtimeFacts: { type: object, additionalProperties: { type: string } }
         logicalCpuCount: { type: integer, format: int32, minimum: 1 }
         cpuModel: { type: string }
         cpuFeatures:
@@ -2677,15 +2703,22 @@ components:
         observedAt: { type: string, format: date-time }
     NetworkPathSelection:
       type: object
-      required: [sourceId, targetId, primaryEdgeId, policy]
+      required: [sourceId, targetId, primaryEdgeId, bidirectional, policy]
       properties:
         sourceId: { type: string }
         targetId: { type: string }
         primaryEdgeId: { type: string }
+        primaryReverseEdgeId: { type: string }
         fallbackEdgeIds:
           type: array
           items: { type: string }
-        effectiveCapacityBits: { type: integer, format: int64, minimum: 0, description: Capacity of the selected primary; parallel links are not summed. }
+        fallbackReverseEdgeIds:
+          type: array
+          items: { type: string }
+        effectiveCapacityBits: { type: integer, format: int64, minimum: 0, description: Minimum capacity of the exact reciprocal directed observations; parallel links are not summed. }
+        effectiveLatencyMicros: { type: integer, format: int64, minimum: 0, description: Maximum latency of the reciprocal directed observations. }
+        health: { type: string, enum: [healthy, degraded, critical] }
+        bidirectional: { type: boolean, description: True only when exact reciprocal source and target address observations were matched. }
         policy: { type: string, enum: [single-best-healthy] }
     TopologyRoute:
       type: object

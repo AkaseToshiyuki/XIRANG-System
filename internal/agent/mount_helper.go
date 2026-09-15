@@ -27,7 +27,7 @@ func RunMountHelper(arguments []string) error {
 		return errors.New("mount-helper must run as root")
 	}
 	if len(arguments) < 3 || !safeMountID(arguments[1]) {
-		return errors.New("usage: mount-helper <action> <id> ...")
+		return errors.New("usage: mount-helper <action> <id> [arguments]")
 	}
 	action, id := arguments[0], arguments[1]
 	switch action {
@@ -605,26 +605,6 @@ func secureSharedPath(root, relative string, allowMissing bool) (string, error) 
 	return filepath.Join(resolved, suffix), nil
 }
 
-func secureSharedDeletePath(root, relative string) (string, error) {
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return "", err
-	}
-	candidate := filepath.Join(resolvedRoot, filepath.FromSlash(relative))
-	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(candidate))
-	if err != nil {
-		return "", err
-	}
-	if resolvedParent != resolvedRoot && !strings.HasPrefix(resolvedParent, resolvedRoot+string(os.PathSeparator)) {
-		return "", errors.New("shared path escapes shared space")
-	}
-	path := filepath.Join(resolvedParent, filepath.Base(candidate))
-	if _, err := os.Lstat(path); err != nil {
-		return "", err
-	}
-	return path, nil
-}
-
 const sharedPathResolveFlags = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS
 
 // openSharedParent pins every existing directory with a file descriptor and
@@ -744,14 +724,6 @@ func taskIdentityIDs() (int, int, error) {
 	return uid, gid, nil
 }
 
-func chownTask(path string) error {
-	uid, gid, err := taskIdentityIDs()
-	if err != nil {
-		return err
-	}
-	return os.Chown(path, uid, gid)
-}
-
 func fileOwner(info os.FileInfo) string {
 	statistics, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
@@ -839,6 +811,13 @@ func safeMountHost(value string) bool {
 
 func safeMountPath(value string) bool {
 	if !filepath.IsAbs(value) || value == "/" || len(value) > 512 {
+		return false
+	}
+	// The character set permits dots, so a traversal has to be rejected
+	// explicitly. The controller cleans these paths before sending them, but
+	// this helper is the last check standing between a malformed request and
+	// root creating, chowning, exporting or unmounting the directory it names.
+	if value != filepath.Clean(value) {
 		return false
 	}
 	for _, character := range value {

@@ -1,0 +1,77 @@
+name: native-release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    if: github.event.repository.private
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.6"
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install Protobuf compiler
+        run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
+      - name: Install Web dependencies
+        run: npm --prefix web ci
+      - name: Verify source
+        run: make verify
+      - name: Build native AMD64 and ARM64 packages
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: make package-native VERSION="${RELEASE_TAG#v}"
+      - name: Sign the checksum manifest
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -eu
+          if [ -z "${RELEASE_SIGNING_KEY}" ]; then
+            echo "The RELEASE_SIGNING_KEY secret is not configured." >&2
+            echo "install.sh refuses an unsigned release, so publishing one would break every installation." >&2
+            exit 1
+          fi
+          umask 077
+          key="${RUNNER_TEMP}/release-signing.pem"
+          printf '%s\n' "${RELEASE_SIGNING_KEY}" > "${key}"
+          openssl pkeyutl -sign -inkey "${key}" -rawin -in dist/SHA256SUMS -out dist/SHA256SUMS.sig
+          rm -f "${key}"
+          # Verify against the same public key install.sh carries, so a
+          # mismatched secret fails here rather than at every installation.
+          # The key is embedded as a shell assignment, so the quoting around it
+          # has to come off before OpenSSL will read it as PEM.
+          sed -n '/-----BEGIN PUBLIC KEY-----/,/-----END PUBLIC KEY-----/p' install.sh \
+            | sed "s/^RELEASE_SIGNING_PUBLIC_KEY='//; s/'$//" > "${RUNNER_TEMP}/release-signing.pub"
+          openssl pkeyutl -verify -pubin -inkey "${RUNNER_TEMP}/release-signing.pub" \
+            -rawin -in dist/SHA256SUMS -sigfile dist/SHA256SUMS.sig
+
+      - name: Publish verified release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" \
+              dist/xirang-*-linux-amd64.tar.gz \
+              dist/xirang-*-linux-arm64.tar.gz \
+              dist/SHA256SUMS dist/SHA256SUMS.sig --clobber
+            exit 0
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/xirang-*-linux-amd64.tar.gz \
+            dist/xirang-*-linux-arm64.tar.gz \
+            dist/SHA256SUMS \
+            dist/SHA256SUMS.sig \
+            --verify-tag \
+            --generate-notes

@@ -17,14 +17,22 @@ import (
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
 	"github.com/xirang-grid/xirang/pkg/version"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
-	defaultAgentPort              = "8444"
-	maxControlMessage             = 1 << 20
+	defaultAgentPort  = "8444"
+	maxControlMessage = 1 << 20
+	// controlDialTimeout bounds one attempt to reach the control plane so a
+	// controller that accepts packets without answering cannot stall the retry
+	// loop instead of feeding its backoff.
+	controlDialTimeout = 10 * time.Second
+	// controlDialCauseTimeout bounds the short request used only to recover why
+	// a connection never became ready.
+	controlDialCauseTimeout       = 2 * time.Second
 	inventorySnapshotCapability   = "inventory-snapshot-v1"
 	resourceObservationCapability = "resource-observation-v1"
 	interfaceHealthCapability     = "interface-health-counters-v1"
@@ -61,7 +69,7 @@ type ControlLoopConfig struct {
 func DefaultControlAddress(state State) (string, error) {
 	parsed, err := url.Parse(state.ServerURL)
 	if err != nil || parsed.Hostname() == "" {
-		return "", errors.New("Agent state has an invalid control-plane URL")
+		return "", errors.New("the Agent state has an invalid control-plane URL")
 	}
 	return net.JoinHostPort(parsed.Hostname(), defaultAgentPort), nil
 }
@@ -75,7 +83,7 @@ func RunControlLoop(ctx context.Context, state State, config ControlLoopConfig) 
 		config.Address = address
 	}
 	if config.StateDirectory == "" {
-		return errors.New("Agent state directory is required")
+		return errors.New("an Agent state directory is required")
 	}
 	if _, _, err := net.SplitHostPort(config.Address); err != nil {
 		return fmt.Errorf("invalid control address: %w", err)
@@ -166,6 +174,58 @@ func RunControlLoop(ctx context.Context, state State, config ControlLoopConfig) 
 	}
 }
 
+// dialControlPlane returns a connection that is already usable. grpc.NewClient
+// connects lazily, so the readiness that the retired WithBlock option used to
+// guarantee is established here: the caller's retry loop distinguishes a
+// controller that is unreachable from a session that ended, and it can only do
+// that if reaching the controller is what fails.
+func dialControlPlane(ctx context.Context, address string, timeout time.Duration, options ...grpc.DialOption) (*grpc.ClientConn, error) {
+	connection, err := grpc.NewClient(address, options...)
+	if err != nil {
+		return nil, fmt.Errorf("prepare control stream client: %w", err)
+	}
+	waitContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	connection.Connect()
+	for {
+		state := connection.GetState()
+		if state == connectivity.Ready {
+			return connection, nil
+		}
+		if state == connectivity.Shutdown {
+			_ = connection.Close()
+			return nil, errors.New("connect control stream: client is shut down")
+		}
+		if connection.WaitForStateChange(waitContext, state) {
+			continue
+		}
+		cause := controlDialCause(ctx, connection, state, timeout)
+		_ = connection.Close()
+		return nil, fmt.Errorf("connect control stream: %w", cause)
+	}
+}
+
+// controlDialCause recovers why a connection never became ready. The
+// connectivity API reports only a state, which cannot tell a refused port from
+// a rejected certificate, so a short request is issued: a fail-fast RPC against
+// a failed connection carries the dial error an operator can act on.
+func controlDialCause(ctx context.Context, connection *grpc.ClientConn, last connectivity.State, timeout time.Duration) error {
+	unreachable := fmt.Errorf("control plane did not become ready within %s (last state %s)", timeout, last)
+	// An Agent that is shutting down should not spend time explaining a dial it
+	// no longer needs.
+	if ctx.Err() != nil {
+		return unreachable
+	}
+	causeContext, cancel := context.WithTimeout(ctx, controlDialCauseTimeout)
+	defer cancel()
+	stream, err := xirangv1.NewAgentControlClient(connection).Connect(causeContext)
+	if err != nil {
+		return err
+	}
+	_ = stream.CloseSend()
+	return unreachable
+}
+
 func runControlSession(ctx context.Context, state State, config ControlLoopConfig, executor *NativeExecutor, flowCollector *EBPFFlowCollector, buildManager *NativeBuildManager, managementPanel *ManagementPanel) (bool, error) {
 	tlsConfig, err := authenticatedTLSConfig(config.StateDirectory, state)
 	if err != nil {
@@ -182,13 +242,11 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 	if err != nil {
 		return false, fmt.Errorf("invalid control address: %w", err)
 	}
-	dialContext, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	connection, err := grpc.DialContext(dialContext, config.Address,
-		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), grpc.WithBlock(),
+	connection, err := dialControlPlane(ctx, config.Address, controlDialTimeout,
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxControlMessage), grpc.MaxCallSendMsgSize(maxControlMessage)))
 	if err != nil {
-		return false, fmt.Errorf("connect control stream: %w", err)
+		return false, err
 	}
 	defer connection.Close()
 	streamContext, cancelStream := context.WithCancel(ctx)
@@ -755,6 +813,7 @@ func inventorySnapshot(inventory Inventory) *xirangv1.InventorySnapshot {
 		NetworkInterfaces: interfaces, Devices: devices, Labels: inventory.Labels, NumaNodes: numaNodes,
 		CpuModel: inventory.CPUModel, CpuFeatures: inventory.CPUFeatures,
 		CpuBenchmarkScore: inventory.CPUBenchmarkScore, ComputeWeight: inventory.ComputeWeight,
+		RuntimeFacts: cloneDeviceAttributes(inventory.RuntimeFacts),
 	}
 }
 

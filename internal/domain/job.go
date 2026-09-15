@@ -131,16 +131,18 @@ type TaskGroup struct {
 }
 
 type Allocation struct {
-	ID         string             `json:"id"`
-	Attempt    uint32             `json:"attempt"`
-	State      AllocationState    `json:"state"`
-	WorldSize  int32              `json:"worldSize"`
-	Launcher   string             `json:"launcher"`
-	Members    []AllocationMember `json:"members"`
-	Hosts      []AllocationHost   `json:"hosts"`
-	TaskGroups []TaskGroup        `json:"taskGroups"`
-	CreatedAt  time.Time          `json:"createdAt"`
-	UpdatedAt  time.Time          `json:"updatedAt"`
+	ID                    string             `json:"id"`
+	Attempt               uint32             `json:"attempt"`
+	State                 AllocationState    `json:"state"`
+	WorldSize             int32              `json:"worldSize"`
+	Launcher              string             `json:"launcher"`
+	Members               []AllocationMember `json:"members"`
+	Hosts                 []AllocationHost   `json:"hosts"`
+	TaskGroups            []TaskGroup        `json:"taskGroups"`
+	SelectionOptimal      bool               `json:"selectionOptimal"`
+	SelectionSearchStates int                `json:"selectionSearchStates,omitempty"`
+	CreatedAt             time.Time          `json:"createdAt"`
+	UpdatedAt             time.Time          `json:"updatedAt"`
 }
 
 func (allocation *Allocation) MemberByAssignment(id string) (*AllocationMember, bool) {
@@ -161,12 +163,13 @@ type JobDependency struct {
 }
 
 type NativeArtifact struct {
-	URI          string `json:"uri"`
-	SHA256       string `json:"sha256"`
-	Architecture string `json:"architecture"`
-	ABI          string `json:"abi,omitempty"`
-	Entrypoint   string `json:"entrypoint"`
-	Signature    []byte `json:"signature,omitempty"`
+	URI                 string            `json:"uri"`
+	SHA256              string            `json:"sha256"`
+	Architecture        string            `json:"architecture"`
+	ABI                 string            `json:"abi,omitempty"`
+	Entrypoint          string            `json:"entrypoint"`
+	Signature           []byte            `json:"signature,omitempty"`
+	RuntimeRequirements map[string]string `json:"runtimeRequirements,omitempty"`
 }
 
 // NativeArtifactVariant binds one immutable build output to the compute nodes

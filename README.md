@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  A self-expanding orchestration and scheduling platform for heterogeneous computing clusters.
+  Native orchestration and scheduling for heterogeneous Linux clusters.
 </p>
 
 <p align="center">
@@ -21,7 +21,9 @@ and network connections into one manageable cluster. It provides a single Web
 console for enrolling nodes, observing health and topology, sharing storage,
 and submitting native computing jobs.
 
-Current stable version: **1.0.1**.
+Current stable version: **1.1.0**. See the [release notes](docs/user/RELEASE_NOTES.md).
+
+**Reference:** Haochen Yang. *XIRANG: Native Build-to-Placement Contracts for Heterogeneous Linux Clusters*. Preprint, 2026. [PDF](https://github.com/AkaseToshiyuki/XIRANG-System/releases/download/v1.1.0/xirang-preprint.pdf).
 
 ## Highlights
 
@@ -35,7 +37,7 @@ Current stable version: **1.0.1**.
   instead of waiting forever.
 - **Usage and cost accounting** — review per-user measured CPU, memory, GPU,
   and workspace activity with effective-dated administrator billing rates.
-- **Native performance** — run verified Linux workloads directly, without
+- **Native execution** — run verified Linux workloads directly, without
   requiring a container runtime between the job and the hardware.
 - **Shared workspace management** — assign a storage path to the whole cluster,
   one node group, or an explicit set of nodes.
@@ -66,7 +68,7 @@ are needed.
 You can also install an already downloaded package:
 
 ```bash
-./install.sh --archive /path/to/xirang-1.0.1-linux-amd64.tar.gz
+./install.sh --archive /path/to/xirang-1.1.0-linux-amd64.tar.gz
 ```
 
 See the [deployment guide](docs/user/DEPLOYMENT.md) for supported distributions,
@@ -95,7 +97,7 @@ Developers can build and test the project with:
 ```bash
 make verify
 make web-install web-build
-make package-native VERSION=1.0.1
+make package-native VERSION=1.1.0
 ```
 
 Public bilingual manuals are available under [`docs/user`](docs/user).

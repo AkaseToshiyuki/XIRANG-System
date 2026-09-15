@@ -1,15 +1,17 @@
 {
   "name": "@xirang/web",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.1.0",
   "type": "module",
   "engines": {
     "node": ">=18"
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/normalize-dist-permissions.mjs",
     "audit:i18n": "node scripts/audit-i18n.mjs",
+    "audit:templates": "node scripts/audit-builtin-templates.mjs",
+    "audit:theme": "node scripts/audit-theme.mjs",
     "test:e2e": "playwright test",
     "test:e2e:update": "playwright test --update-snapshots",
     "typecheck": "tsc -b --pretty false",

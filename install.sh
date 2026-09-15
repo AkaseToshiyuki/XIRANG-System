@@ -2,6 +2,16 @@
 set -eu
 
 PROGRAM=${0##*/}
+
+# Ed25519 public key for the XIRANG release signing key. The matching private
+# key signs dist/SHA256SUMS during the tagged release workflow. Verifying the
+# manifest against a key that ships with this script is what makes a substituted
+# release detectable: the archive and its checksums arrive over the same channel
+# from the same GitHub Release, so the checksum alone proves only that the two
+# agree with each other.
+RELEASE_SIGNING_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAP2bewUoBIEUWCEo5KNibWE9HGOY8i85URlC6tVRUlyU=
+-----END PUBLIC KEY-----'
 REPOSITORY=${XIRANG_GITHUB_REPOSITORY:-AkaseToshiyuki/XIRANG-System}
 RELEASE_VERSION=${XIRANG_VERSION:-latest}
 ARCHIVE_PATH=
@@ -24,7 +34,9 @@ Options:
   --version VERSION          Install a release tag/version (default: latest)
   --repo OWNER/REPO          GitHub repository (default: ${REPOSITORY})
   --archive PATH             Install a local release archive
-  --sha256 HASH              Expected SHA-256 for a local archive
+  --sha256 HASH              Expected SHA-256 for a local archive. Supplying it
+                             establishes trust out of band and replaces the
+                             release signature check.
   --skip-dependencies        Do not invoke the host package manager
   --allow-unsynchronized-clock
                              Continue when NTP cannot synchronize (not recommended)
@@ -162,7 +174,7 @@ run_root() {
 
 missing_runtime_commands() {
     missing=
-    for command_name in tar sha256sum install ping ip lspci sensors ssh sshd ssh-keygen exportfs mount.nfs; do
+    for command_name in tar sha256sum openssl install ping ip lspci sensors ssh sshd ssh-keygen exportfs mount.nfs; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             missing="${missing} ${command_name}"
         fi
@@ -194,35 +206,35 @@ install_dependencies() {
     if command -v apt-get >/dev/null 2>&1; then
         run_root apt-get update
         run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            ca-certificates curl jq tar coreutils iproute2 iputils-ping \
+            ca-certificates curl jq tar coreutils openssl iproute2 iputils-ping \
             util-linux pciutils lm-sensors openssh-client openssh-server nfs-common nfs-kernel-server
     elif command -v dnf >/dev/null 2>&1; then
         run_root dnf install -y \
-            ca-certificates curl jq tar coreutils iproute iputils \
+            ca-certificates curl jq tar coreutils openssl iproute iputils \
             util-linux pciutils lm_sensors shadow-utils openssh-clients openssh-server nfs-utils
     elif command -v yum >/dev/null 2>&1; then
         run_root yum install -y \
-            ca-certificates curl jq tar coreutils iproute iputils \
+            ca-certificates curl jq tar coreutils openssl iproute iputils \
             util-linux pciutils lm_sensors shadow-utils openssh-clients openssh-server nfs-utils
     elif command -v zypper >/dev/null 2>&1; then
         run_root zypper --non-interactive install \
-            ca-certificates curl jq tar coreutils iproute2 iputils \
+            ca-certificates curl jq tar coreutils openssl iproute2 iputils \
             util-linux pciutils sensors shadow openssh nfs-client nfs-kernel-server
     elif command -v pacman >/dev/null 2>&1; then
         run_root pacman -S --needed --noconfirm \
-            ca-certificates curl jq tar coreutils iproute2 iputils \
+            ca-certificates curl jq tar coreutils openssl iproute2 iputils \
             util-linux pciutils lm_sensors shadow openssh nfs-utils
     elif command -v apk >/dev/null 2>&1; then
         run_root apk add \
-            ca-certificates curl jq tar coreutils iproute2 iputils \
+            ca-certificates curl jq tar coreutils openssl iproute2 iputils \
             util-linux pciutils lm-sensors shadow openssh-client nfs-utils
     elif command -v xbps-install >/dev/null 2>&1; then
         run_root xbps-install -Sy \
-            ca-certificates curl jq tar coreutils iproute2 iputils \
+            ca-certificates curl jq tar coreutils openssl iproute2 iputils \
             util-linux pciutils lm_sensors shadow openssh nfs-utils
     elif command -v emerge >/dev/null 2>&1; then
         run_root emerge --noreplace \
-            net-misc/curl app-misc/jq app-arch/tar sys-apps/coreutils \
+            net-misc/curl app-misc/jq app-arch/tar sys-apps/coreutils dev-libs/openssl \
             sys-apps/iproute2 net-misc/iputils sys-apps/util-linux \
             sys-apps/pciutils sys-apps/lm-sensors net-misc/openssh net-fs/nfs-utils
     else
@@ -385,6 +397,19 @@ curl_to_file() {
 
 archive_name=
 checksum_file="${TEMP_DIR}/SHA256SUMS"
+signature_file="${TEMP_DIR}/SHA256SUMS.sig"
+
+# verify_release_signature checks the checksum manifest against the release
+# signing key embedded above. It reports a missing capability separately from a
+# failed check so an old OpenSSL is never mistaken for a tampered release.
+verify_release_signature() {
+    if ! openssl pkeyutl -help 2>&1 | grep -q -- '-rawin'; then
+        fail "openssl is too old to verify Ed25519 release signatures; install OpenSSL 1.1.1 or newer, or pass --sha256"
+    fi
+    printf '%s\n' "${RELEASE_SIGNING_PUBLIC_KEY}" > "${TEMP_DIR}/release-signing.pub"
+    openssl pkeyutl -verify -pubin -inkey "${TEMP_DIR}/release-signing.pub" \
+        -rawin -in "${checksum_file}" -sigfile "${signature_file}" >/dev/null 2>&1
+}
 if [ -n "${ARCHIVE_PATH}" ]; then
     [ -f "${ARCHIVE_PATH}" ] || fail "archive not found: ${ARCHIVE_PATH}"
     ARCHIVE_PATH=$(CDPATH= cd -- "$(dirname -- "${ARCHIVE_PATH}")" && pwd)/$(basename -- "${ARCHIVE_PATH}")
@@ -399,6 +424,9 @@ if [ -n "${ARCHIVE_PATH}" ]; then
     adjacent_checksum=$(dirname -- "${ARCHIVE_PATH}")/SHA256SUMS
     if [ -z "${EXPECTED_SHA256}" ] && [ -f "${adjacent_checksum}" ]; then
         cp "${adjacent_checksum}" "${checksum_file}"
+        if [ -f "${adjacent_checksum}.sig" ]; then
+            cp "${adjacent_checksum}.sig" "${signature_file}"
+        fi
     fi
 else
     read_token
@@ -422,6 +450,8 @@ else
         '[.assets[] | select(.name | endswith($suffix))][0].name // empty' "${metadata}")
     checksum_url=$(jq -r \
         '[.assets[] | select(.name == "SHA256SUMS")][0].url // empty' "${metadata}")
+    signature_url=$(jq -r \
+        '[.assets[] | select(.name == "SHA256SUMS.sig")][0].url // empty' "${metadata}")
     [ -n "${asset_url}" ] ||
         fail "release has no Linux ${ARCH} archive"
     [ -n "${checksum_url}" ] ||
@@ -431,6 +461,20 @@ else
     log "Downloading ${archive_name}."
     curl_to_file "${ARCHIVE_PATH}" "application/octet-stream" "${asset_url}"
     curl_to_file "${checksum_file}" "application/octet-stream" "${checksum_url}"
+    if [ -n "${signature_url}" ]; then
+        curl_to_file "${signature_file}" "application/octet-stream" "${signature_url}"
+    fi
+fi
+
+# The signature is what distinguishes a genuine release from a substituted one.
+# It is required whenever trust rests on the downloaded manifest; passing
+# --sha256 establishes the same trust out of band and takes its place.
+if [ -z "${EXPECTED_SHA256}" ]; then
+    [ -s "${signature_file}" ] ||
+        fail "release is not signed; publish SHA256SUMS.sig alongside it, or pass --sha256 with a digest you trust"
+    verify_release_signature ||
+        fail "SHA256SUMS signature does not match the XIRANG release signing key; do not install this package"
+    log "Release signature verified."
 fi
 
 case "${EXPECTED_SHA256}" in

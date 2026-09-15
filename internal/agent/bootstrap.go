@@ -60,7 +60,7 @@ func ServeBootstrapEnrollment(ctx context.Context, listenAddress, stateDirectory
 		return errors.New("bootstrap listen address is required")
 	}
 	if _, err := LoadState(stateDirectory); err == nil {
-		return errors.New("Agent is already enrolled")
+		return errors.New("this Agent is already enrolled")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect Agent state: %w", err)
 	}
