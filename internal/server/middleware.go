@@ -149,6 +149,9 @@ func requiredPermission(method, path string) string {
 	if strings.HasPrefix(path, "/api/v1/audit") {
 		return identity.PermissionAuditRead
 	}
+	if path == "/api/v1/flows" || (strings.HasPrefix(path, "/api/v1/nodes/") && strings.HasSuffix(path, "/flows")) {
+		return identity.PermissionAccessManage
+	}
 	if strings.HasPrefix(path, "/api/v1/accounting") {
 		if method == http.MethodGet {
 			return identity.PermissionRead

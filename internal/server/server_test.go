@@ -382,7 +382,7 @@ func TestArtifactRootServesOnlyContainedRegularFiles(t *testing.T) {
 	handler.ServeHTTP(served, servedRequest)
 	if served.Code != http.StatusOK || served.Body.String() != "native-binary" ||
 		served.Header().Get("Content-Type") != "application/octet-stream" ||
-		!strings.Contains(served.Header().Get("Cache-Control"), "immutable") {
+		served.Header().Get("Cache-Control") != "private, no-store" {
 		t.Fatalf("artifact response status=%d headers=%v body=%q", served.Code, served.Header(), served.Body.String())
 	}
 	for _, path := range []string{"/artifacts/missing", "/artifacts/amd64", "/artifacts/escape"} {
@@ -922,13 +922,43 @@ func TestTopologyRouteSupportsLatestAndVersion(t *testing.T) {
 }
 
 func TestFlowRoutesRequireAdminAndBoundHistoryLimit(t *testing.T) {
+	store, err := boltstore.Open(filepath.Join(t.TempDir(), "xirang.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	access := identity.NewAccessService(store, nil, nil)
 	reader := &testFlowReader{latest: []domain.NodeFlowObservation{{
 		MessageID: "flow-1", NodeID: "node-1", Flows: []domain.NetworkFlow{{
 			Family: "ipv4", Protocol: "tcp", SourceAddress: "10.0.0.1", DestinationAddress: "10.0.0.2",
 			Direction: "egress", Packets: 2, Bytes: 128,
 		}},
 	}}}
-	handler := New(Config{AdminToken: "admin-test", Flows: reader}).HTTPHandler()
+	handler := New(Config{AdminToken: "admin-test", Flows: reader, Access: access}).HTTPHandler()
+	for _, role := range []string{"viewer", "user", "operator", "builder", "admin"} {
+		token, err := access.CreateToken(context.Background(), role, role, time.Hour, domain.Principal{Subject: "root", Role: "admin", Permissions: []string{"*"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{"/api/v1/flows", "/api/v1/nodes/node-1/flows?limit=7"} {
+			response := jsonRequest(t, handler, http.MethodGet, path, nil, token.Secret)
+			want := http.StatusForbidden
+			if role == "admin" {
+				want = http.StatusOK
+			}
+			if response.Code != want {
+				t.Fatalf("role=%s path=%s status=%d want=%d", role, path, response.Code, want)
+			}
+			if want == http.StatusForbidden && bytes.Contains(response.Body.Bytes(), []byte("10.0.0.1")) {
+				t.Fatal("forbidden response leaked flow data")
+			}
+		}
+	}
+	for _, path := range []string{"/api/v1/nodes/node-1", "/api/v1/nodes/node-1/inventory", "/api/v1/nodes/node-1/observations"} {
+		if requiredPermission(http.MethodGet, path) != identity.PermissionRead {
+			t.Fatalf("ordinary node read restricted: %s", path)
+		}
+	}
 	unauthorized := jsonRequest(t, handler, http.MethodGet, "/api/v1/flows", nil, "")
 	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("expected authentication, got %d", unauthorized.Code)

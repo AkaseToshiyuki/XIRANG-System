@@ -2,7 +2,7 @@
 
 [English](USAGE.md) | [简体中文](USAGE.zh-CN.md)
 
-Applies to XIRANG **1.1.0**.
+Applies to XIRANG **1.2.0**.
 
 ## Quick start
 
@@ -228,8 +228,10 @@ a complete editable script.
 
 Build workers are ordinary enrolled Agents and are disabled unless an
 administrator enables `-build-enabled` with a dedicated `xirang-build` user
-and delegated cgroup v2 root. The controller chooses an online worker by the
+and delegated cgroup v2 root. Native execution also requires enabled Landlock ABI 3 or newer (Linux 6.2+); it fails closed when unavailable. Toolchains and their dependencies must be installed in standard system paths (`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`). Build commands may read those paths, `/etc`, `/proc` and CPU information; they may write only their own workspace and basic null/random devices. Temporary files stay inside the workspace. Shared staging remains inaccessible even when NFS uses `all_squash`. See the [kernel Landlock documentation](https://docs.kernel.org/userspace-api/landlock.html). The controller chooses an online worker by the
 recipe's exact architecture and toolchain; architecture is never emulated.
+
+Native builds sharing a host UID run one at a time, including staging, artifact collection and workspace cleanup, across both Controller and Agent processes. Rerun the installer when upgrading to provision `/var/lib/xirang-build/locks` and the service write permissions. Cleanup failures or daemon crashes quarantine that UID persistently. Before clearing its `<uid>.lock` file, an administrator must stop both services, terminate all processes under that build UID and remove its residual private workspaces; then restart the services. Custom build UIDs require a root-owned, `xirang`-group lock file with mode `0660` in the same directory. Never give a build identity write access to the lock directory or its files.
 
 The default roots live under
 `/srv/xirang/XirangShare/.xirang/builds`. The controller computes and records a
@@ -247,6 +249,11 @@ eligible only when that matrix explicitly advertises the selected target.
 Application builds also declare a variant, runtime entrypoint and runtime-node
 mapping. Multiple hardware-specific variants may share one application name;
 the scheduler resolves the correct signed output for the selected node.
+Only administrators may publish global application mappings or change their
+runtime nodes. Ordinary builders can still create private builds without an
+application name. After upgrading from a version without routing approvals,
+an administrator must review each existing application build and save its node
+mapping again; unapproved legacy mappings are excluded from new job resolution.
 Administrators can cancel active builds, delete completed records, and set a
 record-count and age retention policy; cleanup removes build-manager artifacts
 but not outputs deliberately published into a user shared space.

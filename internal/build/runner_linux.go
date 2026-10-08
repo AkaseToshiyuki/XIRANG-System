@@ -3,7 +3,6 @@
 package build
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,9 +14,12 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/xirang-grid/xirang/internal/domain"
+	"github.com/xirang-grid/xirang/internal/safefile"
 	"golang.org/x/sys/unix"
 )
 
@@ -37,6 +39,10 @@ type NativeRunner struct {
 	credential *syscall.Credential
 	cgroupRoot string
 	shared     bool
+	lockRoot   string
+	leaseMu    sync.Mutex
+	lease      *os.File
+	quarantine error
 }
 
 func NewNativeRunner(config NativeRunnerConfig) (*NativeRunner, error) {
@@ -46,12 +52,15 @@ func NewNativeRunner(config NativeRunnerConfig) (*NativeRunner, error) {
 	if config.User == "" || config.CgroupRoot == "" || !filepath.IsAbs(config.CgroupRoot) {
 		return nil, errors.New("native build runner requires a dedicated user and absolute delegated cgroup root")
 	}
+	if err := buildFilesystemABI(); err != nil {
+		return nil, err
+	}
 	account, err := user.Lookup(config.User)
 	if err != nil {
 		return nil, err
 	}
 	uid, err := strconv.ParseUint(account.Uid, 10, 32)
-	if err != nil || uid == 0 {
+	if err != nil || uid == 0 || int(uid) == os.Geteuid() {
 		return nil, errors.New("native build user must be a non-root numeric identity")
 	}
 	gidText := account.Gid
@@ -110,17 +119,23 @@ func NewNativeRunner(config NativeRunnerConfig) (*NativeRunner, error) {
 	for _, capability := range capabilities {
 		availableToolchains = append(availableToolchains, capability.Name)
 	}
-	return &NativeRunner{
+	runner := &NativeRunner{
 		worker: domain.BuildWorker{
 			ID: config.ID, Architecture: runtime.GOARCH, Toolchains: availableToolchains,
 			ToolchainCapabilities: capabilities,
-			Isolation:             "dedicated-uid+cgroup-v2+no-new-privileges", Ready: true,
+			Isolation:             "dedicated-uid+cgroup-v2+landlock+no-new-privileges", Ready: true,
 			SupportsCancellation: true,
 		},
 		credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: supplementary},
 		cgroupRoot: config.CgroupRoot,
 		shared:     config.SharedWorkspace,
-	}, nil
+	}
+	lock, err := runner.openIdentityLock()
+	if err != nil {
+		return nil, err
+	}
+	lock.Close()
+	return runner, nil
 }
 
 func hasBuildIdentityCapabilities() bool {
@@ -140,7 +155,7 @@ func hasBuildIdentityCapabilities() bool {
 
 func (runner *NativeRunner) Worker() domain.BuildWorker { return runner.worker }
 
-func (runner *NativeRunner) Run(ctx context.Context, workspace string, recipe domain.BuildRecipe) (string, error) {
+func (runner *NativeRunner) Run(ctx context.Context, workspace string, recipe domain.BuildRecipe) (logsResult string, runError error) {
 	outputPath := filepath.Join(workspace, filepath.FromSlash(recipe.OutputPath))
 	outputDirectoryMode := os.FileMode(0o711)
 	if runner.shared {
@@ -186,7 +201,14 @@ func (runner *NativeRunner) Run(ctx context.Context, workspace string, recipe do
 	if err := os.Mkdir(group, 0o755); err != nil {
 		return "", err
 	}
-	defer cleanupBuildCgroup(group)
+	defer func() {
+		if err := stopBuildCgroup(group); err != nil {
+			runner.quarantineIdentity(err)
+			runError = errors.Join(runError, err)
+		} else {
+			cleanupBuildCgroup(group)
+		}
+	}()
 	quota := recipe.MilliCPU * 100
 	for name, value := range map[string]string{
 		"cpu.max":    fmt.Sprintf("%d 100000", quota),
@@ -197,22 +219,67 @@ func (runner *NativeRunner) Run(ctx context.Context, workspace string, recipe do
 			return "", fmt.Errorf("configure build cgroup %s: %w", name, err)
 		}
 	}
-	var output bytes.Buffer
+	output := newBuildLogTail(64 << 10)
 	for index, step := range buildSteps(recipe) {
-		_, _ = fmt.Fprintf(&output, "[step %d/%d] %s\n", index+1, len(buildSteps(recipe)), strings.Join(step, " "))
-		if err := runner.runBuildStep(ctx, workspace, group, step, recipe.Environment, &output); err != nil {
-			return boundedTail(output.String(), 64<<10), err
+		_, _ = fmt.Fprintf(output, "[step %d/%d] %s\n", index+1, len(buildSteps(recipe)), strings.Join(step, " "))
+		if err := runner.runBuildStep(ctx, workspace, group, step, recipe.Environment, output); err != nil {
+			return output.String(), err
 		}
 	}
-	logs := boundedTail(output.String(), 64<<10)
-	if runner.shared {
-		if err := os.Chmod(outputPath, 0o550); err != nil {
-			return logs, fmt.Errorf("protect shared build output: %w", err)
-		}
-	} else if err := os.Chown(outputPath, os.Geteuid(), os.Getegid()); err != nil {
-		return logs, fmt.Errorf("reclaim build output: %w", err)
+	logs := output.String()
+	if err := stopBuildCgroup(group); err != nil {
+		return logs, err
+	}
+	if err := runner.reclaimOutput(workspace, recipe.OutputPath); err != nil {
+		return logs, err
 	}
 	return logs, nil
+}
+
+func (runner *NativeRunner) reclaimOutput(workspace, relative string) error {
+	output, err := safefile.OpenRegularForMetadata(workspace, relative)
+	if err != nil {
+		return fmt.Errorf("open declared build output: %w", err)
+	}
+	defer output.Close()
+	if runner.shared {
+		// /proc/self/fd refers to the pinned O_PATH descriptor, including
+		// after a rename. This also works before fchmodat2 support.
+		if err := os.Chmod(fmt.Sprintf("/proc/self/fd/%d", output.Fd()), 0o550); err != nil {
+			return fmt.Errorf("protect shared build output: %w", err)
+		}
+	} else if err := unix.Fchownat(int(output.Fd()), "", os.Geteuid(), os.Getegid(), unix.AT_EMPTY_PATH); err != nil {
+		return fmt.Errorf("reclaim build output: %w", err)
+	}
+	return nil
+}
+
+// A successful parent process can leave descendants behind. Do not inspect or
+// reclaim files until the entire build cgroup has become empty.
+func stopBuildCgroup(path string) error {
+	deadline := time.Now().Add(2 * time.Second)
+	killRequested := false
+	for {
+		events, err := os.ReadFile(filepath.Join(path, "cgroup.events"))
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(events), "\n") {
+			if line == "populated 0" {
+				return nil
+			}
+		}
+		if !killRequested {
+			if err := os.WriteFile(filepath.Join(path, "cgroup.kill"), []byte("1"), 0o644); err != nil {
+				return err
+			}
+			killRequested = true
+		}
+		if time.Now().After(deadline) {
+			return errors.New("build processes did not exit before output collection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (runner *NativeRunner) runBuildStep(ctx context.Context, workspace, group string, step []string, environment map[string]string, output io.Writer) error {
@@ -285,6 +352,8 @@ func killBuildProcessGroup(command *exec.Cmd) error {
 }
 
 func RunExecutorLauncher(arguments []string) error {
+	// Landlock and no_new_privs apply to the calling OS thread. Keep exec on it.
+	runtime.LockOSThread()
 	if len(arguments) == 0 || !filepath.IsAbs(arguments[0]) {
 		return errors.New("build launcher requires an absolute executable")
 	}
@@ -304,6 +373,19 @@ func RunExecutorLauncher(arguments []string) error {
 		syscall.Umask(0o007)
 	} else {
 		syscall.Umask(0o077)
+	}
+	workspace, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if err := restrictBuildFilesystem(workspace); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, ".tmp"), 0700); err != nil {
+		return err
+	}
+	if err := os.Setenv("TMPDIR", filepath.Join(workspace, ".tmp")); err != nil {
+		return err
 	}
 	return syscall.Exec(arguments[0], append([]string{arguments[0]}, arguments[1:]...), os.Environ())
 }

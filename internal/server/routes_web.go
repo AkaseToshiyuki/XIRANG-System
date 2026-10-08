@@ -40,7 +40,7 @@ func registerWebRoutes(mux *http.ServeMux, root string) {
 	})
 }
 
-func registerArtifactRoutes(mux *http.ServeMux, root string, nodes *enrollment.Service, adminToken string) {
+func registerArtifactRoutes(mux *http.ServeMux, root string, nodes *enrollment.Service, builds BuildManager, adminToken string) {
 	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {
 		return
@@ -58,6 +58,18 @@ func registerArtifactRoutes(mux *http.ServeMux, root string, nodes *enrollment.S
 			http.NotFound(writer, request)
 			return
 		}
+		if principal, ok := identity.PrincipalFromContext(request.Context()); ok && principal.Role != "admin" {
+			buildID, _, nested := strings.Cut(filepath.ToSlash(relative), "/")
+			if !nested || !serviceAvailable(builds) {
+				http.NotFound(writer, request)
+				return
+			}
+			build, err := builds.Get(request.Context(), buildID)
+			if err != nil || !canAccessBuild(principal, build) {
+				http.NotFound(writer, request)
+				return
+			}
+		}
 		candidate := filepath.Join(absoluteRoot, relative)
 		resolved, err := filepath.EvalSymlinks(candidate)
 		if err != nil {
@@ -69,13 +81,21 @@ func registerArtifactRoutes(mux *http.ServeMux, root string, nodes *enrollment.S
 			http.NotFound(writer, request)
 			return
 		}
+		if principal, ok := identity.PrincipalFromContext(request.Context()); ok && principal.Role != "admin" {
+			requestedBuild, _, _ := strings.Cut(filepath.ToSlash(relative), "/")
+			resolvedBuild, _, _ := strings.Cut(filepath.ToSlash(contained), "/")
+			if requestedBuild != resolvedBuild {
+				http.NotFound(writer, request)
+				return
+			}
+		}
 		info, err := os.Stat(resolved)
 		if err != nil || !info.Mode().IsRegular() {
 			http.NotFound(writer, request)
 			return
 		}
 		writer.Header().Set("Content-Type", "application/octet-stream")
-		writer.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		writer.Header().Set("Cache-Control", "private, no-store")
 		http.ServeFile(writer, request, resolved)
 	})
 }

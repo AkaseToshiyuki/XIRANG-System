@@ -173,11 +173,14 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	resolvedData, resolvedBackups, err := resolveStateDirectories(*dataDirectory, *backupDirectory)
+	if err != nil {
+		logger.Error("resolve state directories", "error", err)
+		os.Exit(2)
+	}
+	*dataDirectory, *backupDirectory = resolvedData, resolvedBackups
 	if *adminTokenFile == "" {
 		*adminTokenFile = filepath.Join(*dataDirectory, "admin.token")
-	}
-	if *backupDirectory == "" {
-		*backupDirectory = filepath.Join(*dataDirectory, "backups")
 	}
 	if *terminalSSHKey == "" {
 		*terminalSSHKey = filepath.Join(*dataDirectory, "ssh", "id_ed25519")

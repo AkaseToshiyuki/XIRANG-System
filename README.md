@@ -21,9 +21,9 @@ and network connections into one manageable cluster. It provides a single Web
 console for enrolling nodes, observing health and topology, sharing storage,
 and submitting native computing jobs.
 
-Current stable version: **1.1.0**. See the [release notes](docs/user/RELEASE_NOTES.md).
+Current stable version: **1.2.0**. See the [release notes](docs/user/RELEASE_NOTES.md).
 
-**Reference:** Haochen Yang. *XIRANG: Native Build-to-Placement Contracts for Heterogeneous Linux Clusters*. Preprint, 2026. [PDF](https://github.com/AkaseToshiyuki/XIRANG-System/releases/download/v1.1.0/xirang-preprint.pdf).
+**Reference:** Haochen Yang. *XIRANG: Native Build-to-Placement Contracts for Heterogeneous Linux Clusters*. Preprint, 2026.
 
 ## Highlights
 
@@ -68,7 +68,7 @@ are needed.
 You can also install an already downloaded package:
 
 ```bash
-./install.sh --archive /path/to/xirang-1.1.0-linux-amd64.tar.gz
+./install.sh --archive /path/to/xirang-1.2.0-linux-amd64.tar.gz
 ```
 
 See the [deployment guide](docs/user/DEPLOYMENT.md) for supported distributions,
@@ -97,7 +97,7 @@ Developers can build and test the project with:
 ```bash
 make verify
 make web-install web-build
-make package-native VERSION=1.1.0
+make package-native VERSION=1.2.0
 ```
 
 Public bilingual manuals are available under [`docs/user`](docs/user).

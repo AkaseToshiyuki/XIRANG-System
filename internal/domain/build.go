@@ -57,6 +57,7 @@ type BuildArtifact struct {
 	RuntimeNodeIDs      []string          `json:"runtimeNodeIds,omitempty"`
 	RuntimeRequirements map[string]string `json:"runtimeRequirements,omitempty"`
 	RoutingUpdatedAt    *time.Time        `json:"routingUpdatedAt,omitempty"`
+	RoutingApproved     bool              `json:"routingApproved,omitempty"`
 }
 
 type Build struct {

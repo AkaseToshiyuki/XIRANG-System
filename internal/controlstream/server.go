@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
@@ -80,6 +81,7 @@ const (
 
 type NodeHeartbeater interface {
 	Heartbeat(context.Context, string, string) (domain.Node, error)
+	GetNode(context.Context, string) (domain.Node, error)
 }
 
 type NodeCapabilityReporter interface {
@@ -181,6 +183,7 @@ type Server struct {
 	xirangv1.UnimplementedAgentControlServer
 	nodes             NodeHeartbeater
 	heartbeatInterval time.Duration
+	heartbeatTimeout  time.Duration
 	hub               *Hub
 	telemetry         TelemetryReporter
 	topology          TopologyReporter
@@ -234,7 +237,11 @@ func New(nodes NodeHeartbeater, heartbeatInterval time.Duration, hubs ...*Hub) *
 	if len(hubs) > 0 && hubs[0] != nil {
 		hub = hubs[0]
 	}
-	return &Server{nodes: nodes, heartbeatInterval: heartbeatInterval, telemetryInterval: telemetryInterval, hub: hub}
+	// Inventory and topology sampling in existing Agents can synchronously
+	// take several seconds (including separate LLDP and route-query timeouts).
+	// Keep authorization expiry bounded without treating those normal pauses
+	// as missed heartbeats at the supported 1s reporting interval.
+	return &Server{nodes: nodes, heartbeatInterval: heartbeatInterval, heartbeatTimeout: max(30*time.Second, 3*heartbeatInterval), telemetryInterval: telemetryInterval, hub: hub}
 }
 
 func (server *Server) ConfigureTelemetryInterval(path string) error {
@@ -388,7 +395,21 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 	}); err != nil {
 		return err
 	}
-	session := server.hub.Attach(nodeID)
+	var lastHeartbeat atomic.Int64
+	lastHeartbeat.Store(time.Now().UnixNano())
+	authorized := func() bool {
+		now := time.Now()
+		if now.Before(certificate.NotBefore) || !now.Before(certificate.NotAfter) || now.Sub(time.Unix(0, lastHeartbeat.Load())) > server.heartbeatTimeout {
+			return false
+		}
+		current, err := server.nodes.GetNode(stream.Context(), nodeID)
+		return err == nil && current.CertificateRevokedAt == nil && current.CertificateSerial == certificate.SerialNumber.Text(16) && current.RemovedAt == nil &&
+			current.Status != domain.NodeStatusRejected && current.Status != domain.NodeStatusPendingApproval && current.Status != domain.NodeStatusDiscovered
+	}
+	if !authorized() {
+		return status.Error(codes.Unauthenticated, "node certificate is no longer active")
+	}
+	session := server.hub.attachAuthorized(nodeID, authorized)
 	defer func() {
 		if session.Detach() && server.builds != nil {
 			server.builds.RemoveWorker(nodeID)
@@ -414,13 +435,22 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 		}
 	}()
 	var lastSequence uint64
+	validityTicker := time.NewTicker(min(server.heartbeatInterval, time.Second))
+	defer validityTicker.Stop()
 	for {
 		select {
 		case <-stream.Context().Done():
 			return stream.Context().Err()
 		case <-session.Replaced():
 			return status.Error(codes.Aborted, "control stream replaced by a newer connection")
+		case <-validityTicker.C:
+			if !authorized() {
+				return status.Error(codes.Unauthenticated, "node authorization or heartbeat expired")
+			}
 		case <-session.Wake():
+			if !authorized() {
+				return status.Error(codes.Unauthenticated, "node authorization or heartbeat expired")
+			}
 			command, ok := session.Take()
 			if !ok {
 				continue
@@ -469,6 +499,9 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 				return err
 			}
 		case incoming := <-received:
+			if !authorized() {
+				return status.Error(codes.Unauthenticated, "node authorization or heartbeat expired")
+			}
 			if errors.Is(incoming.err, io.EOF) {
 				return nil
 			}
@@ -505,6 +538,7 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 					}
 				}
 				lastSequence = heartbeat.Sequence
+				lastHeartbeat.Store(time.Now().UnixNano())
 				continue
 			}
 			if inventory := message.GetInventory(); inventory != nil {

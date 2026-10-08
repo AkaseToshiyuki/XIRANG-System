@@ -1,63 +1,71 @@
-# XIRANG 1.1.0 release notes
+# XIRANG 1.2.0 release notes
 
 [English](RELEASE_NOTES.md) | [简体中文](RELEASE_NOTES.zh-CN.md)
 
-XIRANG 1.1.0 brings the current native Linux implementation to the public stable
-release line. It supersedes version 1.0.1. The management API and Agent protocol remain `v1`.
+XIRANG 1.2.0 strengthens build isolation and authorization and refreshes the
+bilingual console. It supersedes 1.1.0. The management API and Agent protocol
+remain `v1`.
 
-## Included capabilities
+## Security and correctness
 
-- Native AMD64/ARM64 execution, resource and executor checks, queue/group policy,
-  task accounting, and cgroup v2 isolation where the required host capabilities
-  are available.
-- Native build variants with an artifact-digest signature, editable node mappings,
-  and explicit runtime requirements checked by both scheduler and Agent. When
-  mappings overlap, the first captured mapping wins; runtime mismatch does not
-  select an older mapped variant automatically.
-- Reciprocal address-pair selection for observed probe paths, conservative
-  capacity/RTT ranking, multi-node Gang allocation, and bounded ranked search
-  with an explicit completion/exhaustion result. Link speeds are declared bounds,
-  not measured application throughput; the controller does not change routes.
-- Weighted partitioning of independent batch items, shared-space management,
-  owner-scoped files and jobs, hardware telemetry, alerts, and a bilingual console.
-- Backup/restore and optional PostgreSQL active/passive leadership. MPI adapters
-  require validation against the site's launcher and network environment.
+- API-token permissions now intersect the account's current permissions;
+  account demotion takes effect without enlarging existing token grants.
+- Flow metadata requires administrator access. Private build artifacts require
+  ownership or administrator authorization, including resolved-path checks.
+- Global application publication and node mappings require administrator
+  approval. Unapproved legacy mappings are excluded from application resolution.
+- Build output collection uses pinned descriptors and rejects parent/leaf
+  symlinks. Local artifact reads reject FIFOs and other special files without
+  blocking. Build logs retain a bounded 64 KiB tail while draining output.
+- Builds sharing an OS identity serialize staging, execution, collection and
+  cleanup across Controller and Agent processes. Landlock restricts compiler
+  filesystem access; incomplete cleanup or a daemon crash quarantines the UID.
+- Recursive owned shared-directory deletion uses directory descriptors and
+  refuses replaced or newly untracked entries.
+- Agent authority is rechecked independently of incoming heartbeats. Revoked,
+  replaced or expired certificates cannot retain a selectable build worker or
+  continue exchanging commands; silent streams expire.
+- Updated gRPC to 1.83.2 and x/text to 0.41.0, including required transitive
+  updates, to address dependency security advisories.
+- Relative controller state paths work with backup initialization. Browser SBOM
+  downloads carry authentication and display download failures.
 
-## Changes since the previous public release
+## Console
 
-- Release checksum manifests are signed with Ed25519 and the installer verifies
-  them against its embedded public key. Native archives include both Linux CPU
-  architectures and third-party license material.
-- Authentication failures remain closed, API-token privileges are bounded, and
-  credential endpoints have bounded throttling state. Agent gRPC streams and
-  keepalive settings are bounded; controller certificates can renew in service.
-- Job lookup uses owner/liveness indexes and scheduling limits work per pass.
-  Node removal is audited; topology omits stale unavailable-node evidence and
-  shared-space recovery accounts for replaced nodes.
-- The console's light theme, topology labels, file-manager text, and bilingual
-  built-in templates have been corrected and have browser/audit coverage.
+The console uses neutral surfaces and one primary accent, with less repeated
+copy and decoration. Navigation has accessible names and current-page state;
+login exposes language and theme choices. Terminal sessions remain connected
+across theme and telemetry-interval changes. Browser-storage failures, node
+stream reconnect state, builder controls, narrow layouts and rendered contrast
+have regression coverage.
 
-## Known operating boundaries
+## Upgrade requirements
 
-Publishing into nested shared directories or reading outputs under a different
-task identity can require administrator preparation of file access permissions.
-Nested shared-directory listing also has a known metadata lookup limitation.
-An explicit architecture filter on an application containing mixed-architecture
-variants is rejected; use correctly mapped, explicitly selected nodes until that
-admission path is revised.
+Back up controller state before upgrading; upgrade passive controllers before
+the active instance. Use the current installer so service permissions and the
+host build-identity lock directory are provisioned.
 
-Hardware-dependent execution and MPI behavior require site qualification.
+**Native builds require enabled Landlock ABI 3 or newer (Linux 6.2+)**, a
+dedicated non-root identity and delegated cgroup v2. Toolchains and dependencies
+must be installed in the standard system paths listed in [Usage](USAGE.md).
+Unsupported native-build hosts fail closed; this requirement is specific to
+native builds. Confirm these capabilities before enabling a build worker.
 
-## Upgrade and verification
+Administrators must re-save legacy application target mappings to approve them
+for global resolution. After a build crash or failed cleanup, follow the UID
+recovery procedure in [Usage](USAGE.md) before admitting another build.
 
-Back up the controller state before upgrading. Upgrade a passive controller
-before the active instance, and check node capabilities and shared-file ownership
-before admitting new workloads. The release does not require a change to the
-`v1` protocol identifier; optional capabilities are negotiated by the Agent.
+## Verification and operating boundaries
 
-Use the current installer and retain `SHA256SUMS` and `SHA256SUMS.sig` with the
-native archive. The installer verifies the signature and checksums before use.
+Go tests, race/static checks, Linux AMD64/ARM64 compilation, API/Proto contracts,
+Web audits and all 25 browser regressions passed for the release candidate.
+Hardware, MPI, multi-node NFS and HA behavior still require site qualification.
+Browser access to `file://` SBOM locations retains its existing deployment limit.
 
-## Reference
+Nested shared-directory metadata lookup and explicit architecture filtering of
+mixed-architecture application variants retain their existing limitations.
+Use correctly mapped, explicitly selected nodes for the latter case.
 
-Haochen Yang. *XIRANG: Native Build-to-Placement Contracts for Heterogeneous Linux Clusters*. Preprint, 2026. [PDF](https://github.com/AkaseToshiyuki/XIRANG-System/releases/download/v1.1.0/xirang-preprint.pdf).
+Release assets contain the Linux AMD64 and ARM64 archives, `SHA256SUMS` and its
+Ed25519 signature `SHA256SUMS.sig`. Keep all verification files with the archive;
+the installer verifies the signature and checksum before installation.

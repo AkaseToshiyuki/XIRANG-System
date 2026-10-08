@@ -78,7 +78,6 @@ export function OverviewPage({ token, onNavigate }: OverviewPageProps) {
     let totalMemory = 0;
     let measuredCPU = 0;
     let measuredMemory = 0;
-    let networkBits = 0;
     let measuredNodes = 0;
     for (const sample of samples) {
       const latest = sample.observations[0];
@@ -95,7 +94,7 @@ export function OverviewPage({ token, onNavigate }: OverviewPageProps) {
     return {
       usedCPU, totalCPU, measuredCPU, usedMemory, totalMemory, measuredMemory, measuredNodes,
       networkBits: aggregateBidirectionalRate(links),
-      networkLinks: links.length,
+      networkLinks: links.length, links,
     };
   }, [nodes, rates, samples, topology]);
 
@@ -114,9 +113,7 @@ export function OverviewPage({ token, onNavigate }: OverviewPageProps) {
   return <section>
     <header className="page-header">
       <div>
-        <span className="eyebrow">{t("检查集群运行状态", "Inspect cluster health")}</span>
-        <h1>{t("集群运行总览", "Cluster overview")}</h1>
-        <p>{t("查看节点在线情况、资源占用、连接速率和需要处理的告警。", "Review node availability, resource usage, link throughput and alerts that need attention.")}</p>
+        <h1>{t("集群概览", "Cluster overview")}</h1>
       </div>
       <div className={`live-indicator ${error ? "live-indicator--warning" : ""}`}><span />{error ? t("数据刷新异常", "Refresh failed") : updatedAt ? `${t("更新于", "Updated at")} ${updatedAt.toLocaleTimeString()}` : t("正在连接", "Connecting")}</div>
     </header>
@@ -124,24 +121,30 @@ export function OverviewPage({ token, onNavigate }: OverviewPageProps) {
     {error && <p className="error-banner" role="alert">{error}</p>}
 
     <section className="metrics-grid" aria-label={t("集群指标", "Cluster metrics")}>
-      <MetricCard label={t("纳管节点", "Managed nodes")} value={loading ? "—" : `${ready} / ${nodes.length}`} detail={pending ? t(`${pending} 个等待审批`, `${pending} waiting for approval`) : t("所有已接入节点均已计入", "All enrolled nodes accounted for")} />
+      <MetricCard label={t("纳管节点", "Managed nodes")} value={loading ? "—" : `${ready} / ${nodes.length}`} detail={pending ? t(`${pending} 个等待审批`, `${pending} waiting for approval`) : t("就绪 / 总数", "Ready / total")} />
       <MetricCard label={t("CPU 利用率", "CPU utilization")} value={summary.measuredNodes ? `${percentage(summary.usedCPU, summary.measuredCPU).toFixed(0)}%` : "—"} detail={t(`可见 ${(summary.totalCPU / 1000).toFixed(0)} 个逻辑核心`, `${(summary.totalCPU / 1000).toFixed(0)} logical cores visible`)} tone="violet" progress={percentage(summary.usedCPU, summary.measuredCPU)} />
-      <MetricCard label={t("内存压力", "Memory pressure")} value={summary.measuredNodes ? `${percentage(summary.usedMemory, summary.measuredMemory).toFixed(0)}%` : "—"} detail={t(`已用 ${formatBytes(summary.usedMemory)} · 可见 ${formatBytes(summary.totalMemory)}`, `${formatBytes(summary.usedMemory)} used · ${formatBytes(summary.totalMemory)} visible`)} tone="amber" progress={percentage(summary.usedMemory, summary.measuredMemory)} />
-      <MetricCard label={t("网络活动", "Network activity")} value={summary.measuredNodes > 0 ? formatBitRate(summary.networkBits) : "—"} detail={t(`来自 ${summary.networkLinks} 条节点连接的双向总速率`, `Aggregate bidirectional rate across ${summary.networkLinks} node links`)} />
+      <MetricCard label={t("内存利用率", "Memory utilization")} value={summary.measuredNodes ? `${percentage(summary.usedMemory, summary.measuredMemory).toFixed(0)}%` : "—"} detail={t(`已用 ${formatBytes(summary.usedMemory)} · 可见 ${formatBytes(summary.totalMemory)}`, `${formatBytes(summary.usedMemory)} used · ${formatBytes(summary.totalMemory)} visible`)} tone="amber" progress={percentage(summary.usedMemory, summary.measuredMemory)} />
+      <MetricCard label={t("网络活动", "Network activity")} value={summary.measuredNodes > 0 ? formatBitRate(summary.networkBits) : "—"} detail={t(`${summary.networkLinks} 条连接 · 双向速率`, `${summary.networkLinks} ${summary.networkLinks === 1 ? "link" : "links"} · bidirectional`)} />
     </section>
 
     <section className="content-grid">
       <article className="panel overview-topology">
         <div className="panel-heading">
-          <div><span className="eyebrow">{t("检查当前连接", "Inspect current links")}</span><h2>{t("节点连接", "Node links")}</h2></div>
-          <button className="text-button" type="button" onClick={() => onNavigate("Topology")}>{t("查看完整拓扑", "View full topology")} <span>→</span></button>
+          <div><h2>{t("节点连接", "Node links")}</h2></div>
+          <button className="text-button" type="button" onClick={() => onNavigate("Topology")}>{t("查看完整拓扑", "View full topology")} <span aria-hidden="true">→</span></button>
         </div>
-        <TopologyPulse nodes={nodes} samples={samples} totalRate={summary.networkBits} linkCount={summary.networkLinks} t={t} />
+        <div className="overview-links">
+          {summary.links.slice(0, 5).map((link) => <div className="overview-link" key={link.id}>
+            <div><strong>{link.source.name} <span aria-hidden="true">↔</span> {link.target.name}</strong><small>{link.primaryInterface || t("接口不可用", "Interface unavailable")}</small></div>
+            <span>{link.forwardBits !== undefined && link.reverseBits !== undefined ? formatBitRate(link.forwardBits + link.reverseBits) : "—"}</span>
+          </div>)}
+          {!summary.links.length && <div className="compact-empty">{loading ? t("正在读取连接…", "Loading links…") : t("暂无节点连接数据", "No node links available")}</div>}
+        </div>
       </article>
 
       <article className="panel load-panel">
         <div className="panel-heading">
-          <div><span className="eyebrow">{t("优先检查高负载节点", "Inspect high-load nodes first")}</span><h2>{t("负载最高节点", "Highest-load nodes")}</h2></div>
+          <div><h2>{t("负载最高节点", "Highest-load nodes")}</h2></div>
           <button className="icon-button" type="button" aria-label={t("管理节点", "Manage nodes")} onClick={() => onNavigate("Nodes")}>↗</button>
         </div>
         <div className="node-list">
@@ -157,19 +160,4 @@ export function OverviewPage({ token, onNavigate }: OverviewPageProps) {
       </article>
     </section>
   </section>;
-}
-
-function TopologyPulse({ nodes, samples, totalRate, linkCount, t }: { nodes: ClusterNode[]; samples: NodeSample[]; totalRate: number; linkCount: number; t: (zh: string, en: string) => string }) {
-  if (nodes.length === 0) return <div className="topology-pulse topology-pulse--empty"><span className="pulse-ring" /><strong>{t("等待节点加入", "Waiting for nodes")}</strong><small>{t("Agent 完成注册后会出现在这里", "Agents appear here after enrollment")}</small></div>;
-  const issues = nodes.filter((node) => node.status !== "ready").length;
-  const latestObservation = samples.map((sample) => sample.observations[0]?.observedAt).filter(Boolean).sort().at(-1);
-  return <div className="topology-pulse">
-    <div className="pulse-core"><span /><strong>{formatBitRate(totalRate)}</strong><small>{t("当前接收与发送总速率", "Current aggregate receive and transmit rate")}</small></div>
-    <div className="pulse-orbit pulse-orbit--one" />
-    <div className="pulse-orbit pulse-orbit--two" />
-    <div className="pulse-node pulse-node--hosts"><strong>{nodes.length}</strong><span>{t("已加入节点", "JOINED NODES")}</span></div>
-    <div className="pulse-node pulse-node--fabric"><strong>{linkCount}</strong><span>{t("节点链路", "NODE LINKS")}</span></div>
-    <div className={`pulse-node pulse-node--edges${issues ? " pulse-node--attention" : ""}`}><strong>{issues}</strong><span>{t("节点异常", "NODE ISSUES")}</span></div>
-    <div className="pulse-meta"><span>{t("当前状态", "CURRENT STATE")}</span><span>{t(`${nodes.length} 个节点`, `${nodes.length} NODES`)}</span><span>{t(`${linkCount} 条链路`, `${linkCount} LINKS`)}</span><span>{latestObservation ? relativeTime(latestObservation) : t("等待遥测", "WAITING FOR TELEMETRY")}</span></div>
-  </div>;
 }

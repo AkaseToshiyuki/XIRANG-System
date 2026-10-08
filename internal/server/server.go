@@ -322,7 +322,7 @@ func New(config Config) *Server {
 		registerTelemetryIntervalRoutes(mux, config.TelemetryIntervals, config.AdminToken)
 	}
 	if config.ArtifactRoot != "" {
-		registerArtifactRoutes(mux, config.ArtifactRoot, config.Enrollment, config.AdminToken)
+		registerArtifactRoutes(mux, config.ArtifactRoot, config.Enrollment, config.Builds, config.AdminToken)
 	}
 	if config.WebRoot != "" {
 		registerWebRoutes(mux, config.WebRoot)

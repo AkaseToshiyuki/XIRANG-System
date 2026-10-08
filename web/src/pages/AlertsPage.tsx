@@ -130,9 +130,7 @@ export function AlertsPage({ token }: { token: string }) {
   return <section>
     <header className="page-header">
       <div>
-        <span className="eyebrow">{t("处理集群运行异常", "Handle cluster conditions")}</span>
         <h1>{t("告警中心", "Alerts")}</h1>
-        <p>{t("检查分级告警、确认处理状态，并在条件恢复后查看关闭记录。", "Inspect severity, acknowledge active conditions, and review recovery records.")}</p>
       </div>
       <div className={`live-indicator ${streaming ? "" : "live-indicator--warning"}`} title={streaming ? undefined : t("告警流重连中", "Alert stream reconnecting")}><span />{lastUpdatedAt ? `${t("更新于", "Updated at")} ${clockTime(lastUpdatedAt)}` : t("等待更新", "Waiting for update")}</div>
     </header>
@@ -177,7 +175,7 @@ export function AlertsPage({ token }: { token: string }) {
 function AlertInspector({ alert, delivery, webhook, onRetry, t }: { alert: Alert | null; delivery: AlertDelivery | null; webhook: AlertWebhookStatus; onRetry: (delivery: AlertDelivery) => void; t: (zh: string, en: string) => string }) {
   if (!alert) return <aside className="alert-inspector alert-inspector--empty"><div className="inspector-symbol">◉</div><h2>{t("告警详情", "Alert details")}</h2><p>{t("选择一条告警查看指标、生命周期和处理状态。", "Select an alert to inspect metrics, lifecycle and handling status.")}</p><div className="policy-note"><span>{t("抑制策略", "Suppression policy")}</span><strong>{t("持续异常才触发", "Requires a sustained condition")}</strong><small>{t("触发和恢复窗口由控制节点启动参数配置。", "Firing and recovery windows are configured by controller startup parameters.")}</small></div></aside>;
   return <aside className="alert-inspector">
-    <span className="eyebrow">{t("检查告警详情", "Inspect alert details")}</span><h2>{alertTitle(alert, t)}</h2>
+    <h2>{alertTitle(alert, t)}</h2>
     <div className={`alert-detail-severity alert-detail-severity--${alert.severity}`}><i />{severityLabel(alert.severity, t)} · {statusLabel(alert.status, t)}</div>
     <p>{alert.summary}</p>
     <dl>

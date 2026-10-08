@@ -91,7 +91,7 @@ export function StoragePage({ token, isAdmin }: { token: string; isAdmin: boolea
   }
 
   return <section>
-    <header className="page-header"><div><span className="eyebrow">{t("任务数据与共享路径", "Task data and shared paths")}</span><h1>{t("共享空间", "Shared storage")}</h1><p>{t("上传任务文件，或将存储路径持续挂载到全部节点、动态分组或指定节点。", "Upload task files or continuously mount storage on all nodes, dynamic groups, or selected nodes.")}</p></div></header>
+    <header className="page-header"><div><h1>{t("共享空间", "Shared storage")}</h1></div></header>
     {error && <p className="error-banner" role="alert">{error}</p>}
     {isAdmin && <form className="storage-form" onSubmit={submit}>
       <label><span>{t("名称", "Name")}</span><input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={t("项目共享空间", "Project shared space")} /></label>
@@ -99,7 +99,7 @@ export function StoragePage({ token, isAdmin }: { token: string; isAdmin: boolea
       <label><span>{t("存储节点路径", "Source path")}</span><input required value={form.sourcePath} onChange={(event) => setForm({ ...form, sourcePath: event.target.value })} /></label>
       <label><span>{t("节点挂载路径", "Mount path")}</span><input required value={form.mountPath} onChange={(event) => setForm({ ...form, mountPath: event.target.value })} /></label>
       <TargetFields draft={form} setDraft={setForm} nodes={nodes} groups={groups} />
-      <div className="storage-form-actions"><span>{t("节点或分组成员变化后，挂载状态会自动同步。", "Mounts automatically follow node and group membership changes.")}</span><button className="primary-button" disabled={busy || storageNodes.length === 0}>{busy ? t("正在应用…", "Applying…") : t("创建并挂载", "Create and mount")}<span>→</span></button></div>
+      <div className="storage-form-actions"><span>{t("节点或分组成员变化后，挂载状态会自动同步。", "Mounts automatically follow node and group membership changes.")}</span><button className="primary-button" disabled={busy || storageNodes.length === 0}>{busy ? t("正在应用…", "Applying…") : t("创建并挂载", "Create and mount")}<span aria-hidden="true">→</span></button></div>
     </form>}
     {isAdmin && storageNodes.length === 0 && <p className="form-notice">{t("请先在“节点”页面为至少一个节点启用“存储”角色。", "Enable the storage role on at least one node first.")}</p>}
     <div className="storage-list">
@@ -120,7 +120,7 @@ export function StoragePage({ token, isAdmin }: { token: string; isAdmin: boolea
         </div>}
         {editing === space.id && <div className="storage-target-editor">
           <TargetFields draft={targetDraft} setDraft={setTargetDraft} nodes={nodes} groups={groups} />
-          <footer><button type="button" className="secondary-button" onClick={() => setEditing(null)}>{t("取消", "Cancel")}</button><button type="button" className="primary-button" disabled={busy} onClick={() => void saveTarget(space)}>{t("保存并同步", "Save and reconcile")}<span>→</span></button></footer>
+          <footer><button type="button" className="secondary-button" onClick={() => setEditing(null)}>{t("取消", "Cancel")}</button><button type="button" className="primary-button" disabled={busy} onClick={() => void saveTarget(space)}>{t("保存并同步", "Save and reconcile")}<span aria-hidden="true">→</span></button></footer>
         </div>}
         {isAdmin && <div className="storage-results">{space.results?.map((result) => <span key={`${result.nodeId}-${result.status}`} title={result.message}>{nodeName(nodes, result.nodeId)}：{result.status}</span>)}</div>}
         <SharedFileBrowser space={space} token={token} isAdmin={isAdmin} reportError={setError} />
