@@ -525,6 +525,14 @@ func (service *testHeartbeater) Heartbeat(_ context.Context, id, serial string) 
 	return domain.Node{ID: id, Status: status, Capacity: service.capacity}, nil
 }
 
+func (service *testHeartbeater) GetNode(_ context.Context, id string) (domain.Node, error) {
+	state := service.status
+	if state == "" {
+		state = domain.NodeStatusReady
+	}
+	return domain.Node{ID: id, Status: state, CertificateSerial: "2a"}, nil
+}
+
 type testTelemetryReporter struct {
 	inventoryNodeID      string
 	inventory            *xirangv1.InventorySnapshot
@@ -601,7 +609,7 @@ func newAsyncTestStream(nodeID string) *asyncTestStream {
 
 func testPeerContext(nodeID string) context.Context {
 	nodeURI, _ := url.Parse("spiffe://xirang/node/" + nodeID)
-	certificate := &x509.Certificate{SerialNumber: big.NewInt(42), URIs: []*url.URL{nodeURI}}
+	certificate := &x509.Certificate{SerialNumber: big.NewInt(42), URIs: []*url.URL{nodeURI}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
 	tlsInfo := credentials.TLSInfo{State: tls.ConnectionState{
 		PeerCertificates: []*x509.Certificate{certificate},
 		VerifiedChains:   [][]*x509.Certificate{{certificate}},

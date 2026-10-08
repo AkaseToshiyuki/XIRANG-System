@@ -1,8 +1,31 @@
 import { expect, Page, test } from "@playwright/test";
 
-type Role = "admin" | "viewer";
+type Role = "admin" | "viewer" | "builder";
 type Language = "zh" | "en";
 type Theme = "dark" | "light";
+
+test("SBOM downloads carry authentication and report server failures", async ({ page }) => {
+  await loginAsAdmin(page);
+  await page.route("**/api/v1/builds?limit=100", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [{
+    id: "build_sbom", status: "succeeded", createdAt: "2026-10-08T00:00:00Z",
+    recipe: { name: "SBOM fixture", architecture: "amd64", milliCpu: 1000, memoryBytes: 1024, toolchain: "cc" },
+    artifact: { uri: "/artifacts/build_sbom/program", sbomUri: "/artifacts/build_sbom/program.spdx.json", sha256: "a".repeat(64), abi: "linux-amd64" },
+  }] }) }));
+  let authorization = "";
+  let fail = false;
+  await page.route("**/artifacts/build_sbom/program.spdx.json", (route) => {
+    authorization = route.request().headers().authorization;
+    return route.fulfill({ status: fail ? 403 : 200, contentType: "application/json", body: fail ? JSON.stringify({ error: "SBOM access denied" }) : JSON.stringify({ spdxVersion: "SPDX-2.3" }) });
+  });
+  await page.getByRole("button", { name: "Native builds", exact: true }).click();
+  const downloaded = page.waitForEvent("download");
+  await page.getByRole("button", { name: "SPDX SBOM", exact: true }).click();
+  expect((await downloaded).suggestedFilename()).toBe("build_sbom.spdx.json");
+  expect(authorization).toBe("Bearer admin-token");
+  fail = true;
+  await page.getByRole("button", { name: "SPDX SBOM", exact: true }).click();
+  await expect(page.getByText("SBOM access denied", { exact: true })).toBeVisible();
+});
 
 const matrix: Array<{ role: Role; language: Language; theme: Theme }> = [];
 for (const role of ["admin", "viewer"] as const) {
@@ -22,9 +45,9 @@ for (const scenario of matrix) {
     await page.goto("/");
 
     await page.getByRole("button", { name: scenario.language === "zh" ? "令牌" : "Token" }).click();
-    await page.getByLabel("Bootstrap / API / OIDC Token").fill(`${scenario.role}-token`);
-    await page.getByRole("button", { name: scenario.language === "zh" ? "连接控制平面" : "Connect to control plane" }).click();
-    await expect(page.getByRole("heading", { level: 1, name: scenario.language === "zh" ? "集群运行总览" : "Cluster overview" })).toBeVisible();
+    await page.getByLabel(/访问令牌|Access token/).fill(`${scenario.role}-token`);
+    await page.getByRole("button", { name: scenario.language === "zh" ? "登录" : "Sign in", exact: true }).click();
+    await expect(page.getByRole("heading", { level: 1, name: scenario.language === "zh" ? "集群概览" : "Cluster overview" })).toBeVisible();
 
     await expect(page.locator("html")).toHaveAttribute("data-theme", scenario.theme);
     await expect(page.locator("html")).toHaveAttribute("lang", scenario.language === "zh" ? "zh-CN" : "en");
@@ -38,7 +61,7 @@ for (const scenario of matrix) {
       await expect(page.getByRole("button", { name: enrollmentLabel })).toBeVisible();
       await page.getByRole("button", { name: terminalLabel }).click();
       await expect(page).toHaveURL(/\/terminal$/);
-      await expect(page.getByText("Agent mTLS · PTY · 10 min idle · 30 min max")).toBeVisible();
+      await expect(page.getByText(scenario.language === "zh" ? /闲置 10 分钟或连接满 30 分钟/ : /Disconnects after 10 minutes idle or 30 minutes total/)).toBeVisible();
     } else {
       await expect(page.getByRole("button", { name: terminalLabel })).toHaveCount(0);
       await expect(page.getByRole("button", { name: enrollmentLabel })).toHaveCount(0);
@@ -67,8 +90,8 @@ test("regular user shared files are presented as an isolated workspace", async (
   await mockControlPlane(page, "viewer");
   await page.goto("/");
   await page.getByRole("button", { name: "Token" }).click();
-  await page.getByLabel("Bootstrap / API / OIDC Token").fill("viewer-token");
-  await page.getByRole("button", { name: "Connect to control plane" }).click();
+  await page.getByLabel(/访问令牌|Access token/).fill("viewer-token");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("button", { name: "Shared storage" }).click();
   await expect(page).toHaveURL(/\/storage$/);
   await expect(page.getByText("Only your files are visible and manageable")).toBeVisible();
@@ -178,12 +201,12 @@ test("overview uses the topology bidirectional rate and the product title", asyn
   await page.goto("/");
   await expect(page).toHaveTitle("XIRANG System");
   await page.getByRole("button", { name: "Token" }).click();
-  await page.getByLabel("Bootstrap / API / OIDC Token").fill("admin-token");
-  await page.getByRole("button", { name: "Connect to control plane" }).click();
+  await page.getByLabel(/访问令牌|Access token/).fill("admin-token");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
 
   const overviewNetwork = page.locator(".metric-card").filter({ hasText: "Network activity" });
   await expect(overviewNetwork.locator("strong")).toHaveText("18 Kbit/s");
-  await expect(overviewNetwork).toContainText("Aggregate bidirectional rate across 1 node links");
+  await expect(overviewNetwork).toContainText("1 link · bidirectional");
   await page.getByRole("button", { name: "Network topology" }).click();
   const topologyRate = page.locator(".topology-metrics > div").filter({ hasText: "Aggregate bidirectional rate" });
   await expect(topologyRate.locator("strong")).toHaveText("18 Kbit/s");
@@ -223,8 +246,8 @@ test("unavailable nodes do not expose stale link rates or fallback claims", asyn
 
   await page.goto("/");
   await page.getByRole("button", { name: "Token" }).click();
-  await page.getByLabel("Bootstrap / API / OIDC Token").fill("admin-token");
-  await page.getByRole("button", { name: "Connect to control plane" }).click();
+  await page.getByLabel(/访问令牌|Access token/).fill("admin-token");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("button", { name: "Network topology" }).click();
 
   await expect(page.locator(".graph-link-rate")).toHaveText("↑ Unavailable · ↓ Unavailable");
@@ -279,8 +302,8 @@ for (const { interfaces, expected } of [
 
     await page.goto("/");
     await page.getByRole("button", { name: "Token" }).click();
-    await page.getByLabel("Bootstrap / API / OIDC Token").fill("admin-token");
-    await page.getByRole("button", { name: "Connect to control plane" }).click();
+    await page.getByLabel(/访问令牌|Access token/).fill("admin-token");
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.getByRole("button", { name: "Network topology" }).click();
 
     await expect(page.locator(".graph-link-fallback")).toHaveText(expected);
@@ -305,8 +328,8 @@ test("management role exposes panel state and a consistent role editor", async (
   }] }) }));
   await page.goto("/");
   await page.getByRole("button", { name: "Token" }).click();
-  await page.getByLabel("Bootstrap / API / OIDC Token").fill("admin-token");
-  await page.getByRole("button", { name: "Connect to control plane" }).click();
+  await page.getByLabel(/访问令牌|Access token/).fill("admin-token");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("button", { name: "Node status" }).click();
   await expect(page.getByText("Panel enabled")).toBeVisible();
   await page.locator(".action-menu summary").click();
@@ -340,8 +363,8 @@ test("administrator can remove an offline node while retaining a tombstone respo
 
   await page.goto("/");
   await page.getByRole("button", { name: "Token" }).click();
-  await page.getByLabel("Bootstrap / API / OIDC Token").fill("admin-token");
-  await page.getByRole("button", { name: "Connect to control plane" }).click();
+  await page.getByLabel(/访问令牌|Access token/).fill("admin-token");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("button", { name: "Node status" }).click();
   await page.locator(".action-menu summary").click();
   page.once("dialog", (dialog) => dialog.accept());
@@ -355,8 +378,8 @@ async function loginAsAdmin(page: Page) {
   await mockControlPlane(page, "admin");
   await page.goto("/");
   await page.getByRole("button", { name: "Token" }).click();
-  await page.getByLabel("Bootstrap / API / OIDC Token").fill("admin-token");
-  await page.getByRole("button", { name: "Connect to control plane" }).click();
+  await page.getByLabel(/访问令牌|Access token/).fill("admin-token");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
 }
 
 // Contrast is checked twice, and the two checks catch different mistakes.
@@ -381,14 +404,15 @@ for (const theme of ["light", "dark"] as const) {
     await mockControlPlane(page, "admin");
     await page.goto("/");
     await page.getByRole("button", { name: "Token" }).click();
-    await page.getByLabel("Bootstrap / API / OIDC Token").fill("admin-token");
-    await page.getByRole("button", { name: "Connect to control plane" }).click();
+    await page.getByLabel(/访问令牌|Access token/).fill("admin-token");
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await expect(page.getByRole("heading", { level: 1, name: "Cluster overview" })).toBeVisible();
 
     const failures: string[] = [];
     for (const label of AUDIT_PAGES) {
       await page.getByRole("button", { name: label, exact: true }).click();
       await page.waitForTimeout(350);
+      await expect(page.locator(".page-crash"), `${label} must render its actual content`).toHaveCount(0);
       const found = await page.evaluate(() => {
         // Chrome reports a resolved color-mix() as color(srgb r g b / a) on a
         // 0..1 scale and everything else as rgb()/rgba() on 0..255. Reading the
@@ -461,7 +485,7 @@ async function mockControlPlane(page: Page, role: Role) {
       case "/api/v1/setup/status":
         return json({ setupRequired: false });
       case "/api/v1/access/me":
-        return json({ subject: `${role}-e2e`, displayName: role === "admin" ? "E2E Administrator" : "E2E User", role, permissions: role === "admin" ? ["*"] : ["cluster.read", "jobs.manage"], authMethod: "api_token" });
+        return json({ subject: `${role}-e2e`, displayName: role === "admin" ? "E2E Administrator" : "E2E User", role, permissions: role === "admin" ? ["*"] : role === "builder" ? ["cluster.read", "builds.manage", "files.write"] : ["cluster.read", "jobs.manage"], authMethod: "api_token" });
       case "/api/v1/access/users":
         return json({ items: localUsers });
       case "/api/v1/access/groups":
@@ -474,6 +498,14 @@ async function mockControlPlane(page: Page, role: Role) {
         return json(accessSettings);
       case "/api/v1/system/telemetry-interval":
         return json({ intervalSeconds: 60, minimumSeconds: 2, maximumSeconds: 60 });
+      case "/api/v1/topology":
+        return json({ version: 1, generatedAt: "2026-08-02T00:00:00Z", reportCount: 0, vertices: [], edges: [], pathSelections: [], routes: [], neighbors: [], pathProbes: [] });
+      case "/api/v1/elasticity":
+        return json({ generatedAt: "2026-08-02T00:00:00Z", recommendations: [] });
+      case "/api/v1/accounting/summary":
+        return json({ from: url.searchParams.get("from"), to: url.searchParams.get("to"), currency: "CNY", cpuUsageMicros: 0, memoryByteSeconds: 0, gpuDeviceSeconds: 0, wallTimeMillis: 0, workspaceByteSeconds: 0, peakWorkspaceBytes: 0, cost: { cpuCostMicros: 0, memoryCostMicros: 0, gpuCostMicros: 0, storageCostMicros: 0, totalCostMicros: 0 }, daily: [] });
+      case "/api/v1/access/roles":
+        return json({ items: [{ name: "viewer", permissions: ["cluster.read"] }, { name: "builder", permissions: ["cluster.read", "builds.manage"] }, { name: "admin", permissions: ["*"] }] });
       case "/api/v1/nodes":
         return json({ items: [] });
       case "/api/v1/jobs":
@@ -514,4 +546,79 @@ async function mockControlPlane(page: Page, role: Role) {
         return json({ items: [] });
     }
   });
+}
+
+
+test("unavailable browser storage does not prevent sign-in or preferences", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "localStorage", { get() { throw new DOMException("Blocked", "SecurityError"); } });
+  });
+  await mockControlPlane(page, "admin");
+  await page.goto("/");
+  await page.getByLabel("语言").selectOption("en");
+  await page.getByRole("button", { name: "Toggle color theme" }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await signInWithToken(page);
+  await expect(page.getByRole("heading", { name: "Cluster overview", exact: true })).toBeVisible();
+});
+
+test("terminal remains connected when theme and telemetry interval change", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("xirang.language", "en"));
+  await mockControlPlane(page, "admin");
+  await page.route("**/api/v1/nodes", (route) => route.fulfill({ json: { items: [{ id: "node-test", name: "Worker", architecture: "amd64", status: "ready", capacity: { milliCpu: 4000, memoryBytes: 8000000000 } }] } }));
+  await page.route("**/api/v1/terminal/tickets", (route) => route.fulfill({ json: { ticket: "test-ticket" } }));
+  await page.route("**/api/v1/system/telemetry-interval", (route) => route.fulfill({ json: { intervalSeconds: route.request().method() === "PUT" ? 20 : 60, minimumSeconds: 2, maximumSeconds: 60 } }));
+  let connections = 0;
+  let closed = 0;
+  await page.routeWebSocket("**/api/v1/terminal/connect?*", (socket) => {
+    connections++;
+    socket.onClose(() => { closed++; });
+    socket.onMessage((message) => socket.send(message));
+  });
+  await page.goto("/");
+  await signInWithToken(page);
+  await page.getByRole("button", { name: "Terminal access", exact: true }).click();
+  await page.getByRole("button", { name: "Connect terminal", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Toggle color theme" }).click();
+  await page.getByLabel("Agent telemetry interval in seconds").fill("20");
+  await page.getByLabel("Agent telemetry interval in seconds").press("Enter");
+  await expect(page.getByLabel("Agent telemetry interval in seconds")).toBeEnabled();
+  await page.getByPlaceholder("Enter a command and press Enter").fill("echo alive");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.locator(".terminal-output")).toContainText("echo alive");
+  expect(connections).toBe(1);
+  expect(closed).toBe(0);
+});
+
+test("node stream stays reconnecting until the response opens", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("xirang.language", "en"));
+  await mockControlPlane(page, "admin");
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/v1/events/nodes", async (route) => { await held; await route.abort(); });
+  await page.goto("/");
+  await signInWithToken(page);
+  await page.getByRole("button", { name: "Node status", exact: true }).click();
+  try { await expect(page.locator(".live-indicator")).toHaveAttribute("title", "Node event stream reconnecting"); }
+  finally { release(); }
+});
+
+test("builder does not see administrator retention actions", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("xirang.language", "en"));
+  await mockControlPlane(page, "builder");
+  await page.goto("/");
+  await signInWithToken(page);
+  await page.getByRole("button", { name: "Native builds", exact: true }).click();
+  await expect(page.getByRole("button", { name: "New build", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Clean now", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save policy", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "New build", exact: true }).click();
+  await expect(page.getByLabel("Application (for example gromacs)")).toHaveCount(0);
+});
+
+async function signInWithToken(page: Page) {
+  await page.getByRole("button", { name: "Token", exact: true }).click();
+  await page.getByLabel("Access token").fill("test-token");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
 }

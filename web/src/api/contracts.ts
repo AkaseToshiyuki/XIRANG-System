@@ -348,6 +348,7 @@ export interface NativeBuild {
 		runtimeNodeIds?: string[];
 		runtimeRequirements?: Record<string, string>;
     routingUpdatedAt?: string;
+		routingApproved?: boolean;
   };
   createdAt: string;
   startedAt: string;

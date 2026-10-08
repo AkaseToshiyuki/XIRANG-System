@@ -184,6 +184,38 @@ func TestApplicationBuildPublishesOnlyToSharedRouteAndCanRemapNodes(t *testing.T
 	if err != nil || len(variants) != 1 || variants[0].NodeIDs[0] != "node-a" {
 		t.Fatalf("application resolution failed: variants=%#v err=%v", variants, err)
 	}
+	builder := domain.Principal{Subject: "untrusted-builder", Role: "builder"}
+	if _, err := service.Submit(context.Background(), completed.Recipe, builder); !errors.Is(err, buildmanager.ErrForbidden) {
+		t.Fatalf("builder published a global application: %v", err)
+	}
+	// Records written before the approval boundary must not become trusted
+	// merely because they already contain global routing fields.
+	legacy := completed
+	legacy.ID, legacy.OwnerID = "build_legacy_unapproved", builder.Subject
+	legacy.Artifact.RoutingApproved = false
+	future := time.Now().Add(time.Hour)
+	legacy.Artifact.RoutingUpdatedAt = &future
+	if err := store.PutBuild(context.Background(), legacy); err != nil {
+		t.Fatal(err)
+	}
+	variants, err = service.ResolveApplication(context.Background(), "gromacs")
+	if err != nil || len(variants) != 1 || variants[0].BuildID != completed.ID {
+		t.Fatalf("unapproved mapping won: %#v %v", variants, err)
+	}
+	if _, err := service.UpdateRuntimeTargets(context.Background(), legacy.ID, []string{"node-a"}, builder); !errors.Is(err, buildmanager.ErrForbidden) {
+		t.Fatalf("owner self-approved global route: %v", err)
+	}
+	approved, err := service.UpdateRuntimeTargets(context.Background(), legacy.ID, []string{"node-a"}, adminPrincipal)
+	if err != nil || !approved.Artifact.RoutingApproved {
+		t.Fatalf("admin could not approve legacy route: %#v %v", approved, err)
+	}
+	if _, err := service.Delete(context.Background(), legacy.ID, builder); !errors.Is(err, buildmanager.ErrForbidden) {
+		t.Fatalf("owner removed an approved global route: %v", err)
+	}
+	variants, err = service.ResolveApplication(context.Background(), "gromacs")
+	if err != nil || len(variants) != 2 {
+		t.Fatalf("approved legacy route unavailable: %#v %v", variants, err)
+	}
 	updated, err := service.UpdateRuntimeTargets(context.Background(), completed.ID, []string{"node-b", "node-a"}, adminPrincipal)
 	if err != nil || len(updated.Artifact.RuntimeNodeIDs) != 2 || updated.Artifact.RuntimeNodeIDs[0] != "node-a" {
 		t.Fatalf("runtime target remap failed: build=%#v err=%v", updated, err)
@@ -362,5 +394,68 @@ func TestBuildReadsAndPublishesInsideSelectedSharedSpaces(t *testing.T) {
 	}
 	if info, err := os.Stat(filepath.Join(shared, "published", "releases", "app")); err != nil || !info.Mode().IsRegular() {
 		t.Fatalf("published output missing: info=%v err=%v", info, err)
+	}
+}
+
+type lifecycleRunner struct {
+	fakeRunner
+	acquired  chan struct{}
+	proceed   chan struct{}
+	released  chan error
+	workspace string
+}
+
+func (runner *lifecycleRunner) AcquireBuild(ctx context.Context) (func(), error) {
+	close(runner.acquired)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-runner.proceed:
+	}
+	return func() { _, err := os.Stat(runner.workspace); runner.released <- err }, nil
+}
+func (runner *lifecycleRunner) Run(ctx context.Context, workspace string, recipe domain.BuildRecipe) (string, error) {
+	runner.workspace = workspace
+	return runner.fakeRunner.Run(ctx, workspace, recipe)
+}
+func TestBuildLeaseCoversStagingAndCleanup(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "sources", "project")
+	if err := os.MkdirAll(source, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "source"), []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := boltstore.Open(filepath.Join(root, "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runner := &lifecycleRunner{acquired: make(chan struct{}), proceed: make(chan struct{}), released: make(chan error, 1)}
+	service, err := buildmanager.New(store, buildmanager.Config{SourceRoot: filepath.Join(root, "sources"), WorkspaceRoot: filepath.Join(root, "work"), ArtifactRoot: filepath.Join(root, "artifacts"), ArtifactBaseURL: "https://example.test/artifacts", SigningKeyPath: filepath.Join(root, "key"), Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitted, err := service.Submit(context.Background(), domain.BuildRecipe{Name: "lease", SourcePath: "project", Architecture: runtime.GOARCH, Command: []string{"go", "build"}, OutputPath: "bin/app", Toolchain: "go", MilliCPU: 1000, MemoryBytes: 256 << 20, Timeout: time.Minute}, adminPrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-runner.acquired
+	if _, err := os.Stat(filepath.Join(root, "work", submitted.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staging before lease: %v", err)
+	}
+	close(runner.proceed)
+	select {
+	case err := <-runner.released:
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("release before cleanup: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("lease never released")
+	}
+	result, err := service.Get(context.Background(), submitted.ID)
+	if err != nil || result.Status != domain.BuildStatusSucceeded {
+		t.Fatalf("legitimate build failed: %+v %v", result, err)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
 	buildmanager "github.com/xirang-grid/xirang/internal/build"
 	"github.com/xirang-grid/xirang/internal/domain"
+	"github.com/xirang-grid/xirang/internal/safefile"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -161,8 +162,15 @@ func (manager *NativeBuildManager) run(ctx context.Context, cancel context.Cance
 		BuildId: buildID, State: xirangv1.NativeBuildState_NATIVE_BUILD_STATE_RUNNING, OccurredAt: timestamppb.Now(),
 	}
 	localWorkspace := filepath.Join(manager.localWorkspaceRoot, buildID)
-	_ = os.RemoveAll(localWorkspace)
-	err := copyNativeBuildTree(workspace, localWorkspace)
+	release, err := manager.runner.AcquireBuild(ctx)
+	acquired := err == nil
+	if acquired {
+		defer release()
+		err = manager.runner.CleanupWorkspace(localWorkspace)
+	}
+	if err == nil {
+		err = copyNativeBuildTree(workspace, localWorkspace)
+	}
 	if err == nil {
 		var digest string
 		digest, err = hashNativeBuildTree(localWorkspace)
@@ -179,11 +187,13 @@ func (manager *NativeBuildManager) run(ctx context.Context, cancel context.Cance
 	}
 	if err == nil {
 		outputDigest, err = publishNativeBuildOutput(
-			filepath.Join(localWorkspace, filepath.FromSlash(recipe.OutputPath)),
+			localWorkspace,
 			workspace, recipe.OutputPath,
 		)
 	}
-	_ = os.RemoveAll(localWorkspace)
+	if acquired {
+		err = errors.Join(err, manager.runner.CleanupWorkspace(localWorkspace))
+	}
 	update := &xirangv1.NativeBuildUpdate{
 		BuildId: buildID, LogTail: boundedNativeBuildText(logs, 64<<10), OccurredAt: timestamppb.Now(),
 		State: xirangv1.NativeBuildState_NATIVE_BUILD_STATE_SUCCEEDED, OutputSha256: outputDigest,
@@ -375,8 +385,13 @@ func hashNativeBuildTree(root string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func publishNativeBuildOutput(source, workspace, outputPath string) (string, error) {
-	info, err := os.Stat(source)
+func publishNativeBuildOutput(sourceRoot, workspace, outputPath string) (string, error) {
+	input, err := safefile.OpenRegular(sourceRoot, outputPath)
+	if err != nil {
+		return "", err
+	}
+	defer input.Close()
+	info, err := input.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<30 {
 		return "", errors.New("remote build output is missing, not regular, or exceeds 1 GiB")
 	}
@@ -409,15 +424,9 @@ func publishNativeBuildOutput(source, workspace, outputPath string) (string, err
 			return "", err
 		}
 	}
-	input, err := os.Open(source)
-	if err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
 	hash := sha256.New()
 	written, copyErr := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(input, info.Size()+1))
-	inputCloseErr := input.Close()
-	if copyErr != nil || inputCloseErr != nil || written != info.Size() {
+	if copyErr != nil || written != info.Size() {
 		_ = temporary.Close()
 		return "", errors.New("remote build output changed while it was published")
 	}

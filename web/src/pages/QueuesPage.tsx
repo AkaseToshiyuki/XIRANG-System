@@ -69,10 +69,10 @@ export function QueuesPage({ token }: { token: string }) {
   }
 
   return <section>
-    <header className="page-header"><div><span className="eyebrow">{t("调整任务排队规则", "Tune scheduling rules")}</span><h1>{t("队列策略", "Queue policies")}</h1><p>{t("设置并发上限、资源配额、回填和抢占条件。", "Configure concurrency, quotas, backfill and preemption.")}</p></div></header>
+    <header className="page-header"><div><h1>{t("队列策略", "Queue policies")}</h1></div></header>
     {error && <p className="error-banner" role="alert">{error}</p>}
     {elasticity && <div className="elasticity-strip">
-      <div><span className="eyebrow">{t("检查容量缺口", "Inspect capacity shortfalls")}</span><strong>{t("弹性容量建议", "Elastic capacity recommendations")}</strong><small>{t("建议仅供管理员扩容参考", "Recommendations are advisory for administrator scale-out")} · {relativeTime(elasticity.generatedAt)}</small></div>
+      <div><strong>{t("弹性容量建议", "Elastic capacity recommendations")}</strong><small>{t("建议仅供管理员扩容参考", "Recommendations are advisory for administrator scale-out")} · {relativeTime(elasticity.generatedAt)}</small></div>
       {elasticity.recommendations.length === 0
         ? <p>{t("当前排队任务不需要增加容量。", "Queued jobs do not currently require additional capacity.")}</p>
         : elasticity.recommendations.map((item) => <article key={item.queue}>
@@ -89,7 +89,7 @@ export function QueuesPage({ token }: { token: string }) {
         {policies.length === 0 && <div className="queue-empty"><strong>{t("当前使用默认策略", "Default policy in use")}</strong><span>{t("权重 1 · 无配额上限 · 开启回填", "Weight 1 · unlimited quotas · backfill enabled")}</span></div>}
       </div>
       <form className="queue-editor" onSubmit={save}>
-        <span className="eyebrow">{t("编辑队列限制", "Edit queue limits")}</span><h2>{t("配置队列", "Configure queue")}</h2><p>{t("数值 0 表示不限制；权重越高，在相同占用下越优先。", "A value of 0 is unlimited. Higher weight has priority at equal usage.")}</p>
+        <h2>{t("配置队列", "Configure queue")}</h2><p>{t("数值 0 表示不限制；权重越高，在相同占用下越优先。", "A value of 0 is unlimited. Higher weight has priority at equal usage.")}</p>
         <label><span>{t("队列名称", "Queue name")}</span><input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required /></label>
         <div><QueueNumber label={t("权重", "Weight")} value={form.weight} set={(value) => setForm({ ...form, weight: value })} min="1" /><QueueNumber label={t("队列并发", "Queue concurrency")} value={form.maxConcurrent} set={(value) => setForm({ ...form, maxConcurrent: value })} /></div>
         <div><QueueNumber label={t("项目并发", "Project concurrency")} value={form.maxProject} set={(value) => setForm({ ...form, maxProject: value })} /><QueueNumber label={t("队列逻辑 CPU 核心数", "Queue logical CPU cores")} value={form.cpu} set={(value) => setForm({ ...form, cpu: value })} /></div>
@@ -110,7 +110,7 @@ export function QueuesPage({ token }: { token: string }) {
         <div><label><span>{t("开始时间", "Start time")}</span><input type="datetime-local" value={form.reservationStart} onChange={(event) => setForm({ ...form, reservationStart: event.target.value })} /></label><label><span>{t("结束时间", "End time")}</span><input type="datetime-local" value={form.reservationEnd} onChange={(event) => setForm({ ...form, reservationEnd: event.target.value })} /></label></div>
         <label><span>{t("预约节点 ID（逗号分隔）", "Reserved node IDs (comma separated)")}</span><input value={form.reservationNodes} onChange={(event) => setForm({ ...form, reservationNodes: event.target.value })} placeholder="node_xxx, node_yyy" /></label>
         <label><span>{t("允许的用户组 ID（逗号分隔）", "Allowed group IDs (comma separated)")}</span><input value={form.reservationGroups} onChange={(event) => setForm({ ...form, reservationGroups: event.target.value })} placeholder="group_xxx" /></label>
-        <button className="primary-button" disabled={saving} type="submit">{saving ? t("正在保存…", "Saving…") : t("保存队列策略", "Save queue policy")}<span>→</span></button>
+        <button className="primary-button" disabled={saving} type="submit">{saving ? t("正在保存…", "Saving…") : t("保存队列策略", "Save queue policy")}<span aria-hidden="true">→</span></button>
       </form>
     </div>
   </section>;

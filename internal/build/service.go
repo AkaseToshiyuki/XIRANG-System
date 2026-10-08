@@ -24,6 +24,7 @@ import (
 
 	"github.com/xirang-grid/xirang/internal/domain"
 	"github.com/xirang-grid/xirang/internal/runtimecompat"
+	"github.com/xirang-grid/xirang/internal/safefile"
 )
 
 var (
@@ -282,6 +283,9 @@ func (service *Service) Submit(ctx context.Context, recipe domain.BuildRecipe, a
 		recipe.RuntimeRequirements["arch"] = recipe.Architecture
 	}
 	if recipe.Application != "" {
+		if actor.Role != "admin" {
+			return domain.Build{}, ErrForbidden
+		}
 		recipe.Application = strings.TrimSpace(recipe.Application)
 		recipe.Variant = strings.TrimSpace(recipe.Variant)
 		if recipe.RuntimeEntrypoint == "" {
@@ -334,7 +338,13 @@ func (service *Service) execute(ctx context.Context, build domain.Build, source,
 		delete(service.active, build.ID)
 		service.activeMu.Unlock()
 	}()
-	if err := ctx.Err(); err != nil {
+	release, acquireErr := AcquireRunner(ctx, runner)
+	if acquireErr == nil {
+		defer release()
+	}
+	if acquireErr != nil {
+		build.Status, build.Failure = domain.BuildStatusFailed, bounded(acquireErr.Error(), 4096)
+	} else if err := ctx.Err(); err != nil {
 		build.Status, build.Failure = domain.BuildStatusCanceled, "native build canceled by administrator"
 	} else if err := copyTreeOwnedContext(ctx, source, workspace, service.sharedWorkspace, service.sharedUID, service.sharedGID); err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
@@ -366,11 +376,11 @@ func (service *Service) execute(ctx context.Context, build domain.Build, source,
 				if reporter, ok := runner.(interface{ OutputDigest() string }); ok {
 					expectedDigest = reporter.OutputDigest()
 				}
-				build.Artifact, runErr = service.finalizeArtifact(build, filepath.Join(workspace, filepath.FromSlash(build.Recipe.OutputPath)), expectedDigest)
+				build.Artifact, runErr = service.finalizeArtifact(build, workspace, expectedDigest)
 				if runErr != nil {
 					build.Status, build.Failure = domain.BuildStatusFailed, bounded(runErr.Error(), 4096)
 				} else if publish != "" {
-					if publishErr := publishBuildOutput(filepath.Join(workspace, filepath.FromSlash(build.Recipe.OutputPath)), publish); publishErr != nil {
+					if publishErr := publishBuildOutput(filepath.Join(service.artifactRoot, build.ID, filepath.Base(build.Recipe.OutputPath)), publish); publishErr != nil {
 						build.Status, build.Failure = domain.BuildStatusFailed, bounded(publishErr.Error(), 4096)
 					} else if build.Recipe.Application != "" {
 						publishErr := publishBuildOutput(filepath.Join(service.artifactRoot, build.ID, filepath.Base(build.Recipe.OutputPath)+".spdx.json"), publish+".spdx.json")
@@ -392,6 +402,12 @@ func (service *Service) execute(ctx context.Context, build domain.Build, source,
 			}
 		}
 	}
+	if acquireErr == nil {
+		if err := CleanupRunnerWorkspace(runner, workspace); err != nil {
+			build.Status, build.Failure = domain.BuildStatusFailed, bounded("workspace cleanup: "+err.Error(), 4096)
+			build.Artifact = domain.BuildArtifact{}
+		}
+	}
 	// Serialize terminal persistence with Cancel. A cancellation accepted before
 	// the build leaves the active set must always win over success or an
 	// incidental context-canceled copy error.
@@ -405,7 +421,6 @@ func (service *Service) execute(ctx context.Context, build domain.Build, source,
 	_ = service.repository.PutBuild(context.Background(), build)
 	delete(service.active, build.ID)
 	service.activeMu.Unlock()
-	_ = os.RemoveAll(workspace)
 	_, _ = service.Cleanup(context.Background(), domain.Principal{Subject: "system", AuthMethod: "controller"})
 }
 
@@ -423,6 +438,9 @@ func (service *Service) List(ctx context.Context, limit int) ([]domain.Build, er
 // UpdateRuntimeTargets changes where a completed application variant may run.
 // The compiled bytes remain immutable; only routing metadata changes.
 func (service *Service) UpdateRuntimeTargets(ctx context.Context, id string, nodeIDs []string, actor domain.Principal) (domain.Build, error) {
+	if actor.Role != "admin" {
+		return domain.Build{}, ErrForbidden
+	}
 	build, err := service.repository.GetBuild(ctx, id)
 	if err != nil {
 		return domain.Build{}, err
@@ -441,6 +459,7 @@ func (service *Service) UpdateRuntimeTargets(ctx context.Context, id string, nod
 	build.Recipe.RuntimeNodeIDs = append([]string(nil), normalized...)
 	build.Artifact.RuntimeNodeIDs = append([]string(nil), normalized...)
 	build.Artifact.RoutingUpdatedAt = &now
+	build.Artifact.RoutingApproved = true
 	if err := service.repository.PutBuild(ctx, build); err != nil {
 		return domain.Build{}, err
 	}
@@ -482,7 +501,7 @@ func (service *Service) ResolveApplication(ctx context.Context, application stri
 	variants := make([]domain.NativeArtifactVariant, 0)
 	for _, build := range builds {
 		artifact := build.Artifact
-		if build.Status != domain.BuildStatusSucceeded || artifact.Application != application || len(artifact.RuntimeNodeIDs) == 0 {
+		if build.Status != domain.BuildStatusSucceeded || !artifact.RoutingApproved || artifact.Application != application || len(artifact.RuntimeNodeIDs) == 0 {
 			continue
 		}
 		signature, decodeErr := base64.StdEncoding.DecodeString(artifact.Signature)
@@ -572,7 +591,7 @@ func (service *Service) Delete(ctx context.Context, id string, actor domain.Prin
 	if err != nil {
 		return domain.BuildCleanupResult{}, err
 	}
-	if !canManageBuild(build, actor) {
+	if !canManageBuild(build, actor) || (build.Artifact.RoutingApproved && build.Artifact.Application != "" && actor.Role != "admin") {
 		return domain.BuildCleanupResult{}, ErrForbidden
 	}
 	if !build.Status.Terminal() {
@@ -861,14 +880,22 @@ func publishBuildOutput(source, destination string) error {
 	return os.Rename(temporary, destination)
 }
 
-func (service *Service) finalizeArtifact(build domain.Build, output string, expectedDigests ...string) (domain.BuildArtifact, error) {
-	info, err := os.Stat(output)
+func (service *Service) finalizeArtifact(build domain.Build, workspace string, expectedDigests ...string) (domain.BuildArtifact, error) {
+	input, err := safefile.OpenRegular(workspace, build.Recipe.OutputPath)
+	if err != nil {
+		return domain.BuildArtifact{}, err
+	}
+	defer input.Close()
+	info, err := input.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<30 {
 		return domain.BuildArtifact{}, errors.New("declared build output is missing, not regular, or exceeds 1 GiB")
 	}
-	data, err := os.ReadFile(output)
+	data, err := io.ReadAll(io.LimitReader(input, (1<<30)+1))
 	if err != nil {
 		return domain.BuildArtifact{}, err
+	}
+	if int64(len(data)) != info.Size() {
+		return domain.BuildArtifact{}, errors.New("build output changed size during finalization")
 	}
 	digest := sha256.Sum256(data)
 	digestText := hex.EncodeToString(digest[:])
@@ -891,7 +918,7 @@ func (service *Service) finalizeArtifact(build domain.Build, output string, expe
 			return domain.BuildArtifact{}, err
 		}
 	}
-	name := filepath.Base(output)
+	name := filepath.Base(build.Recipe.OutputPath)
 	destination := filepath.Join(directory, name)
 	if err := os.WriteFile(destination, data, 0o550); err != nil {
 		return domain.BuildArtifact{}, err
@@ -951,6 +978,7 @@ func (service *Service) finalizeArtifact(build domain.Build, output string, expe
 		Entrypoint: build.Recipe.RuntimeEntrypoint, RuntimeNodeIDs: append([]string(nil), build.Recipe.RuntimeNodeIDs...),
 		RuntimeRequirements: cloneStringValues(build.Recipe.RuntimeRequirements),
 		RoutingUpdatedAt:    &routingUpdatedAt,
+		RoutingApproved:     build.Recipe.Application != "",
 	}, nil
 }
 

@@ -85,6 +85,11 @@ if [ -z "${DESTDIR}" ] && [ "$(id -u)" -eq 0 ]; then
     install -d -m 0700 -o root -g root /var/lib/xirang-agent
     install -d -m 0711 -o root -g root /var/lib/xirang-tasks
     install -d -m 0711 -o root -g root /var/lib/xirang-build
+    install -d -m 0770 -o root -g xirang /var/lib/xirang-build/locks
+    build_lock=/var/lib/xirang-build/locks/$(id -u xirang-build).lock
+    if [ ! -e "${build_lock}" ]; then
+        install -m 0660 -o root -g xirang /dev/null "${build_lock}"
+    fi
     operator_group=$(id -gn xirang-operator)
     install -d -m 0700 -o xirang-operator -g "${operator_group}" /var/lib/xirang-operator
     install -d -m 0750 -o root -g xirang /etc/xirang

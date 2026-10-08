@@ -32,10 +32,11 @@ type commandRecord struct {
 }
 
 type Session struct {
-	hub      *Hub
-	nodeID   string
-	wake     chan struct{}
-	replaced chan struct{}
+	hub        *Hub
+	nodeID     string
+	wake       chan struct{}
+	replaced   chan struct{}
+	authorized func() bool
 }
 
 func NewHub(capacity int) *Hub {
@@ -194,24 +195,43 @@ func validateQueuedControlMessage(message *xirangv1.ControlMessage) error {
 
 func (hub *Hub) NodeActive(nodeID string) bool {
 	hub.mu.Lock()
-	defer hub.mu.Unlock()
 	node := hub.nodes[nodeID]
-	return node != nil && node.active != nil
+	var session *Session
+	if node != nil {
+		session = node.active
+	}
+	hub.mu.Unlock()
+	if session == nil || !session.Authorized() {
+		return false
+	}
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	return hub.nodes[nodeID].active == session
 }
 
 func (hub *Hub) ActiveNodeIDs() []string {
 	hub.mu.Lock()
-	defer hub.mu.Unlock()
 	ids := make([]string, 0, len(hub.nodes))
 	for id, node := range hub.nodes {
 		if node.active != nil {
 			ids = append(ids, id)
 		}
 	}
-	return ids
+	hub.mu.Unlock()
+	active := ids[:0]
+	for _, id := range ids {
+		if hub.NodeActive(id) {
+			active = append(active, id)
+		}
+	}
+	return active
 }
 
 func (hub *Hub) Attach(nodeID string) *Session {
+	return hub.attachAuthorized(nodeID, nil)
+}
+
+func (hub *Hub) attachAuthorized(nodeID string, authorized func() bool) *Session {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 	node := hub.nodeLocked(nodeID)
@@ -219,7 +239,7 @@ func (hub *Hub) Attach(nodeID string) *Session {
 		close(node.active.replaced)
 		hub.requeueInFlightLocked(node)
 	}
-	session := &Session{hub: hub, nodeID: nodeID, wake: make(chan struct{}, 1), replaced: make(chan struct{})}
+	session := &Session{hub: hub, nodeID: nodeID, wake: make(chan struct{}, 1), replaced: make(chan struct{}), authorized: authorized}
 	node.active = session
 	if len(node.queued) > 0 {
 		notify(session)
@@ -242,7 +262,12 @@ func (session *Session) Detach() bool {
 func (session *Session) Wake() <-chan struct{}     { return session.wake }
 func (session *Session) Replaced() <-chan struct{} { return session.replaced }
 
+func (session *Session) Authorized() bool { return session.authorized == nil || session.authorized() }
+
 func (session *Session) Take() (*xirangv1.ControlMessage, bool) {
+	if !session.Authorized() {
+		return nil, false
+	}
 	session.hub.mu.Lock()
 	defer session.hub.mu.Unlock()
 	node := session.hub.nodeLocked(session.nodeID)

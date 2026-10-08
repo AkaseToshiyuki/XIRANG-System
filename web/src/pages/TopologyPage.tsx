@@ -97,7 +97,7 @@ export function TopologyPage({ token }: { token: string }) {
 
   return <section>
     <header className="page-header">
-      <div><span className="eyebrow">{t("检查节点连接", "Inspect node links")}</span><h1>{t("网络拓扑", "Network topology")}</h1><p>{t("查看已加入节点之间的双向实时速率、接口协商速率、主链路和备用链路状态。", "Inspect bidirectional live traffic, negotiated speed, primary paths and fallback links between enrolled nodes.")}</p></div>
+      <div><h1>{t("网络拓扑", "Network topology")}</h1></div>
       <div className={`live-indicator ${error ? "live-indicator--warning" : ""}`} title={error || undefined}><span />{lastRefreshedAt ? `${t("更新于", "Updated at")} ${clockTime(lastRefreshedAt)}` : t("等待更新", "Waiting for update")}</div>
     </header>
     {error && <p className="error-banner" role="alert">{error}</p>}
@@ -139,7 +139,7 @@ export function TopologyPage({ token }: { token: string }) {
         <TopologyInspector node={selectedNode} link={selectedLink} rate={selectedNode ? rates[selectedNode.id] : undefined} t={t} />
       </div>
       <article className="topology-list managed-link-list">
-        <header><div><span className="eyebrow">{t("检查连接明细", "Inspect link details")}</span><h2>{t("双向速率与链路选择", "Bidirectional rates and path selection")}</h2></div><small>{t("最新采样", "Latest sample")}</small></header>
+        <header><div><h2>{t("双向速率与链路选择", "Bidirectional rates and path selection")}</h2></div><small>{t("最新采样", "Latest sample")}</small></header>
         {links.map((link) => <button type="button" key={link.id} onClick={() => setSelection({ kind: "link", id: link.id })}>
           <strong>{link.source.name} <b>↔</b> {link.target.name}</strong><span>{linkPathLabel(link, t)} · {negotiatedLabel(link, t, t("协商", "negotiated"))}</span>
           <small>{link.source.name} → {formatLinkRate(link, link.forwardBits, t)} · {link.target.name} → {formatLinkRate(link, link.reverseBits, t)} · {fallbackLabel(link, t)}{link.fallbackPaths.length ? t(` · 备用：${link.fallbackPaths.join("；")}`, ` · fallback: ${link.fallbackPaths.join("; ")}`) : ""}</small>

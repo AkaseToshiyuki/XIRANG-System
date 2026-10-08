@@ -59,14 +59,14 @@ export function TerminalPage({ token }: { token: string }) {
   }
 
   return <section>
-    <header className="page-header"><div><span className="eyebrow">{t("连接节点命令行", "Open a node shell")}</span><h1>{t("管理员终端", "Administrator terminal")}</h1><p>{t("通过节点现有的 mTLS Agent 通道建立临时 PTY；关闭页面或断开连接会立即结束会话。", "Open a temporary PTY over the node's authenticated mTLS Agent channel. Closing or disconnecting ends it immediately.")}</p></div></header>
+    <header className="page-header"><div><h1>{t("管理员终端", "Administrator terminal")}</h1></div></header>
     {error && <p className="error-banner" role="alert">{error}</p>}
     <div className="terminal-toolbar">
       <label><span>{t("目标节点", "Target node")}</span><select value={nodeID} onChange={(event) => setNodeID(event.target.value)}>{nodes.map((node) => <option value={node.id} key={node.id}>{node.name} · {node.architecture}</option>)}</select></label>
-      <button className="primary-button" type="button" disabled={!nodeID || status === "connecting"} onClick={() => void connect()}>{status === "open" ? t("重新连接", "Reconnect") : status === "connecting" ? t("连接中…", "Connecting…") : t("连接终端", "Connect terminal")}<span>→</span></button>
+      <button className="primary-button" type="button" disabled={!nodeID || status === "connecting"} onClick={() => void connect()}>{status === "open" ? t("重新连接", "Reconnect") : status === "connecting" ? t("连接中…", "Connecting…") : t("连接终端", "Connect terminal")}<span aria-hidden="true">→</span></button>
       <button type="button" disabled={status !== "open"} onClick={() => socket.current?.send("\u0003")}>{t("发送 Ctrl-C", "Send Ctrl-C")}</button>
     </div>
-    <div className="terminal-key"><span>{t("安全边界", "Security boundary")}</span><code>Agent mTLS · PTY · 10 min idle · 30 min max</code><small>{t("会话受管理员权限、一次性票据、并发限制和审计约束；不会分发 SSH 私钥。", "Sessions require administrator access and a one-use ticket, and enforce concurrency limits and audit metadata. No SSH private key is distributed.")}</small></div>
+    <p className="terminal-key">{t("闲置 10 分钟或连接满 30 分钟后自动断开；离开此页面会结束会话。", "Disconnects after 10 minutes idle or 30 minutes total. Leaving this page ends the session.")}</p>
     <pre ref={outputElement} className="terminal-output" aria-live="polite">{output}</pre>
     <form className="terminal-input" onSubmit={send}><span>$</span><input value={command} onChange={(event) => setCommand(event.target.value)} disabled={status !== "open"} autoComplete="off" spellCheck={false} placeholder={status === "open" ? t("输入命令并按 Enter", "Enter a command and press Enter") : t("请先连接节点", "Connect to a node first")} /><button disabled={status !== "open" || !command}>{t("发送", "Send")}</button></form>
   </section>;

@@ -34,7 +34,7 @@ func TestNativeBuildPrivateStagingAndAtomicOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	published := filepath.Join(shared, "bin", "app")
-	digest, err := publishNativeBuildOutput(output, shared, "bin/app")
+	digest, err := publishNativeBuildOutput(local, shared, "bin/app")
 	if err != nil || !nativeBuildSHA256(digest) {
 		t.Fatalf("publish failed: digest=%q err=%v", digest, err)
 	}
@@ -51,5 +51,26 @@ func TestNativeBuildStagingRejectsSymlink(t *testing.T) {
 	}
 	if err := copyNativeBuildTree(shared, filepath.Join(t.TempDir(), "local")); err == nil {
 		t.Fatal("symbolic link was accepted")
+	}
+}
+
+func TestNativeBuildOutputRejectsLeafAndParentLinks(t *testing.T) {
+	local, shared, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "app"), []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "app"), filepath.Join(local, "leaf")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(local, "parent")); err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range []string{"leaf", "parent/app"} {
+		if digest, err := publishNativeBuildOutput(local, shared, output); err == nil || digest != "" {
+			t.Fatalf("published linked output: %s %v", digest, err)
+		}
+		if _, err := os.Stat(filepath.Join(shared, output)); !os.IsNotExist(err) {
+			t.Fatalf("unsafe output created: %v", err)
+		}
 	}
 }

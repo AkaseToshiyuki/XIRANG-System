@@ -715,8 +715,16 @@ func (service *AccessService) Authenticate(ctx context.Context, bearer string) (
 			// owner's role, only loses it: minting a narrow token from an
 			// administrator account must stay narrow, while demoting that
 			// account must immediately narrow the token further.
-			if token.Interactive || roleRank(accountRole.Name) < roleRank(role.Name) {
+			if token.Interactive {
 				role = accountRole
+			} else {
+				permissions := intersectPermissions(role.Permissions, accountRole.Permissions)
+				// The role label is used by ownership checks as well as the UI.
+				// Never retain an admin label after an account demotion.
+				if roleRank(accountRole.Name) < roleRank(role.Name) {
+					role = accountRole
+				}
+				role.Permissions = permissions
 			}
 		}
 		now := service.now().UTC()
@@ -852,6 +860,27 @@ func roleByName(name string) *domain.Role {
 		}
 	}
 	return nil
+}
+
+func intersectPermissions(issued, current []string) []string {
+	contains := func(permissions []string, permission string) bool {
+		for _, granted := range permissions {
+			if granted == permission || granted == "*" {
+				return true
+			}
+		}
+		return false
+	}
+	if contains(issued, "*") {
+		return append([]string(nil), current...)
+	}
+	var permissions []string
+	for _, permission := range issued {
+		if contains(current, permission) {
+			permissions = append(permissions, permission)
+		}
+	}
+	return permissions
 }
 
 func roleRank(name string) int {

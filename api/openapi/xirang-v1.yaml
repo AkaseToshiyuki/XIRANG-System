@@ -2179,6 +2179,7 @@ components:
             runtimeNodeIds: { type: array, items: { type: string } }
             runtimeRequirements: { type: object, additionalProperties: { type: string } }
             routingUpdatedAt: { type: string, format: date-time }
+            routingApproved: { type: boolean, description: Global application mapping approved by an administrator }
         createdAt: { type: string, format: date-time }
         startedAt: { type: string, format: date-time }
         finishedAt: { type: string, format: date-time }

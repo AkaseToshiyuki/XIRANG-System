@@ -35,7 +35,7 @@ const navigation = [
 type Page = typeof navigation[number]["label"];
 
 export function App() {
-  const { language, setLanguage, theme, setTheme, refreshSeconds, setRefreshSeconds, t } = usePreferences();
+  const { language, refreshSeconds, setRefreshSeconds, t } = usePreferences();
   const [active, setActive] = useState<Page>(() => pageFromPath(window.location.pathname));
   const [version, setVersion] = useState<VersionInfo | null>(null);
   const [principal, setPrincipal] = useState<AccessPrincipal | null>(null);
@@ -156,39 +156,24 @@ export function App() {
 
   if (!token) {
     return <main className="auth-shell">
-      <section className="auth-intro">
-        <div className="brand brand--large"><img className="brand-mark" src="/brand/xirang-mark.png" alt="" aria-hidden="true" /><div><strong>XIRANG</strong><small>Heterogeneous Cluster Control Plane</small></div></div>
-        <span className="auth-kicker">ORCHESTRATION · SCHEDULING · TOPOLOGY</span>
-        <h1><em>XIRANG</em><span><b>—</b> eXtensible Infrastructure for<br />Resource-aware Adaptive Networked Grids</span></h1>
-        <div className="auth-positioning">
-          <p>A self-expanding orchestration and scheduling platform for heterogeneous computing clusters.</p>
-          {language === "zh" && <p lang="zh-CN">一个面向异构计算集群的自扩展编排与调度平台。</p>}
-        </div>
-        <div className="auth-features" aria-label="System capabilities">
-          <span><i>01</i> {t("mTLS 节点身份", "mTLS node identity")}</span>
-          <span><i>02</i> {t("实时资源遥测", "Live resource telemetry")}</span>
-          <span><i>03</i> {t("当前节点拓扑", "Current node topology")}</span>
-        </div>
-      </section>
       <section className="auth-card" aria-labelledby="auth-title">
-        <div className="auth-status"><span /> CONTROL PLANE {version ? "REACHABLE" : "DISCOVERING"}</div>
-        <span className="eyebrow">{setupRequired ? "First-run setup" : "Identity portal"}</span>
+        <div className="auth-topline"><div className="brand"><img className="brand-mark" src="/brand/xirang-mark.png" alt="" aria-hidden="true" /><strong>XIRANG</strong></div><InterfacePreferences /></div>
         <h2 id="auth-title">{setupRequired ? t("创建首位管理员", "Create the first administrator") : authMode === "register" ? t("申请账户", "Request an account") : t("进入控制台", "Enter the console")}</h2>
         {!setupRequired && <div className="auth-tabs"><button type="button" className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>{t("账户登录", "Account login")}</button><button type="button" className={authMode === "register" ? "active" : ""} onClick={() => setAuthMode("register")}>{t("注册申请", "Registration")}</button><button type="button" className={authMode === "token" ? "active" : ""} onClick={() => setAuthMode("token")}>{t("令牌", "Token")}</button></div>}
         {authMode === "token" && !setupRequired ? <form onSubmit={authenticate}>
-          <label htmlFor="admin-token">Bootstrap / API / OIDC Token</label>
-          <input id="admin-token" type="password" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} autoComplete="current-password" autoFocus placeholder="Enter access credential" />
+          <label htmlFor="admin-token">{t("访问令牌", "Access token")}</label>
+          <input id="admin-token" type="password" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} autoComplete="current-password" autoFocus placeholder={t("输入访问令牌", "Enter access token")} />
           {authError && <p className="form-error" role="alert">{authError}</p>}
-          <button className="primary-button" type="submit" disabled={!tokenInput || authenticating}>{authenticating ? t("正在验证…", "Verifying…") : t("连接控制平面", "Connect to control plane")}<span>→</span></button>
+          <button className="primary-button" type="submit" disabled={!tokenInput || authenticating}>{authenticating ? t("正在验证…", "Verifying…") : t("登录", "Sign in")}<span aria-hidden="true">→</span></button>
         </form> : <form onSubmit={authenticateLocal}>
           <label htmlFor="username">{t("用户名", "Username")}</label><input id="username" value={credentials.username} onChange={(event) => setCredentials({ ...credentials, username: event.target.value })} minLength={3} maxLength={64} required autoFocus />
           {(setupRequired || authMode === "register") && <><label htmlFor="display-name">{t("显示名称", "Display name")}</label><input id="display-name" value={credentials.displayName} onChange={(event) => setCredentials({ ...credentials, displayName: event.target.value })} maxLength={128} /></>}
           <label htmlFor="password">{t("密码（至少 12 位）", "Password (at least 12 characters)")}</label><input id="password" type="password" value={credentials.password} onChange={(event) => setCredentials({ ...credentials, password: event.target.value })} minLength={12} maxLength={1024} required autoComplete={authMode === "register" || setupRequired ? "new-password" : "current-password"} />
           {authError && <p className="form-error" role="alert">{authError}</p>}{authNotice && <p className="form-notice">{authNotice}</p>}
-          <button className="primary-button" type="submit" disabled={authenticating}>{authenticating ? t("处理中…", "Working…") : setupRequired ? t("创建并登录", "Create and sign in") : authMode === "register" ? t("提交审批", "Submit for approval") : t("登录", "Sign in")}<span>→</span></button>
+          <button className="primary-button" type="submit" disabled={authenticating}>{authenticating ? t("处理中…", "Working…") : setupRequired ? t("创建并登录", "Create and sign in") : authMode === "register" ? t("提交审批", "Submit for approval") : t("登录", "Sign in")}<span aria-hidden="true">→</span></button>
         </form>}
-        <small>{authMode === "token" ? t("令牌只保留在本页内存，刷新或关闭页面后自动清除。", "The token stays in page memory only and is cleared on refresh or close.") : t("新注册账户须由管理员审批；普通用户只能操作自己的任务。", "New accounts require administrator approval; users can operate only their own jobs.")}</small>
-        <div className="auth-version"><span>{version?.version ?? "—"}</span><span>{version ? `${version.os} / ${version.architecture}` : "API unavailable"}</span></div>
+        <small>{authMode === "token" ? t("刷新或关闭页面后需重新登录。", "Sign in again after refreshing or closing this page.") : t("新账户需经管理员审批。", "New accounts require administrator approval.")}</small>
+        {version && <div className="auth-version">{version.version}</div>}
       </section>
     </main>;
   }
@@ -205,7 +190,7 @@ export function App() {
     Enrollment: () => <EnrollmentPage token={token} />,
     Jobs: () => <JobsPage token={token} isAdmin={isAdministrator} />,
     Queues: () => <QueuesPage token={token} />,
-    Builds: () => <BuildsPage token={token} />,
+    Builds: () => <BuildsPage token={token} isAdmin={isAdministrator} />,
     Storage: () => <StoragePage token={token} isAdmin={isAdministrator} />,
     Accounting: () => <AccountingPage token={token} isAdmin={isAdministrator} />,
     Terminal: () => <TerminalPage token={token} />,
@@ -216,23 +201,20 @@ export function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand"><img className="brand-mark" src="/brand/xirang-mark.png" alt="" aria-hidden="true" /><div><strong>XIRANG</strong><small>Adaptive Networked Grids</small></div></div>
-        <span className="nav-caption">{t("工作区", "Workspace")}</span>
-        <nav aria-label="Primary navigation">
+        <div className="brand"><img className="brand-mark" src="/brand/xirang-mark.png" alt="" aria-hidden="true" /><div><strong>XIRANG</strong></div></div>
+        <nav aria-label={t("主导航", "Primary navigation")}>
           {navigation.filter((item) => item.available && Boolean(principal && pagePermitted(item.label, principal))).map((item) => {
             const permitted = item.available && Boolean(principal && pagePermitted(item.label, principal));
             return (
-            <button className={item.label === active ? "active" : ""} key={item.label} onClick={() => permitted && navigate(item.label)} type="button" title={`${language === "zh" ? item.zh : item.en} · ${item.path}`}>
+            <button className={item.label === active ? "active" : ""} key={item.label} onClick={() => permitted && navigate(item.label)} type="button" aria-label={language === "zh" ? item.zh : item.en} aria-current={item.label === active ? "page" : undefined} title={language === "zh" ? item.zh : item.en}>
               <WorkspaceIcon name={item.icon} /><span>{language === "zh" ? item.zh : item.en}</span>
             </button>
           )})}
         </nav>
         <div className="sidebar-footer">
-          <div className="session-line"><i /><span>{(principal?.role ?? "authenticated").toUpperCase()} SESSION</span></div>
           <small>{principal?.displayName || principal?.subject}</small>
           <strong>{version?.version ?? "development"}</strong>
-          <small>{version ? `${version.os}/${version.architecture}` : "API connected"}</small>
-          <button type="button" onClick={() => { setToken(""); setPrincipal(null); }}>{t("安全退出", "Sign out")}</button>
+          <button type="button" onClick={() => { setToken(""); setPrincipal(null); }}>{t("退出登录", "Sign out")}</button>
         </div>
       </aside>
       <main className="main-content">
@@ -242,10 +224,7 @@ export function App() {
             <input type="number" min={2} max={60} step={1} value={refreshDraft} disabled={principal?.role !== "admin" || refreshSaving} onChange={(event) => setRefreshDraft(event.target.value)} onBlur={() => void commitRefreshDraft()} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} aria-label={t("Agent 遥测间隔（秒）", "Agent telemetry interval in seconds")} />
             <small>s</small>
           </label>
-          <label className="preference-select"><span className="sr-only">{t("语言", "Language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value as "zh" | "en")} aria-label={t("语言", "Language")}><option value="zh">中文</option><option value="en">English</option></select></label>
-          <button className="theme-toggle" type="button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label={t("切换深浅色模式", "Toggle color theme")} title={theme === "dark" ? t("切换到浅色", "Use light theme") : t("切换到深色", "Use dark theme")}>
-            {theme === "dark" ? <span aria-hidden="true">☼</span> : <span aria-hidden="true">◐</span>}
-          </button>
+          <InterfacePreferences />
         </div>
         <PageErrorBoundary key={`${active}-${language}`} page={active} language={language}>
           {activeView ? activeView() : (
@@ -280,4 +259,12 @@ function pagePermitted(page: Page, principal: AccessPrincipal): boolean {
           : page === "Jobs" ? "jobs.manage"
             : "cluster.read";
   return principal.permissions.includes("*") || principal.permissions.includes(permission);
+}
+
+function InterfacePreferences() {
+  const { language, setLanguage, theme, setTheme, t } = usePreferences();
+  return <div className="interface-preferences">
+    <label className="preference-select"><span className="sr-only">{t("语言", "Language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value as "zh" | "en")}><option value="zh">中文</option><option value="en">English</option></select></label>
+    <button className="theme-toggle" type="button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label={t("切换深浅色模式", "Toggle color theme")} title={theme === "dark" ? t("切换到浅色", "Use light theme") : t("切换到深色", "Use dark theme")}><span aria-hidden="true">{theme === "dark" ? "☼" : "◐"}</span></button>
+  </div>;
 }

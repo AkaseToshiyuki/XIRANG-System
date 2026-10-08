@@ -1558,6 +1558,9 @@ func (executor *NativeExecutor) openArtifact(ctx context.Context, rawURI string)
 }
 
 func openArtifactWithClient(ctx context.Context, rawURI string, controller *url.URL, controllerClient *http.Client) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	parsed, err := url.Parse(rawURI)
 	if err != nil {
 		return nil, fmt.Errorf("parse native artifact URI: %w", err)
@@ -1567,7 +1570,24 @@ func openArtifactWithClient(ctx context.Context, rawURI string, controller *url.
 		if parsed.Host != "" && parsed.Host != "localhost" {
 			return nil, errors.New("file artifact URI must refer to the local host")
 		}
-		return os.Open(parsed.Path)
+		// Opening a FIFO normally waits for a writer before its type can be
+		// checked, while staging holds the shared cache lock. Open without
+		// blocking, then validate the actual descriptor rather than a path
+		// that a local workload could replace between Stat and Open.
+		fd, err := unix.Open(parsed.Path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, err
+		}
+		file := os.NewFile(uintptr(fd), parsed.Path)
+		info, err := file.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			_ = file.Close()
+			if err != nil {
+				return nil, err
+			}
+			return nil, errors.New("local native artifact must be a regular file")
+		}
+		return file, nil
 	case "https":
 		if parsed.Host == "" || parsed.User != nil {
 			return nil, errors.New("HTTPS artifact URI has invalid authority")

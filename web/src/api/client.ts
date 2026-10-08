@@ -243,8 +243,8 @@ export function getNodeObservations(nodeId: string, token: string, limit = 100, 
   });
 }
 
-export function watchNodes(token: string, onNode: (node: ClusterNode) => void, signal: AbortSignal): Promise<void> {
-  return streamEvents<ClusterNode>("/api/v1/events/nodes", { token, label: "Node event stream", onEvent: onNode, signal });
+export function watchNodes(token: string, onNode: (node: ClusterNode) => void, onOpen: () => void, signal: AbortSignal): Promise<void> {
+  return streamEvents<ClusterNode>("/api/v1/events/nodes", { token, label: "Node event stream", onEvent: onNode, onOpen, signal });
 }
 
 // Topology and flows
@@ -311,6 +311,16 @@ export async function downloadSharedFile(spaceId: string, path: string, token: s
   const response = await request(`/api/v1/shared-spaces/${encodeURIComponent(spaceId)}/files/content?path=${encodeURIComponent(path)}`, {
     token, label: "Shared file download",
   });
+  return response.blob();
+}
+
+export async function downloadBuildSBOM(uri: string, token: string): Promise<Blob> {
+  const url = new URL(uri, window.location.origin);
+  // Artifact metadata must never forward the user's bearer to another origin.
+  if (url.origin !== window.location.origin || !url.pathname.startsWith("/artifacts/") || url.username || url.password) {
+    throw new Error("SBOM download requires a controller artifact URL");
+  }
+  const response = await request(url.pathname + url.search, { token, label: "SBOM download" });
   return response.blob();
 }
 

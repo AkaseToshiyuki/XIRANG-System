@@ -49,7 +49,6 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
     let retry: number | undefined;
     const connect = async () => {
       try {
-        setLive(true);
         await watchNodes(token, (node) => {
           if (node.removedAt) {
             setNodes((current) => current.filter((item) => item.id !== node.id));
@@ -59,7 +58,7 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
             ? current.map((item) => item.id === node.id ? node : item)
             : [...current, node]);
           setLastUpdatedAt(new Date().toISOString());
-        }, controller.signal);
+        }, () => setLive(true), controller.signal);
       } catch {
         // A failed stream and a clean EOF both follow the same reconnect path.
       }
@@ -215,9 +214,7 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
   return <section>
     <header className="page-header">
       <div>
-        <span className="eyebrow">{t("查看并管理节点", "Inspect and manage nodes")}</span>
         <h1>{t("节点状态", "Node status")}</h1>
-        <p>{isAdmin ? t("审批节点、调整可叠加角色、配置管理地址并控制维护状态。", "Approve nodes, assign composable roles, configure access and control maintenance state.") : t("查看节点状态、角色、容量和实时资源使用情况。", "Inspect node status, roles, capacity and live resource usage.")}</p>
       </div>
       <div className={`live-indicator ${live ? "" : "live-indicator--warning"}`} title={live ? undefined : t("节点事件流重连中", "Node event stream reconnecting")}><span />{lastUpdatedAt ? `${t("更新于", "Updated at")} ${clockTime(lastUpdatedAt)}` : t("等待更新", "Waiting for update")}</div>
     </header>

@@ -66,7 +66,7 @@ export function AccountingPage({ token, isAdmin }: { token: string; isAdmin: boo
 
   return <section>
     <header className="page-header accounting-header">
-      <div><span className="eyebrow">{t("资源使用与费用", "Resource usage and cost")}</span><h1>{t("用量核算", "Usage accounting")}</h1><p>{t("按日期检查 CPU、内存、GPU、存储实际用量及对应费用。", "Inspect measured CPU, memory, GPU, storage usage and corresponding cost by date.")}</p></div>
+      <div><h1>{t("用量核算", "Usage accounting")}</h1></div>
       <div className="accounting-actions">
         <label><span>{t("开始", "From")}</span><input type="date" value={from} max={to} onChange={(event) => setFrom(event.target.value)} /></label>
         <label><span>{t("结束", "To")}</span><input type="date" value={to} min={from} max={today} onChange={(event) => setTo(event.target.value)} /></label>
@@ -81,7 +81,7 @@ export function AccountingPage({ token, isAdmin }: { token: string; isAdmin: boo
     </section>}
 
     {showRates && isAdmin && <section className="billing-rate-panel">
-      <div><span className="eyebrow">{t("管理员设置", "Administrator settings")}</span><h2>{t("发布新计费标准", "Publish billing rates")}</h2><p>{t("新标准按生效时间创建，已有标准保持不变。", "New rates take effect at the selected time; existing rate versions remain unchanged.")}</p></div>
+      <div><h2>{t("发布新计费标准", "Publish billing rates")}</h2><p>{t("新标准按生效时间创建，已有标准保持不变。", "New rates take effect at the selected time; existing rate versions remain unchanged.")}</p></div>
       <form onSubmit={saveRate}>
         <label><span>{t("币种", "Currency")}</span><input required minLength={3} maxLength={3} value={rateDraft.currency} onChange={(event) => setRateDraft({ ...rateDraft, currency: event.target.value })} /></label>
         <RateInput label={t("CPU 核心时", "CPU core-hour")} value={rateDraft.cpu} onChange={(cpu) => setRateDraft({ ...rateDraft, cpu })} />
@@ -89,7 +89,7 @@ export function AccountingPage({ token, isAdmin }: { token: string; isAdmin: boo
         <RateInput label={t("GPU 卡时", "GPU device-hour")} value={rateDraft.gpu} onChange={(gpu) => setRateDraft({ ...rateDraft, gpu })} />
         <RateInput label={t("存储 GiB 日", "Storage GiB-day")} value={rateDraft.storage} onChange={(storage) => setRateDraft({ ...rateDraft, storage })} />
         <label><span>{t("生效时间（留空立即生效）", "Effective time (blank for now)")}</span><input type="datetime-local" value={rateDraft.effectiveAt} onChange={(event) => setRateDraft({ ...rateDraft, effectiveAt: event.target.value })} /></label>
-        <button className="primary-button" type="submit">{t("发布标准", "Publish rates")}<span>→</span></button>
+        <button className="primary-button" type="submit">{t("发布标准", "Publish rates")}<span aria-hidden="true">→</span></button>
       </form>
       <div className="billing-rate-history">{rates.slice().reverse().map((rate) => <span key={rate.id}><strong>{rate.currency}</strong><small>{rate.effectiveAt ? new Date(rate.effectiveAt).toLocaleString() : "—"}</small><b>{formatMoney(rate.cpuCoreHourMicros, rate.currency)} / CPUh · {formatMoney(rate.gpuDeviceHourMicros, rate.currency)} / GPUh</b></span>)}</div>
     </section>}
@@ -104,11 +104,11 @@ export function AccountingPage({ token, isAdmin }: { token: string; isAdmin: boo
     </div>
 
     <div className="accounting-grid">
-      <article className="usage-chart-card"><header><div><span className="eyebrow">{t("每日费用", "Daily cost")}</span><h2>{t("使用量随时间变化", "Usage over time")}</h2></div><strong>{daily.length} {t("天", "days")}</strong></header><UsageLine daily={daily} currency={summary?.currency ?? "CNY"} /></article>
-      <article className="usage-heat-card"><header><div><span className="eyebrow">{t("日期热点", "Calendar activity")}</span><h2>{t("每日资源活动", "Daily resource activity")}</h2></div></header><UsageHeatmap daily={daily} currency={summary?.currency ?? "CNY"} /></article>
+      <article className="usage-chart-card"><header><div><h2>{t("每日费用", "Daily cost")}</h2></div><strong>{daily.length} {t("天", "days")}</strong></header><UsageLine daily={daily} currency={summary?.currency ?? "CNY"} /></article>
+      <article className="usage-heat-card"><header><div><h2>{t("每日资源活动", "Daily resource activity")}</h2></div></header><UsageHeatmap daily={daily} currency={summary?.currency ?? "CNY"} /></article>
     </div>
 
-    {isAdmin && <section className="accounting-user-table"><header><div><span className="eyebrow">{t("所有用户", "All users")}</span><h2>{t("用户用量与费用", "User usage and cost")}</h2></div></header><div className="accounting-user-row accounting-user-row--head"><span>{t("用户", "User")}</span><span>CPU h</span><span>GPU h</span><span>{t("峰值空间", "Peak storage")}</span><span>{t("费用", "Cost")}</span></div>{users.map((user) => <button type="button" className="accounting-user-row" key={user.ownerId} onClick={() => setOwnerID(user.ownerId ?? "")}><span><strong>{user.ownerName || user.ownerId}</strong><small>{user.ownerId}</small></span><span>{formatNumber(user.cpuUsageMicros / 3_600_000_000)}</span><span>{formatNumber(user.gpuDeviceSeconds / 3600)}</span><span>{formatBytes(user.peakWorkspaceBytes)}</span><span><strong>{formatMoney(user.cost.totalCostMicros, user.currency)}</strong></span></button>)}</section>}
+    {isAdmin && <section className="accounting-user-table"><header><div><h2>{t("用户用量与费用", "User usage and cost")}</h2></div></header><div className="accounting-user-row accounting-user-row--head"><span>{t("用户", "User")}</span><span>CPU h</span><span>GPU h</span><span>{t("峰值空间", "Peak storage")}</span><span>{t("费用", "Cost")}</span></div>{users.map((user) => <button type="button" className="accounting-user-row" key={user.ownerId} onClick={() => setOwnerID(user.ownerId ?? "")}><span><strong>{user.ownerName || user.ownerId}</strong><small>{user.ownerId}</small></span><span>{formatNumber(user.cpuUsageMicros / 3_600_000_000)}</span><span>{formatNumber(user.gpuDeviceSeconds / 3600)}</span><span>{formatBytes(user.peakWorkspaceBytes)}</span><span><strong>{formatMoney(user.cost.totalCostMicros, user.currency)}</strong></span></button>)}</section>}
     {loading && !summary && <div className="table-loading"><span /><span /><span /></div>}
   </section>;
 }

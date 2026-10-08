@@ -323,7 +323,7 @@ func RunMountHelper(arguments []string) error {
 		}
 		path := filepath.Join(procDirectoryPath(parentFD), leaf)
 		if mode == "owned-recursive" {
-			return removeOwnedTree(path, relative, arguments[5])
+			return removeOwnedTreeAt(parentFD, leaf, relative, arguments[5])
 		}
 		return os.RemoveAll(path)
 	default:
@@ -416,6 +416,15 @@ func safeSharedPolicyPath(value string) bool {
 }
 
 func removeOwnedTree(target, targetRelative, encodedManifest string) error {
+	parent, err := unix.Open(filepath.Dir(target), unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(parent)
+	return removeOwnedTreeAt(parent, filepath.Base(target), targetRelative, encodedManifest)
+}
+
+func removeOwnedTreeAt(parent int, name, targetRelative, encodedManifest string) error {
 	targetRelative, err := cleanSharedRelativePath(targetRelative)
 	if err != nil || targetRelative == "" {
 		return errors.New("owned delete target is invalid")
@@ -436,39 +445,94 @@ func removeOwnedTree(target, targetRelative, encodedManifest string) error {
 		}
 		allowed[cleaned] = struct{}{}
 	}
-	entries := make([]string, 0, len(allowed))
-	err = filepath.WalkDir(target, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		suffix, relErr := filepath.Rel(target, path)
-		if relErr != nil {
-			return relErr
-		}
-		relative := targetRelative
-		if suffix != "." {
-			relative = filepath.ToSlash(filepath.Join(targetRelative, suffix))
-		}
-		if _, ok := allowed[relative]; !ok {
-			return fmt.Errorf("owned delete refused untracked path %q", relative)
-		}
-		entries = append(entries, path)
-		return nil
-	})
+	entry, err := inspectOwnedDelete(parent, name, targetRelative, allowed)
 	if err != nil {
 		return err
 	}
-	// Remove individual entries from leaves to root. If a new untracked file is
-	// created after validation, removing its parent fails instead of deleting it.
-	sort.Slice(entries, func(i, j int) bool {
-		return strings.Count(entries[i], string(filepath.Separator)) > strings.Count(entries[j], string(filepath.Separator))
-	})
-	for _, path := range entries {
-		if err := os.Remove(path); err != nil {
+	return removeOwnedEntry(parent, entry)
+}
+
+type ownedDeleteEntry struct {
+	name     string
+	stat     unix.Stat_t
+	children []*ownedDeleteEntry
+}
+
+func sameOwnedEntry(left, right *unix.Stat_t) bool {
+	return left.Dev == right.Dev && left.Ino == right.Ino && left.Mode&unix.S_IFMT == right.Mode&unix.S_IFMT
+}
+
+// Validate the complete manifest before deleting anything. Only single path
+// components are resolved relative to pinned directories, never a mutable
+// multi-component path from an earlier walk.
+func inspectOwnedDelete(parent int, name, relative string, allowed map[string]struct{}) (*ownedDeleteEntry, error) {
+	if _, ok := allowed[relative]; !ok {
+		return nil, fmt.Errorf("owned delete refused untracked path %q", relative)
+	}
+	entry := &ownedDeleteEntry{name: name}
+	if err := unix.Fstatat(parent, name, &entry.stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return nil, err
+	}
+	if entry.stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return entry, nil
+	}
+	fd, err := openSharedAt(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC)
+	if err != nil {
+		return nil, err
+	}
+	directory := os.NewFile(uintptr(fd), name)
+	defer directory.Close()
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil {
+		return nil, err
+	}
+	if !sameOwnedEntry(&entry.stat, &opened) {
+		return nil, errors.New("owned directory changed during validation")
+	}
+	names, err := directory.Readdirnames(-1)
+	if err != nil {
+		return nil, err
+	}
+	for _, child := range names {
+		item, err := inspectOwnedDelete(fd, child, relative+"/"+child, allowed)
+		if err != nil {
+			return nil, err
+		}
+		entry.children = append(entry.children, item)
+	}
+	return entry, nil
+}
+
+func removeOwnedEntry(parent int, entry *ownedDeleteEntry) error {
+	var current unix.Stat_t
+	if err := unix.Fstatat(parent, entry.name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if !sameOwnedEntry(&entry.stat, &current) {
+		return errors.New("owned entry changed before deletion")
+	}
+	if current.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return unix.Unlinkat(parent, entry.name, 0)
+	}
+	fd, err := openSharedAt(parent, entry.name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil {
+		return err
+	}
+	if !sameOwnedEntry(&entry.stat, &opened) {
+		return errors.New("owned directory changed before deletion")
+	}
+	for _, child := range entry.children {
+		if err := removeOwnedEntry(fd, child); err != nil {
 			return err
 		}
 	}
-	return nil
+	// Any late arrival makes this fail with ENOTEMPTY instead of being removed.
+	return unix.Unlinkat(parent, entry.name, unix.AT_REMOVEDIR)
 }
 
 func cleanSharedRelativePath(value string) (string, error) {

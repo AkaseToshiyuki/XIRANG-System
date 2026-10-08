@@ -20,9 +20,9 @@ XIRANG 将处理器、加速卡、存储和网络条件各异的 Linux 服务器
 管理的集群。用户可通过统一的网页界面接入节点、查看运行状态与网络拓扑、
 管理共享空间，并提交原生计算任务。
 
-当前稳定版本：**1.1.0**。详见[版本说明](docs/user/RELEASE_NOTES.zh-CN.md)。
+当前稳定版本：**1.2.0**。详见[版本说明](docs/user/RELEASE_NOTES.zh-CN.md)。
 
-**文献引用:** Haochen Yang. *XIRANG: Native Build-to-Placement Contracts for Heterogeneous Linux Clusters*. Preprint, 2026. [PDF](https://github.com/AkaseToshiyuki/XIRANG-System/releases/download/v1.1.0/xirang-preprint.pdf).
+**文献引用:** Haochen Yang. *XIRANG: Native Build-to-Placement Contracts for Heterogeneous Linux Clusters*. Preprint, 2026.
 
 ## 特点与优势
 
@@ -60,7 +60,7 @@ cd XIRANG-System
 也可以安装已经下载到本机的预构建包：
 
 ```bash
-./install.sh --archive /path/to/xirang-1.1.0-linux-amd64.tar.gz
+./install.sh --archive /path/to/xirang-1.2.0-linux-amd64.tar.gz
 ```
 
 支持范围、端口、自动化参数和故障排查请参阅
@@ -87,7 +87,7 @@ https://控制节点IP:8899
 ```bash
 make verify
 make web-install web-build
-make package-native VERSION=1.1.0
+make package-native VERSION=1.2.0
 ```
 
 公开双语手册位于 [`docs/user`](docs/user)。

@@ -391,6 +391,67 @@ func TestAutomationTokenTracksOwnerAccountWithoutEscalating(t *testing.T) {
 	}
 }
 
+func TestAutomationTokenPermissionsIntersectCurrentAccount(t *testing.T) {
+	store, err := boltstore.Open(filepath.Join(t.TempDir(), "xirang.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	service := identity.NewAccessService(store, nil, nil)
+	ctx := context.Background()
+	admin, err := service.SetupAdmin(ctx, identity.LocalCredentials{Username: "cluster-admin", Password: "correct horse battery staple"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := domain.Principal{UserID: admin.ID, Subject: admin.Username, Role: "admin", Permissions: []string{"*"}, AuthMethod: "local_password"}
+	owner, err := service.Register(ctx, identity.LocalCredentials{Username: "token-owner", Password: "another sufficiently long secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		issued, current     string
+		jobs, builds, files bool
+	}{
+		{"builder", "user", false, false, true},
+		{"builder", "operator", false, false, true},
+		{"user", "builder", false, false, true},
+		{"admin", "builder", false, true, true},
+		{"builder", "admin", false, true, true},
+		{"viewer", "admin", false, false, false},
+		{"admin", "viewer", false, false, false},
+	} {
+		t.Run(tc.issued+"_"+tc.current, func(t *testing.T) {
+			if _, err := service.UpdateUser(ctx, owner.ID, domain.UserStatusActive, "admin", actor); err != nil {
+				t.Fatal(err)
+			}
+			token, err := service.CreateToken(ctx, "automation", tc.issued, time.Hour, domain.Principal{UserID: owner.ID, Subject: owner.Username, Role: "admin", Permissions: []string{"*"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Account management currently exposes admin/user. Seed the other
+			// built-in roles through persistence to cover legacy account state.
+			if _, err := store.UpdateUser(ctx, owner.ID, func(user *domain.User) error {
+				user.Role = tc.current
+				return nil
+			}, domain.AuditEvent{}); err != nil {
+				t.Fatal(err)
+			}
+			principal, err := service.Authenticate(ctx, token.Secret)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if principal.Role == "admin" {
+				t.Fatal("restricted token retained admin ownership bypass")
+			}
+			for permission, allowed := range map[string]bool{identity.PermissionRead: true, identity.PermissionJobsManage: tc.jobs, identity.PermissionBuildsManage: tc.builds, identity.PermissionFilesWrite: tc.files, identity.PermissionAccessManage: false} {
+				if got := service.Authorize(principal, permission); (got == nil) != allowed {
+					t.Fatalf("permission %s: allowed=%v err=%v", permission, allowed, got)
+				}
+			}
+		})
+	}
+}
+
 func TestLastAdministratorCannotBeDemotedOrDisabled(t *testing.T) {
 	store, err := boltstore.Open(filepath.Join(t.TempDir(), "xirang.db"))
 	if err != nil {
