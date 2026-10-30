@@ -77,7 +77,7 @@ func RunMountHelper(arguments []string) error {
 			return err
 		}
 		exportLine := fmt.Sprintf("%s *(rw,sync,no_subtree_check,all_squash,anonuid=%d,anongid=%d)\n", arguments[2], uid, gid)
-		if err := os.WriteFile(path, []byte(exportLine), 0o644); err != nil {
+		if err := writeMountConfiguration(path, []byte(exportLine)); err != nil {
 			return err
 		}
 		return runMountCommand("exportfs", "-ra")
@@ -94,6 +94,10 @@ func RunMountHelper(arguments []string) error {
 			return errors.New("mount requires id, source host, source path, and mount path")
 		}
 		source, target := arguments[2]+":"+arguments[3], arguments[4]
+		mounted, err := matchingSharedMount(target, source)
+		if err != nil {
+			return err
+		}
 		if err := updateSystemdSharedPathPolicy(id+"-mount", target, true); err != nil {
 			return err
 		}
@@ -103,19 +107,44 @@ func RunMountHelper(arguments []string) error {
 			return err
 		}
 		directory.Close()
-		if err := runMountCommand("mountpoint", "-q", target); err != nil {
+		if !mounted {
 			if err := runMountCommand("mount", "-t", "nfs", "-o", "rw,hard,timeo=60,retrans=2", source, target); err != nil {
 				return err
 			}
+		}
+		if mounted, err := matchingSharedMount(target, source); err != nil {
+			return err
+		} else if !mounted {
+			return errors.New("requested NFS mount was not observed")
 		}
 		return putFSTab(id, source, target)
 	case "unmount":
 		if len(arguments) != 3 || !safeMountPath(arguments[2]) {
 			return errors.New("unmount requires id and mount path")
 		}
-		if err := runMountCommand("mountpoint", "-q", arguments[2]); err == nil {
+		mount, mounted, err := readHostMount(arguments[2])
+		if err != nil {
+			return err
+		}
+		if mounted {
+			fstab, err := os.ReadFile("/etc/fstab")
+			if err != nil {
+				return err
+			}
+			expected, err := ownedFSTabSource(fstab, id, arguments[2])
+			if err != nil {
+				return err
+			}
+			if (mount.kind != "nfs" && mount.kind != "nfs4") || mount.source != expected {
+				return errors.New("refusing to unmount an unrelated filesystem")
+			}
 			if err := runMountCommand("umount", arguments[2]); err != nil {
 				return err
+			}
+			if _, mounted, err := readHostMount(arguments[2]); err != nil {
+				return err
+			} else if mounted {
+				return errors.New("unmount did not remove the requested mount")
 			}
 		}
 		if err := removeFSTab(id); err != nil {
@@ -801,16 +830,16 @@ func maxInt64(value, minimum int64) int64 {
 }
 
 func putFSTab(id, source, target string) error {
-	if err := removeFSTab(id); err != nil {
-		return err
-	}
-	file, err := os.OpenFile("/etc/fstab", os.O_APPEND|os.O_WRONLY, 0o644)
+	encoded, err := os.ReadFile("/etc/fstab")
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	_, err = fmt.Fprintf(file, "%s %s nfs rw,hard,timeo=60,retrans=2,_netdev,nofail 0 0 # xirang:%s\n", source, target, id)
-	return err
+	kept := withoutFSTabID(encoded, id)
+	if len(kept) > 0 && kept[len(kept)-1] != '\n' {
+		kept = append(kept, '\n')
+	}
+	line := fmt.Sprintf("%s %s nfs rw,hard,timeo=60,retrans=2,_netdev,nofail 0 0 # xirang:%s\n", source, target, id)
+	return writeMountConfiguration("/etc/fstab", append(kept, line...))
 }
 
 func removeFSTab(id string) error {
@@ -818,18 +847,120 @@ func removeFSTab(id string) error {
 	if err != nil {
 		return err
 	}
-	marker := "# xirang:" + id
-	lines := []string{}
-	scanner := bufio.NewScanner(strings.NewReader(string(encoded)))
-	for scanner.Scan() {
-		if !strings.Contains(scanner.Text(), marker) {
-			lines = append(lines, scanner.Text())
-		}
-	}
-	if err := scanner.Err(); err != nil {
+	return writeMountConfiguration("/etc/fstab", withoutFSTabID(encoded, id))
+}
+
+func writeMountConfiguration(path string, contents []byte) error {
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return errors.New("mount configuration must be a regular file")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return os.WriteFile("/etc/fstab", []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	file, err := os.CreateTemp(filepath.Dir(path), ".xirang-mount-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+	if err := file.Chmod(0o644); err != nil {
+		return err
+	}
+	if _, err := file.Write(contents); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(file.Name(), path); err != nil {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
+
+func withoutFSTabID(encoded []byte, id string) []byte {
+	var kept strings.Builder
+	for _, line := range strings.SplitAfter(string(encoded), "\n") {
+		_, comment, hasComment := strings.Cut(line, "#")
+		if !hasComment || strings.TrimSpace(comment) != "xirang:"+id {
+			kept.WriteString(line)
+		}
+	}
+	return []byte(kept.String())
+}
+
+func ownedFSTabSource(encoded []byte, id, target string) (string, error) {
+	var source string
+	for _, line := range strings.Split(string(encoded), "\n") {
+		entry, comment, ok := strings.Cut(line, "#")
+		if !ok || strings.TrimSpace(comment) != "xirang:"+id {
+			continue
+		}
+		fields := strings.Fields(entry)
+		if len(fields) != 6 || fields[1] != target || (fields[2] != "nfs" && fields[2] != "nfs4") || source != "" {
+			return "", errors.New("shared mount fstab ownership is ambiguous or invalid")
+		}
+		source = fields[0]
+	}
+	if source == "" {
+		return "", errors.New("refusing to unmount without a matching XIRANG fstab entry")
+	}
+	return source, nil
+}
+
+type hostMount struct{ source, kind string }
+
+func readHostMount(target string) (hostMount, bool, error) {
+	file, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return hostMount{}, false, err
+	}
+	defer file.Close()
+	return parseHostMount(file, target)
+}
+
+// Kernel mountinfo fields 5, 9 and 10 identify the mountpoint, filesystem and
+// source; optional fields before the separator cannot shift that interpretation.
+// Request paths exclude whitespace and backslashes, hence need no proc unescape.
+func parseHostMount(reader io.Reader, target string) (hostMount, bool, error) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 4096), 1<<20)
+	var result hostMount
+	found := false
+	for scanner.Scan() {
+		left, right, ok := strings.Cut(scanner.Text(), " - ")
+		before, after := strings.Fields(left), strings.Fields(right)
+		if !ok || len(before) < 6 || len(after) < 3 {
+			return hostMount{}, false, errors.New("invalid kernel mountinfo")
+		}
+		if before[4] != target {
+			continue
+		}
+		if found {
+			return hostMount{}, false, errors.New("multiple mounts obscure the requested mountpoint")
+		}
+		result = hostMount{source: after[1], kind: after[0]}
+		found = true
+	}
+	return result, found, scanner.Err()
+}
+
+func matchingSharedMount(target, source string) (bool, error) {
+	mount, found, err := readHostMount(target)
+	if err != nil {
+		return false, err
+	}
+	if found && ((mount.kind != "nfs" && mount.kind != "nfs4") || mount.source != source) {
+		return false, errors.New("mountpoint already contains a different filesystem or NFS source")
+	}
+	return found, nil
 }
 
 func runMountCommand(name string, arguments ...string) error {

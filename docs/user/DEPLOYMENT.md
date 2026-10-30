@@ -159,10 +159,21 @@ After changing another shared path, restart the affected service during a
 maintenance window so its systemd mount namespace receives the new policy.
 Drain running jobs before restarting an Agent.
 
-Shared-space management also needs the controller's SSH public key authorized for
-the configured management user on each participating node. Limit that user's
-passwordless sudo rule to `xirang-agent mount-helper` and prepopulate the
-controller's known-hosts file when first-use trust is not acceptable.
+Shared mount/export control requires matching upgraded endpoints and the explicit
+Agent flag `-shared-mount-control` (root/systemd only, disabled by default). It uses
+the mTLS stream and a fixed, time-bounded host service, outside the Agent's private
+mount namespace. Keep existing environment flags when enabling it. No automatic
+SSH fallback is available. Existing mounts remain when the capability is disabled.
+
+File data and capacity reads still use the controller's SSH key and configured
+management account. New interactive installations enumerate only the `stats`,
+`file-list`, `file-read`, `file-write`, `file-mkdir`, `file-rename` and `file-delete`
+helper actions in sudoers. Migrate old `mount-helper *` rules explicitly; validate
+with `visudo -cf` and preload verified host keys. This account remains privileged
+and trusted; API ownership checks are not a direct NFS/SSH tenant boundary.
+See [shared storage](USAGE.md#configure-shared-storage) for rollout and failure
+semantics. Removing the new flag is necessary before an Agent binary rollback;
+file-only sudo rules intentionally do not restore legacy SSH mount mutation.
 
 ## Check services
 

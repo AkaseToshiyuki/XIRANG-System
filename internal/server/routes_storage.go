@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/xirang-grid/xirang/internal/domain"
+	"github.com/xirang-grid/xirang/internal/identity"
 )
 
 func registerBackupRoutes(mux *http.ServeMux, manager BackupManager, adminToken string) {
@@ -54,7 +55,7 @@ func registerSharedSpaceRoutes(mux *http.ServeMux, spaces SharedSpaceManager, ad
 			writeError(writer, err)
 			return
 		}
-		space, err := spaces.Apply(request.Context(), input)
+		space, err := spaces.Apply(identity.WithPrincipal(request.Context(), requestPrincipal(request)), input)
 		if err != nil {
 			writeError(writer, err)
 			return
@@ -68,7 +69,7 @@ func registerSharedSpaceRoutes(mux *http.ServeMux, spaces SharedSpaceManager, ad
 			return
 		}
 		input.ID = request.PathValue("id")
-		space, err := spaces.Apply(request.Context(), input)
+		space, err := spaces.Apply(identity.WithPrincipal(request.Context(), requestPrincipal(request)), input)
 		if err != nil {
 			writeError(writer, err)
 			return
@@ -76,14 +77,14 @@ func registerSharedSpaceRoutes(mux *http.ServeMux, spaces SharedSpaceManager, ad
 		writeJSON(writer, http.StatusOK, publicSharedSpace(space))
 	}))
 	mux.HandleFunc("DELETE /api/v1/shared-spaces/{id}", requireAuthenticated(adminToken, func(writer http.ResponseWriter, request *http.Request) {
-		if err := spaces.Delete(request.Context(), request.PathValue("id")); err != nil {
+		if err := spaces.Delete(identity.WithPrincipal(request.Context(), requestPrincipal(request)), request.PathValue("id")); err != nil {
 			writeError(writer, err)
 			return
 		}
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	mux.HandleFunc("POST /api/v1/shared-spaces/{id}/unshare", requireAuthenticated(adminToken, func(writer http.ResponseWriter, request *http.Request) {
-		if err := spaces.Delete(request.Context(), request.PathValue("id")); err != nil {
+		if err := spaces.Delete(identity.WithPrincipal(request.Context(), requestPrincipal(request)), request.PathValue("id")); err != nil {
 			writeError(writer, err)
 			return
 		}

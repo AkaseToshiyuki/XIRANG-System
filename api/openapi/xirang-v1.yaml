@@ -1965,7 +1965,7 @@ components:
           description: Administrator-reachable DNS name or IP address used for SSH operations.
         sshUser:
           type: string
-          description: Existing Linux account authorized for XIRANG SSH and restricted mount-helper use.
+          description: Trusted Linux account for shared-file SSH transfers and stats; mount/export mutations require the separately enabled Agent mTLS capability.
         group:
           type: string
           description: Administrator-defined node group used by shared-space targeting.

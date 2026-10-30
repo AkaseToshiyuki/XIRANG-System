@@ -33,6 +33,7 @@ message AgentMessage {
     NativeBuildUpdate native_build_update = 22;
     HostHealthReport host_health = 23;
     HostEventBatch host_events = 24;
+    SharedMountResult shared_mount_result = 25;
   }
 }
 
@@ -59,6 +60,7 @@ message ControlMessage {
     SetManagementPanel set_management_panel = 26;
     SetBMCIdentify set_bmc_identify = 27;
     HostEventsCommitted host_events_committed = 28;
+    SharedMountOperation shared_mount_operation = 29;
   }
 }
 
@@ -568,4 +570,31 @@ message HostEventBatch {
 
 message HostEventsCommitted {
   string batch_id = 1;
+}
+
+// Ephemeral, node-bound operations negotiated as shared-mount-control-v1.
+// A CommandAcknowledgement accepts execution only; SharedMountResult reports
+// completion. Interrupted operations have an unknown outcome and are not replayed.
+message SharedMountOperation {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ACTION_PREPARE = 1;
+    ACTION_EXPORT = 2;
+    ACTION_UNEXPORT = 3;
+    ACTION_MOUNT = 4;
+    ACTION_UNMOUNT = 5;
+  }
+  string operation_id = 1;
+  Action action = 2;
+  string space_id = 3;
+  string source_host = 4;
+  string source_path = 5;
+  string mount_path = 6;
+  google.protobuf.Timestamp expires_at = 7;
+}
+
+message SharedMountResult {
+  string operation_id = 1;
+  bool success = 2;
+  string message = 3;
 }

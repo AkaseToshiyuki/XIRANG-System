@@ -27,8 +27,9 @@ type nodeCommands struct {
 }
 
 type commandRecord struct {
-	message *xirangv1.ControlMessage
-	owner   *Session
+	message   *xirangv1.ControlMessage
+	owner     *Session
+	transient bool
 }
 
 type Session struct {
@@ -105,6 +106,9 @@ func (hub *Hub) RestoreNodeModeCommands(nodes []domain.Node) error {
 }
 
 func (hub *Hub) Enqueue(nodeID string, message *xirangv1.ControlMessage) error {
+	if message.GetSharedMountOperation() != nil {
+		return errors.New("shared mount operations require an active transient queue")
+	}
 	if nodeID == "" {
 		return errors.New("node ID is required")
 	}
@@ -124,6 +128,58 @@ func (hub *Hub) Enqueue(nodeID string, message *xirangv1.ControlMessage) error {
 	node.queued = append(node.queued, &commandRecord{message: cloned})
 	notify(node.active)
 	return nil
+}
+
+// EnqueueTransient binds a mount request to the currently authorized session.
+// It must never wait for a future connection or replay after a disconnect.
+func (hub *Hub) EnqueueTransient(nodeID string, message *xirangv1.ControlMessage) error {
+	if nodeID == "" || message.GetSharedMountOperation() == nil {
+		return errors.New("invalid transient mount command")
+	}
+	if err := validateQueuedControlMessage(message); err != nil {
+		return err
+	}
+	hub.mu.Lock()
+	node := hub.nodeLocked(nodeID)
+	session := node.active
+	hub.mu.Unlock()
+	if session == nil || !session.Authorized() {
+		return errors.New("node has no authorized active control stream")
+	}
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if node.active != session {
+		return errors.New("node control stream changed")
+	}
+	if existingRecord(node, message.MessageId) {
+		return errors.New("duplicate transient command")
+	}
+	if len(node.queued)+len(node.inFlight) >= hub.capacity {
+		return ErrCommandQueueFull
+	}
+	node.queued = append(node.queued, &commandRecord{message: proto.Clone(message).(*xirangv1.ControlMessage), owner: session, transient: true})
+	notify(session)
+	return nil
+}
+
+func (hub *Hub) ForgetTransient(nodeID, messageID string) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	node := hub.nodes[nodeID]
+	if node == nil {
+		return
+	}
+	if record := node.inFlight[messageID]; record != nil && record.transient {
+		delete(node.inFlight, messageID)
+	}
+	kept := node.queued[:0]
+	for _, record := range node.queued {
+		if !record.transient || record.message.MessageId != messageID {
+			kept = append(kept, record)
+		}
+	}
+	node.queued = kept
+	notify(node.active)
 }
 
 // EnqueueBatch validates capacity and appends every command under one lock. It
@@ -148,6 +204,9 @@ func (hub *Hub) EnqueueBatch(commands map[string][]*xirangv1.ControlMessage) err
 			batchIDs[nodeID] = make(map[string]bool)
 		}
 		for _, message := range messages {
+			if message.GetSharedMountOperation() != nil {
+				return errors.New("shared mount operations cannot be batched")
+			}
 			if err := validateQueuedControlMessage(message); err != nil {
 				return err
 			}
@@ -183,7 +242,7 @@ func validateQueuedControlMessage(message *xirangv1.ControlMessage) error {
 		message.GetSetAssignmentStoragePolicy() == nil && message.GetSetNodeMode() == nil && message.GetRotateCertificate() == nil &&
 		message.GetSetTelemetryInterval() == nil && message.GetUpdateNetworkProbeTargets() == nil &&
 		message.GetOpenTerminal() == nil && message.GetTerminalInput() == nil && message.GetResizeTerminal() == nil && message.GetCloseTerminal() == nil &&
-		message.GetRunNativeBuild() == nil && message.GetSetManagementPanel() == nil && message.GetSetBmcIdentify() == nil {
+		message.GetRunNativeBuild() == nil && message.GetSetManagementPanel() == nil && message.GetSetBmcIdentify() == nil && message.GetSharedMountOperation() == nil {
 		return errors.New("control message does not contain a command")
 	}
 	return nil
@@ -320,15 +379,20 @@ func (hub *Hub) nodeLocked(nodeID string) *nodeCommands {
 }
 
 func (hub *Hub) requeueInFlightLocked(node *nodeCommands) {
-	if len(node.inFlight) == 0 {
-		return
-	}
 	requeued := make([]*commandRecord, 0, len(node.inFlight)+len(node.queued))
 	for _, record := range node.inFlight {
+		if record.transient {
+			continue
+		}
 		record.owner = nil
 		requeued = append(requeued, record)
 	}
-	node.queued = append(requeued, node.queued...)
+	for _, record := range node.queued {
+		if !record.transient {
+			requeued = append(requeued, record)
+		}
+	}
+	node.queued = requeued
 	clear(node.inFlight)
 }
 

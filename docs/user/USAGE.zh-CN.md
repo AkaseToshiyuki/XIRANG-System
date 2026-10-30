@@ -121,11 +121,21 @@ Agent 进程必须运行，本功能不等于无损归档或独立备份。旧�
 共享目录占用量和源文件系统容量；提交任务前，应确认目标节点使用相同挂载路径，
 并且任务身份具有所需的读写权限。
 
-共享空间的导出与挂载目前要求每个参与节点配置管理地址和 SSH 用户。应把控制节点
-的 SSH 公钥授权给该账户，并把免密 sudo 严格限制为
-`/usr/local/bin/xirang-agent mount-helper`，不能开放通用免密 shell。这条管理通道
-与使用 Agent mTLS 的网页终端相互独立；如果管理网络并非可信网络，应预先写入并
-核对 SSH 主机密钥。
+共享空间的导出与挂载变更通过 Agent mTLS 通道执行。升级两端后，在参与节点
+`XIRANG_AGENT_ARGS` 中追加 `-shared-mount-control`，保留已有参数；默认关闭，
+要求 root、systemd 和 root 所有的已安装 Agent。排空任务后再重启 Agent。
+源节点仍须配置 NFS 管理地址。未启用能力时明确失败，不回退到 SSH；OpenRC
+主机暂不支持这一能力。
+
+文件浏览、传输和容量查询仍需要配置 SSH 用户及控制器公钥；sudo 规则仅允许
+`mount-helper stats`、`file-list`、`file-read`、`file-write`、`file-mkdir`、
+`file-rename` 和 `file-delete`，并预先核对主机密钥。旧安装的宽泛规则须另外迁移。
+该 SSH 账户仍属于可信管理身份；网页所有权检查隔离 API 用户，不代表对直接访问
+all-squash NFS 或特权 SSH 实现了逐用户认证。
+
+接收命令不等于执行完成；回执丢失或超时将报告结果未知，重试前先检查节点结果和
+审计。已有挂载须匹配请求的 NFS 来源，卸载须有精确且唯一的 XIRANG fstab 所有权
+记录。中断可能留下部分效果，不自动回滚删除数据或卸载其他文件系统。
 
 ## 提交任务
 

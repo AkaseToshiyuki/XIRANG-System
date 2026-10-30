@@ -20,6 +20,7 @@ import (
 	"github.com/xirang-grid/xirang/internal/domain"
 	"github.com/xirang-grid/xirang/internal/flow"
 	"github.com/xirang-grid/xirang/internal/hosthealth"
+	"github.com/xirang-grid/xirang/internal/mountcontrol"
 	"github.com/xirang-grid/xirang/internal/pki"
 	"github.com/xirang-grid/xirang/internal/telemetry"
 	"github.com/xirang-grid/xirang/internal/topology"
@@ -174,6 +175,10 @@ type TerminalReporter interface {
 	ReportTerminalEvent(context.Context, string, *xirangv1.TerminalEvent) error
 }
 
+type MountReporter interface {
+	ReportMountResult(context.Context, string, *xirangv1.SharedMountResult) error
+}
+
 type NativeBuildReporter interface {
 	ReportWorker(string, *xirangv1.NativeBuildWorker) error
 	ReportUpdate(string, *xirangv1.NativeBuildUpdate) error
@@ -201,6 +206,7 @@ type Server struct {
 	probeTargets      NetworkProbeTargetProvider
 	flows             FlowReporter
 	terminals         TerminalReporter
+	mounts            MountReporter
 	builds            NativeBuildReporter
 	assignments       AssignmentReporter
 	intervalMu        sync.RWMutex
@@ -219,6 +225,8 @@ func (server *Server) SetFlowReporter(reporter FlowReporter) {
 func (server *Server) SetTerminalReporter(reporter TerminalReporter) {
 	server.terminals = reporter
 }
+
+func (server *Server) SetMountReporter(reporter MountReporter) { server.mounts = reporter }
 
 func (server *Server) SetNativeBuildReporter(reporter NativeBuildReporter) {
 	server.builds = reporter
@@ -385,6 +393,15 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 		}
 	}
 	negotiated := negotiateCapabilities(hello.Capabilities)
+	if server.mounts == nil {
+		filtered := negotiated[:0]
+		for _, capability := range negotiated {
+			if capability != mountcontrol.Capability {
+				filtered = append(filtered, capability)
+			}
+		}
+		negotiated = filtered
+	}
 	if _, ok := server.hostHealth.(HostEventCommitter); !ok {
 		filtered := negotiated[:0]
 		for _, capability := range negotiated {
@@ -515,6 +532,16 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 			if command.GetSetBmcIdentify() != nil && !hasCapability(negotiated, hosthealth.IdentifyCapability) {
 				session.Acknowledge(command.MessageId)
 				continue
+			}
+			if operation := command.GetSharedMountOperation(); operation != nil {
+				_, invalid := mountcontrol.Arguments(operation, time.Now())
+				if invalid != nil || operation.OperationId != command.MessageId || !hasCapability(negotiated, mountcontrol.Capability) {
+					session.Acknowledge(command.MessageId)
+					if server.mounts != nil {
+						_ = server.mounts.ReportMountResult(stream.Context(), nodeID, &xirangv1.SharedMountResult{OperationId: command.MessageId, Message: "mount command expired, invalid, or capability unavailable"})
+					}
+					continue
+				}
 			}
 			if command.GetSetManagementPanel() != nil && !hasCapability(negotiated, managementPanelCapability) {
 				_, _ = session.Acknowledge(command.MessageId)
@@ -695,6 +722,15 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 				}
 				continue
 			}
+			if result := message.GetSharedMountResult(); result != nil {
+				if !hasCapability(negotiated, mountcontrol.Capability) || server.mounts == nil {
+					return status.Error(codes.InvalidArgument, "shared mount results were not negotiated")
+				}
+				if err := server.mounts.ReportMountResult(stream.Context(), nodeID, result); err != nil {
+					return status.Error(codes.InvalidArgument, "invalid shared mount result")
+				}
+				continue
+			}
 			if event := message.GetTerminalEvent(); event != nil {
 				if !hasCapability(negotiated, agentPTYCapability) {
 					return status.Error(codes.InvalidArgument, "Agent PTY events were not negotiated")
@@ -736,7 +772,17 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 				if !ok {
 					continue
 				}
-				if command.GetSetBmcIdentify() != nil {
+				if command.GetSharedMountOperation() != nil {
+					if !acknowledgement.Accepted && server.mounts != nil {
+						reason := acknowledgement.Reason
+						if len(reason) > 1024 {
+							reason = reason[:1024]
+						}
+						if err := server.mounts.ReportMountResult(stream.Context(), nodeID, &xirangv1.SharedMountResult{OperationId: command.MessageId, Message: reason}); err != nil {
+							return status.Error(codes.InvalidArgument, "invalid shared mount rejection")
+						}
+					}
+				} else if command.GetSetBmcIdentify() != nil {
 					if server.hostHealth == nil {
 						return status.Error(codes.Unavailable, "BMC action persistence unavailable")
 					}
@@ -958,7 +1004,7 @@ func negotiateCapabilities(offered []string) []string {
 	negotiated := make([]string, 0, 9)
 	for _, capability := range offered {
 		switch capability {
-		case hosthealth.Capability, hosthealth.IdentifyCapability, hosthealth.OutboxCapability, heartbeatCapability, nodeModeCapability, nativeExecutorCapability, cgroupExecutorCapability, certificateRotationCapability,
+		case mountcontrol.Capability, hosthealth.Capability, hosthealth.IdentifyCapability, hosthealth.OutboxCapability, heartbeatCapability, nodeModeCapability, nativeExecutorCapability, cgroupExecutorCapability, certificateRotationCapability,
 			inventorySnapshotCapability, resourceObservationCapability, interfaceHealthCapability, topologyObservationCapability,
 			flowObservationCapability, assignmentLogCapability, deviceInventoryCapability, telemetryIntervalCapability,
 			networkPathProbeCapability, gangAssignmentCapability, mpiLaunchCapability, agentPTYCapability, remoteNativeBuildCapability,
