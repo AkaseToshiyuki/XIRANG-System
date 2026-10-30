@@ -3,12 +3,16 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestSharedMountFSTabOwnershipIsExact(t *testing.T) {
@@ -56,7 +60,7 @@ func TestHostMountParserAgainstInstalledFindmnt(t *testing.T) {
 	}
 	for _, target := range []string{"/", "/proc"} {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		output, err := exec.CommandContext(ctx, binary, "--kernel", "--json", "--nofsroot", "--mountpoint", target, "--output", "TARGET,SOURCE,FSTYPE").Output()
+		output, err := exec.CommandContext(ctx, binary, "--kernel", "--json", "--nofsroot", "--mountpoint", target, "--output", "TARGET,SOURCE,FSTYPE,MAJ:MIN").Output()
 		cancel()
 		if err != nil {
 			t.Fatal("independent findmnt failed", err)
@@ -66,14 +70,29 @@ func TestHostMountParserAgainstInstalledFindmnt(t *testing.T) {
 				Source string `json:"source"`
 				Kind   string `json:"fstype"`
 				Target string `json:"target"`
+				Device string `json:"maj:min"`
 			} `json:"filesystems"`
 		}
 		if err := json.Unmarshal(output, &reference); err != nil || len(reference.Filesystems) != 1 {
 			t.Fatal("invalid independent mount reference")
 		}
 		got, found, err := readHostMount(target)
-		if err != nil || !found || reference.Filesystems[0].Source != got.source || reference.Filesystems[0].Kind != got.kind {
-			t.Fatal("mount parser disagrees with util-linux")
+		ref := reference.Filesystems[0]
+		sourceMatches := ref.Source == got.source
+		// libmount kernel_fs_postparse resolves /dev/root through the device
+		// number even without --canonicalize. Keep the parser's raw source and
+		// independently verify the resolved block device against stat(target).
+		if !sourceMatches && got.source == "/dev/root" {
+			mountInfo, mountErr := os.Stat(target)
+			deviceInfo, deviceErr := os.Stat(ref.Source)
+			if mountErr == nil && deviceErr == nil && deviceInfo.Mode()&os.ModeDevice != 0 && deviceInfo.Mode()&os.ModeCharDevice == 0 {
+				mounted := mountInfo.Sys().(*syscall.Stat_t).Dev
+				resolved := deviceInfo.Sys().(*syscall.Stat_t).Rdev
+				sourceMatches = mounted == resolved && ref.Device == fmt.Sprintf("%d:%d", unix.Major(uint64(mounted)), unix.Minor(uint64(mounted)))
+			}
+		}
+		if err != nil || !found || !sourceMatches || ref.Kind != got.kind || ref.Target != target {
+			t.Fatalf("mount parser disagrees with util-linux for %s: raw=%+v reference=%+v found=%t error=%v", target, got, ref, found, err)
 		}
 	}
 }
