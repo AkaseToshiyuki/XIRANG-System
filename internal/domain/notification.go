@@ -5,10 +5,11 @@ import "time"
 type AlertDeliveryState string
 
 const (
-	AlertDeliveryPending   AlertDeliveryState = "pending"
-	AlertDeliveryRetrying  AlertDeliveryState = "retrying"
-	AlertDeliveryDelivered AlertDeliveryState = "delivered"
-	AlertDeliveryFailed    AlertDeliveryState = "failed"
+	AlertDeliveryPending    AlertDeliveryState = "pending"
+	AlertDeliveryRetrying   AlertDeliveryState = "retrying"
+	AlertDeliveryDelivered  AlertDeliveryState = "delivered"
+	AlertDeliveryFailed     AlertDeliveryState = "failed"
+	AlertDeliverySuppressed AlertDeliveryState = "suppressed"
 )
 
 type AlertDelivery struct {
@@ -25,6 +26,8 @@ type AlertDelivery struct {
 	NextAttemptAt  *time.Time         `json:"nextAttemptAt,omitempty"`
 	LastAttemptAt  *time.Time         `json:"lastAttemptAt,omitempty"`
 	DeliveredAt    *time.Time         `json:"deliveredAt,omitempty"`
+	TargetSeconds  int                `json:"targetSeconds,omitempty"`
+	PolicyRevision uint64             `json:"policyRevision,omitempty"`
 }
 
 type AlertWebhookStatus struct {

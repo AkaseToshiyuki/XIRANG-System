@@ -6,8 +6,44 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xirang-grid/xirang/internal/alertpolicy"
 	"github.com/xirang-grid/xirang/internal/domain"
 )
+
+func TestPolicyChangesApplyWithoutRestartAndReadFailureDoesNotResolve(t *testing.T) {
+	policy := alertpolicy.Defaults(time.Minute, time.Minute)
+	readErr := error(nil)
+	service := NewService(newMemoryRepository(), Config{Policy: func(context.Context) (domain.AlertPolicy, error) { return policy, readErr }})
+	now := time.Now().UTC()
+	service.now = func() time.Time { return now }
+	ctx := context.Background()
+	if _, err := service.Evaluate(ctx, healthSnapshot("critical")); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Second)
+	policy.TriggerAfterSeconds = 10
+	alerts, err := service.Evaluate(ctx, healthSnapshot("critical"))
+	if err != nil || len(alerts) != 1 {
+		t.Fatalf("runtime trigger change ignored: %v %v", alerts, err)
+	}
+	readErr = errors.New("policy storage unavailable")
+	if _, err := service.Evaluate(ctx, healthSnapshot("healthy")); err == nil {
+		t.Fatal("policy read error ignored")
+	}
+	active, _ := service.List(ctx, false)
+	if len(active) != 1 || active[0].HealthySince != nil {
+		t.Fatal("read error changed alert health")
+	}
+	readErr = nil
+	if _, err := service.Evaluate(ctx, healthSnapshot("healthy")); err != nil {
+		t.Fatal(err)
+	}
+	policy.ResolveAfterSeconds = 1
+	now = now.Add(time.Second)
+	if active, err := service.Evaluate(ctx, healthSnapshot("healthy")); err != nil || len(active) != 0 {
+		t.Fatalf("runtime resolution change ignored: %v %v", active, err)
+	}
+}
 
 func TestServiceGatesAcknowledgesAndResolvesAlert(t *testing.T) {
 	repository := newMemoryRepository()

@@ -518,6 +518,13 @@ func (store *Store) PutClusterBranding(ctx context.Context, expected uint64, val
 	return store.persist(ctx)
 }
 
+func (store *Store) PutAlertPolicy(ctx context.Context, expected uint64, value domain.AlertPolicy, audit domain.AuditEvent) error {
+	if err := store.Store.PutAlertPolicy(ctx, expected, value, audit); err != nil {
+		return err
+	}
+	return store.persist(ctx)
+}
+
 func (store *Store) PutNodeHealth(ctx context.Context, snapshot domain.NodeHealthSnapshot, events []domain.SystemEvent) error {
 	if err := store.Store.PutNodeHealth(ctx, snapshot, events); err != nil {
 		return err

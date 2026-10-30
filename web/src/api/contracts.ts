@@ -765,13 +765,25 @@ export interface AlertWebhookStatus {
   destination?: string;
 }
 
+export interface AlertPolicy {
+  triggerAfterSeconds: number;
+  resolveAfterSeconds: number;
+  routeEnabled: boolean;
+  minimumSeverity: "info" | "warning" | "critical";
+  kinds: Array<Alert["kind"]>;
+  silenceUntil?: string;
+  deliveryTargetSeconds: number;
+  revision: number;
+  updatedAt?: string;
+}
+
 export interface AlertDelivery {
   id: string;
   eventType: "alert.firing" | "alert.updated" | "alert.acknowledged" | "alert.resolved";
   alertId: string;
   alertRevision: number;
   alert: Alert;
-  state: "pending" | "retrying" | "delivered" | "failed";
+  state: "pending" | "retrying" | "delivered" | "failed" | "suppressed";
   attempts: number;
   responseStatus?: number;
   lastError?: string;
@@ -779,6 +791,8 @@ export interface AlertDelivery {
   nextAttemptAt?: string;
   lastAttemptAt?: string;
   deliveredAt?: string;
+  targetSeconds?: number;
+  policyRevision?: number;
 }
 
 export type ClusterBranding = {

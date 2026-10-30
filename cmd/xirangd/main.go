@@ -19,6 +19,7 @@ import (
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
 	"github.com/xirang-grid/xirang/internal/accounting"
 	"github.com/xirang-grid/xirang/internal/alerting"
+	"github.com/xirang-grid/xirang/internal/alertpolicy"
 	"github.com/xirang-grid/xirang/internal/backup"
 	"github.com/xirang-grid/xirang/internal/branding"
 	buildmanager "github.com/xirang-grid/xirang/internal/build"
@@ -257,8 +258,10 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	alertPolicyService := alertpolicy.New(state, alertpolicy.Defaults(*alertTriggerAfter, *alertResolveAfter))
 	notificationService, err := notification.NewService(alertStore, nil, notification.Config{
 		URL: *alertWebhookURL, Secret: webhookSecret, Timeout: *alertWebhookTimeout, MaxAttempts: *alertWebhookMaxAttempts,
+		Policy: alertPolicyService.Get,
 	})
 	if err != nil {
 		logger.Error("configure alert webhook", "error", err)
@@ -266,6 +269,7 @@ func main() {
 	}
 	alertService := alerting.NewService(alertStore, alerting.Config{
 		TriggerAfter: *alertTriggerAfter, ResolveAfter: *alertResolveAfter, RecordTransitions: notificationService.Enabled(),
+		Policy: alertPolicyService.Get,
 	})
 	authority, err := pki.OpenOrCreate(filepath.Join(*dataDirectory, "pki"), tlsHosts)
 	if err != nil {
@@ -423,8 +427,9 @@ func main() {
 	}
 	application := server.New(server.Config{
 		Address: *address, Logger: logger, AdminToken: adminToken,
-		Branding:   branding.New(state),
-		Enrollment: enrollmentService, JoinTokens: joinTokens, TLSConfig: tlsConfig, Commands: commandHub, NodeEvents: nodeEvents,
+		Branding:    branding.New(state),
+		AlertPolicy: alertPolicyService,
+		Enrollment:  enrollmentService, JoinTokens: joinTokens, TLSConfig: tlsConfig, Commands: commandHub, NodeEvents: nodeEvents,
 		Telemetry:          telemetryService,
 		HostHealth:         hostHealthService,
 		Topology:           topologyService,
@@ -614,6 +619,7 @@ func gracefulStopGRPC(ctx context.Context, server *grpc.Server) {
 type controlStore interface {
 	hosthealth.Repository
 	branding.Repository
+	alertpolicy.Repository
 	enrollment.Repository
 	scheduler.Repository
 	discovery.Repository

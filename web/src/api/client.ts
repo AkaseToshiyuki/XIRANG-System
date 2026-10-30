@@ -1,4 +1,4 @@
-import type { NodeHealthSnapshot, SystemEvent, BMCAction, ClusterBranding, AccessPrincipal, AccessRole, AccessSettings, Alert, AlertDelivery, AlertWebhookStatus, APIToken, BackupManifest, BillingRate, BuildCleanupResult, BuildRetentionPolicy, BuildWorker, ClusterJoinToken, ClusterNode, DiscoveryBootstrap, DiscoveryCandidate, DiscoveryScan, ElasticitySnapshot, Job, JobTemplate, LocalUser, NativeBuild, NodeFlowObservation, NodeInventorySnapshot, NodeResourceObservation, QueuePolicy, SharedFile, SharedSpace, SubmitJobRequest, TelemetryIntervalSettings, TopologySnapshot, UsageSummary, UserGroup, VersionInfo } from "./contracts";
+import type { AlertPolicy, NodeHealthSnapshot, SystemEvent, BMCAction, ClusterBranding, AccessPrincipal, AccessRole, AccessSettings, Alert, AlertDelivery, AlertWebhookStatus, APIToken, BackupManifest, BillingRate, BuildCleanupResult, BuildRetentionPolicy, BuildWorker, ClusterJoinToken, ClusterNode, DiscoveryBootstrap, DiscoveryCandidate, DiscoveryScan, ElasticitySnapshot, Job, JobTemplate, LocalUser, NativeBuild, NodeFlowObservation, NodeInventorySnapshot, NodeResourceObservation, QueuePolicy, SharedFile, SharedSpace, SubmitJobRequest, TelemetryIntervalSettings, TopologySnapshot, UsageSummary, UserGroup, VersionInfo } from "./contracts";
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -623,4 +623,12 @@ export function requestBMCAction(nodeID: string, action: string, token: string):
 }
 export function getBMCAction(nodeID: string, id: string, token: string, signal?: AbortSignal): Promise<BMCAction> {
  return requestJSON(`/api/v1/nodes/${encodeURIComponent(nodeID)}/health/actions/${encodeURIComponent(id)}`, { token, signal, label: "BMC action status" });
+}
+
+export function getAlertPolicy(token: string, signal?: AbortSignal): Promise<AlertPolicy> {
+  return requestJSON<AlertPolicy>("/api/v1/alert-policy", { token, signal, label: "Alert policy API" });
+}
+
+export function updateAlertPolicy(value: AlertPolicy, token: string): Promise<AlertPolicy> {
+  return requestJSON<AlertPolicy>("/api/v1/alert-policy", { token, method: "PUT", json: value, label: "Alert policy API" });
 }

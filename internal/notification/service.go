@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xirang-grid/xirang/internal/alertpolicy"
 	"github.com/xirang-grid/xirang/internal/domain"
 )
 
@@ -35,6 +36,7 @@ type Config struct {
 	MaxBackoff   time.Duration
 	MaxAttempts  int
 	BatchSize    int
+	Policy       func(context.Context) (domain.AlertPolicy, error)
 }
 
 type Service struct {
@@ -162,6 +164,23 @@ func (service *Service) DispatchDue(ctx context.Context) error {
 		return err
 	}
 	for _, delivery := range deliveries {
+		if service.config.Policy != nil {
+			policy, err := service.config.Policy(ctx)
+			if err != nil {
+				return err
+			}
+			delivery.PolicyRevision = policy.Revision
+			if delivery.TargetSeconds == 0 {
+				delivery.TargetSeconds = policy.DeliveryTargetSeconds
+			}
+			if reason := alertpolicy.SuppressionReason(policy, delivery.Alert, service.now().UTC()); reason != "" {
+				delivery.State, delivery.LastError, delivery.NextAttemptAt = domain.AlertDeliverySuppressed, reason, nil
+				if err := service.repository.PutDelivery(ctx, delivery); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		if err := service.dispatch(ctx, delivery); err != nil {
 			return err
 		}

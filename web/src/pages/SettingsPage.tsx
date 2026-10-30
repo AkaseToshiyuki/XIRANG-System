@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { getClusterBranding, updateClusterBranding } from "../api/client";
 import type { ClusterBranding } from "../api/contracts";
 import { usePreferences } from "../app/preferences";
+import { AlertPolicyForm } from "../components/AlertPolicyForm";
 
 export const defaultClusterBranding: ClusterBranding = { name: "XIRANG", logoDataUrl: "", revision: 0 };
 export const defaultClusterLogo = "/brand/xirang-mark.png";
@@ -72,5 +73,6 @@ export function SettingsPage({ token, onSaved }: { token: string; onSaved: (valu
       </form>
       <aside className="panel branding-preview"><h2>{t("显示预览", "Display preview")}</h2><div className="branding-preview-identity"><img src={draft.logoDataUrl || defaultClusterLogo} alt={t("集群 Logo 预览", "Cluster logo preview")} /><strong>{draft.name.trim() || "XIRANG"}</strong></div><p className="branding-help">{t("保存后生效。名称和 Logo 也会显示在公开的登录页。", "Changes take effect after saving. The name and logo also appear on the public sign-in page.")}</p></aside>
     </div>
+    <AlertPolicyForm token={token} />
   </section>;
 }

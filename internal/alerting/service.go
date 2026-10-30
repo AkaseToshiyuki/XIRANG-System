@@ -33,6 +33,7 @@ type Config struct {
 	TriggerAfter      time.Duration
 	ResolveAfter      time.Duration
 	RecordTransitions bool
+	Policy            func(context.Context) (domain.AlertPolicy, error)
 }
 
 type Service struct {
@@ -59,6 +60,15 @@ func (service *Service) Evaluate(ctx context.Context, snapshot domain.TopologySn
 	service.mu.Lock()
 	defer service.mu.Unlock()
 	now := service.now().UTC()
+	triggerAfter, resolveAfter := service.config.TriggerAfter, service.config.ResolveAfter
+	if service.config.Policy != nil {
+		policy, err := service.config.Policy(ctx)
+		if err != nil {
+			return nil, err
+		}
+		triggerAfter = time.Duration(policy.TriggerAfterSeconds * float64(time.Second))
+		resolveAfter = time.Duration(policy.ResolveAfterSeconds * float64(time.Second))
+	}
 	alerts, err := service.repository.List(ctx)
 	if err != nil {
 		return nil, err
@@ -93,7 +103,7 @@ func (service *Service) Evaluate(ctx context.Context, snapshot domain.TopologySn
 				alert.HealthySince = timePointer(now)
 			}
 			publish := false
-			if now.Sub(*alert.HealthySince) >= service.config.ResolveAfter {
+			if now.Sub(*alert.HealthySince) >= resolveAfter {
 				alert.Status = domain.AlertStatusResolved
 				alert.ResolvedAt = timePointer(now)
 				publish = true
@@ -121,7 +131,7 @@ func (service *Service) Evaluate(ctx context.Context, snapshot domain.TopologySn
 			alert.Revision++
 			publish = alert.Status != domain.AlertStatusPending && (alert.Severity != previousSeverity || alert.ObservedHealth != previousHealth)
 		}
-		if alert.Status == domain.AlertStatusPending && now.Sub(alert.FirstObservedAt) >= service.config.TriggerAfter {
+		if alert.Status == domain.AlertStatusPending && now.Sub(alert.FirstObservedAt) >= triggerAfter {
 			alert.Status = domain.AlertStatusFiring
 			alert.FiringAt = timePointer(now)
 			publish = true

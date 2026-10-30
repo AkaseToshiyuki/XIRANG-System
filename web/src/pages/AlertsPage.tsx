@@ -5,6 +5,7 @@ import { clockTime, formatBitRate, relativeTime } from "../lib/format";
 import { usePreferences } from "../app/preferences";
 
 type AlertView = "active" | "critical" | "history" | "all";
+const alertViews: AlertView[] = ["active", "critical", "history", "all"];
 
 export function AlertsPage({ token }: { token: string }) {
   const { refreshMs, t } = usePreferences();
@@ -106,6 +107,7 @@ export function AlertsPage({ token }: { token: string }) {
   const critical = alerts.filter((alert) => alert.status !== "resolved" && alert.severity === "critical").length;
   const acknowledged = alerts.filter((alert) => alert.status === "acknowledged").length;
   const resolved = alerts.filter((alert) => alert.status === "resolved").length;
+  const objectives = deliveryObjectives(deliveries, Date.now());
 
   async function acknowledge(alert: Alert) {
     setError("");
@@ -142,22 +144,29 @@ export function AlertsPage({ token }: { token: string }) {
       <div><span>{t("已恢复历史", "Recovery history")}</span><strong>{resolved}</strong><small>{t("可切换历史查看", "Available in history")}</small></div>
     </div>
 
-    <div className="alert-tabs" role="tablist" aria-label="Alert views">
-      {(["active", "critical", "history", "all"] as AlertView[]).map((item) => <button role="tab" aria-selected={view === item} className={view === item ? "active" : ""} key={item} type="button" onClick={() => setView(item)}>{viewLabel(item, t)}<span>{viewCount(item, alerts)}</span></button>)}
+    <div className="alert-tabs" role="tablist" aria-label={t("告警视图", "Alert views")}>
+      {alertViews.map((item, index) => <button role="tab" id={`alert-tab-${item}`} aria-controls="alert-results" tabIndex={view === item ? 0 : -1} aria-selected={view === item} className={view === item ? "active" : ""} key={item} type="button" onClick={() => setView(item)} onKeyDown={(event) => {
+        const next = event.key === "ArrowRight" ? (index + 1) % alertViews.length : event.key === "ArrowLeft" ? (index + alertViews.length - 1) % alertViews.length : event.key === "Home" ? 0 : event.key === "End" ? alertViews.length - 1 : -1;
+        if (next >= 0) { event.preventDefault(); setView(alertViews[next]); document.getElementById(`alert-tab-${alertViews[next]}`)?.focus(); }
+      }}>{viewLabel(item, t)}<span>{viewCount(item, alerts)}</span></button>)}
     </div>
     <div className={`webhook-status-line ${webhook.enabled ? "" : "webhook-status-line--disabled"}`}>
       <span><i /> WEBHOOK {webhook.enabled ? "ACTIVE" : "NOT CONFIGURED"}</span>
       <strong>{webhook.enabled ? webhook.destination : t("使用控制节点启动参数启用签名通知", "Enable signed notifications in the controller startup configuration")}</strong>
       {deliveries.some((delivery) => delivery.state === "failed") && <em>{t(`${deliveries.filter((delivery) => delivery.state === "failed").length} 条投递需要处理`, `${deliveries.filter((delivery) => delivery.state === "failed").length} deliveries require action`)}</em>}
     </div>
+    {deliveries.length > 0 && <div className="delivery-objective" aria-label={t("投递目标统计", "Delivery objective summary")}>
+      <strong>{objectives.evaluated ? `${Math.round(100 * objectives.onTime / objectives.evaluated)}%` : "—"}</strong> {t("目标内送达", "delivered within objective")} · {objectives.onTime}/{objectives.evaluated} · {t(`超时或失败 ${objectives.missed} 条，已抑制 ${objectives.suppressed} 条`, `${objectives.missed} late or failed, ${objectives.suppressed} suppressed`)}
+      <br />{t(`范围：最近 ${deliveries.length} 条记录（最多 200 条）；尚未到期 ${objectives.waiting} 条、未记录目标 ${objectives.unmeasured} 条不计入比例。`, `Scope: latest ${deliveries.length} records (up to 200); ${objectives.waiting} not yet due and ${objectives.unmeasured} without a recorded objective are excluded.`)}
+    </div>}
     {(error || deliveryError) && <p className="error-banner" role="alert">{error || deliveryError}</p>}
 
     <div className="alerts-workspace">
-      <div className="alert-feed" aria-live="polite">
+      <div className="alert-feed" id="alert-results" role="tabpanel" aria-labelledby={`alert-tab-${view}`} aria-live="polite">
         {visible.map((alert) => <article className={`alert-row alert-row--${alert.severity}${selectedID === alert.id ? " selected" : ""}`} key={alert.id} onClick={() => setSelectedID(alert.id)}>
           <div className="alert-severity-icon"><span>{alert.severity === "critical" ? "!" : alert.severity === "warning" ? "△" : "i"}</span></div>
           <div className="alert-main">
-            <div className="alert-title-line"><strong>{alertTitle(alert, t)}</strong><span className={`alert-status alert-status--${alert.status}`}>{statusLabel(alert.status, t)}</span></div>
+            <div className="alert-title-line"><button type="button" className="alert-select" aria-label={t(`查看告警：${alert.summary}`, `View alert: ${alert.summary}`)} onClick={() => setSelectedID(alert.id)}>{alertTitle(alert, t)}</button><span className={`alert-status alert-status--${alert.status}`}>{statusLabel(alert.status, t)}</span></div>
             <p>{alert.summary}</p>
             <div className="alert-context">{alert.sourceNodeId && <span>NODE <strong>{shortID(alert.sourceNodeId)}</strong></span>}<span>TYPE <strong>{kindLabel(alert.kind, t)}</strong></span>{alert.kind === "interface_health" && <><span>RATE <strong>{formatBitRate(alert.observedBits ?? 0)}</strong></span><span>DROP <strong>{formatRatio(alert.dropRatio)}</strong></span></>}{latestDeliveries.get(alert.id) && <span>WEBHOOK <strong className={`delivery-text--${latestDeliveries.get(alert.id)?.state}`}>{deliveryLabel(latestDeliveries.get(alert.id)!.state, t)}</strong></span>}</div>
           </div>
@@ -173,7 +182,7 @@ export function AlertsPage({ token }: { token: string }) {
 }
 
 function AlertInspector({ alert, delivery, webhook, onRetry, t }: { alert: Alert | null; delivery: AlertDelivery | null; webhook: AlertWebhookStatus; onRetry: (delivery: AlertDelivery) => void; t: (zh: string, en: string) => string }) {
-  if (!alert) return <aside className="alert-inspector alert-inspector--empty"><div className="inspector-symbol">◉</div><h2>{t("告警详情", "Alert details")}</h2><p>{t("选择一条告警查看指标、生命周期和处理状态。", "Select an alert to inspect metrics, lifecycle and handling status.")}</p><div className="policy-note"><span>{t("抑制策略", "Suppression policy")}</span><strong>{t("持续异常才触发", "Requires a sustained condition")}</strong><small>{t("触发和恢复窗口由控制节点启动参数配置。", "Firing and recovery windows are configured by controller startup parameters.")}</small></div></aside>;
+  if (!alert) return <aside className="alert-inspector alert-inspector--empty"><div className="inspector-symbol">◉</div><h2>{t("告警详情", "Alert details")}</h2><p>{t("选择一条告警查看指标、生命周期和处理状态。", "Select an alert to inspect metrics, lifecycle and handling status.")}</p><div className="policy-note"><span>{t("抑制策略", "Suppression policy")}</span><strong>{t("持续异常才触发", "Requires a sustained condition")}</strong><small>{t("管理员可在集群设置中调整触发、恢复与通知策略。", "Administrators can adjust trigger, recovery and notification policy in cluster settings.")}</small></div></aside>;
   return <aside className="alert-inspector">
     <h2>{alertTitle(alert, t)}</h2>
     <div className={`alert-detail-severity alert-detail-severity--${alert.severity}`}><i />{severityLabel(alert.severity, t)} · {statusLabel(alert.status, t)}</div>
@@ -217,4 +226,19 @@ function formatRatio(value?: number): string { if (value === undefined) return "
 function formatPacketRate(value?: number): string { if (value === undefined) return "—"; return `${value.toFixed(value >= 10 ? 0 : value >= 1 ? 1 : 2)} pkt/s`; }
 function duration(start: string, end: string, t: (zh: string, en: string) => string): string { const seconds = Math.max(0, (Date.parse(end) - Date.parse(start)) / 1000); return seconds < 60 ? t(`${seconds.toFixed(0)} 秒`, `${seconds.toFixed(0)} seconds`) : seconds < 3600 ? t(`${Math.floor(seconds / 60)} 分钟`, `${Math.floor(seconds / 60)} minutes`) : t(`${Math.floor(seconds / 3600)} 小时`, `${Math.floor(seconds / 3600)} hours`); }
 function shortID(value: string): string { return value.length > 20 ? `${value.slice(0, 17)}…` : value; }
-function deliveryLabel(state: AlertDelivery["state"], t: (zh: string, en: string) => string): string { return t(({ pending: "等待投递", retrying: "自动重试中", delivered: "已送达", failed: "投递失败" })[state], ({ pending: "Pending delivery", retrying: "Retrying", delivered: "Delivered", failed: "Delivery failed" })[state]); }
+function deliveryLabel(state: AlertDelivery["state"], t: (zh: string, en: string) => string): string { return t(({ pending: "等待投递", retrying: "自动重试中", delivered: "已送达", failed: "投递失败", suppressed: "已抑制" })[state], ({ pending: "Pending delivery", retrying: "Retrying", delivered: "Delivered", failed: "Delivery failed", suppressed: "Suppressed" })[state]); }
+
+function deliveryObjectives(deliveries: AlertDelivery[], now: number) {
+  let evaluated = 0, onTime = 0, missed = 0, suppressed = 0, waiting = 0, unmeasured = 0;
+  for (const delivery of deliveries) {
+    if (delivery.state === "suppressed") { suppressed++; continue; }
+    if (!delivery.targetSeconds || !Number.isFinite(Date.parse(delivery.createdAt))) { unmeasured++; continue; }
+    const deadline = Date.parse(delivery.createdAt) + delivery.targetSeconds * 1000;
+    if (delivery.state === "delivered" && delivery.deliveredAt) {
+      evaluated++;
+      if (Date.parse(delivery.deliveredAt) <= deadline) onTime++; else missed++;
+    } else if (delivery.state === "failed" || now >= deadline) { evaluated++; missed++; }
+    else waiting++;
+  }
+  return { evaluated, onTime, missed, suppressed, waiting, unmeasured };
+}
