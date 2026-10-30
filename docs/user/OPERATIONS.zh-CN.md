@@ -52,6 +52,29 @@ make ha-drill
 演练覆盖领导锁互斥、控制进程故障、数据库中断、状态连续性、损坏拒绝和
 dump/restore，但不代表已经验证独立电源、机架或交换机故障域。
 
+## 使用 Prometheus 留存数值历史
+
+认证接口 `/api/v1/metrics` 导出节点调度容量、资源用量、网络计数和可用的 CPU/GPU
+读数。先在身份管理创建可撤销的 **viewer** API 令牌，存入仅 Prometheus 服务身份
+可读的保护文件；配置控制器 CA 与证书包含的主机名。修改[抓取示例](../../examples/prometheus/xirang.yml)，
+再执行 `promtool check config /etc/prometheus/prometheus.yml` 验证。
+
+启动 Prometheus 时明确保留限制，例如
+`--storage.tsdb.retention.time=30d --storage.tsdb.retention.size=5GB`，查询接口默认
+只监听回环，需对外开放时单独设置认证。时间和容量先到者决定保留期，5GB 先满时
+不能保证 30 天。另行安排备份和剩余空间监控；XIRANG 不自动安装或配置该服务。
+
+可查询 `xirang_node_used_cpu_cores`、
+`time() - xirang_node_observation_received_timestamp_seconds` 和
+`xirang_node_observation_fresh == 0`，并在 Prometheus 选择时间范围查看历史。采样或
+接收时间缺失、在未来、或超过 180 秒时不再导出用量与传感器序列；配置容量可能仍
+存在。`up{job="xirang"} == 0` 表示抓取失败，包括认证或控制器存储故障，不表示用量为零。
+
+抓取不补写错过的样本，不复制系统日志，也不证明传感器精度；来源时间戳可区分
+重复读数和新采样。同机 Prometheus 不构成独立高可用。语法与保留选项见
+[配置参考](https://prometheus.io/docs/prometheus/latest/configuration/configuration/)及
+[存储说明](https://prometheus.io/docs/prometheus/latest/storage/)。
+
 ## 升级
 
 1. 使用 `SHA256SUMS` 校验安装包并创建恢复点。

@@ -68,6 +68,36 @@ The drill covers leadership exclusion, controller failure, database outage,
 state continuity, corruption rejection, and dump/restore. It does not simulate
 independent power, rack, or network failure domains.
 
+## Numerical history with Prometheus
+
+The authenticated `/api/v1/metrics` endpoint exposes node scheduling capacity,
+resource use, network counters and available CPU/GPU readings. Create a revocable
+**viewer** API token in identity management; store it in a protected file readable
+by the Prometheus service. Use the controller CA and a hostname in its certificate.
+Adapt [the scrape example](../../examples/prometheus/xirang.yml), then validate it
+with `promtool check config /etc/prometheus/prometheus.yml`.
+
+Choose explicit storage limits when starting your Prometheus service, for example
+`--storage.tsdb.retention.time=30d --storage.tsdb.retention.size=5GB`, and bind its
+query interface to loopback unless separately secured. The first reached limit
+controls retention, so 30 days is not guaranteed if the size limit fills earlier.
+Plan independent backup and free-disk monitoring; this service is not installed
+or configured automatically by XIRANG.
+
+Useful queries include `xirang_node_used_cpu_cores`,
+`time() - xirang_node_observation_received_timestamp_seconds`, and
+`xirang_node_observation_fresh == 0`. Graph a time range in Prometheus to inspect
+retained samples. Usage/sensor series disappear when the underlying observation
+or receipt is missing, future-dated or older than 180 seconds. Configured capacity
+may remain present. `up{job="xirang"} == 0` indicates a failed scrape, including
+authentication or controller storage failure, rather than zero resource use.
+
+Scrapes do not replay missed samples, replicate system logs, or prove sensor
+accuracy. The source timestamps distinguish repeated observations from new ones.
+Same-host Prometheus is not independent high availability. For syntax and storage
+options, see the [Prometheus configuration reference](https://prometheus.io/docs/prometheus/latest/configuration/configuration/)
+and [storage guidance](https://prometheus.io/docs/prometheus/latest/storage/).
+
 ## Upgrade
 
 1. Verify the release archive against `SHA256SUMS` and create a recovery point.

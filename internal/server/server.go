@@ -231,6 +231,12 @@ func New(config Config) *Server {
 	if config.Discovery != nil {
 		features = append(features, "allowlisted-node-discovery", "candidate-approval-bootstrap")
 	}
+	if config.Telemetry != nil && config.Enrollment != nil {
+		features = append(features, "authenticated-prometheus-metrics")
+	}
+	if config.AlertPolicy != nil {
+		features = append(features, "durable-alert-notification-policy")
+	}
 	if buildWorkerAvailable(config.Builds) {
 		features = append(features, "isolated-native-builds", "multi-step-native-builds", "signed-build-artifacts", "spdx-build-sbom", "rotatable-build-signing-key", "application-build-variant-routing")
 	}
@@ -287,6 +293,9 @@ func New(config Config) *Server {
 	}
 	if config.Telemetry != nil {
 		registerTelemetryRoutes(mux, config.Telemetry, config.AdminToken)
+		if config.Enrollment != nil {
+			registerMetricsRoutes(mux, config.Enrollment, config.Telemetry, config.AdminToken)
+		}
 	}
 	if config.Topology != nil {
 		registerTopologyRoutes(mux, config.Topology, config.Telemetry, config.AdminToken)

@@ -8,6 +8,20 @@ servers:
 security:
   - managementBearer: []
 paths:
+  /metrics:
+    get:
+      operationId: getPrometheusMetrics
+      summary: Authenticated Prometheus resource metrics using cluster.read permission
+      description: Fixed per-node metrics with observation and receipt timestamps. Usage metrics are omitted when either timestamp is missing, future-dated or older than 180 seconds. No host logs, arbitrary labels or task/user identities are exported. Storage errors or more than 10000 active node records fail the entire scrape.
+      responses:
+        "200":
+          description: Prometheus text exposition version 0.0.4 with no-store caching
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { description: Complete metrics snapshot unavailable }
   /alert-policy:
     get:
       operationId: getAlertPolicy
