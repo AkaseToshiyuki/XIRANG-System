@@ -65,6 +65,15 @@ func TestBrandingHealthAndActionsSynchronizeBeforeShutdown(t *testing.T) {
 			t.Fatal("health mutation did not sync")
 		}
 	})
+	if err := store.PutSystemEvents(ctx, "node", []domain.SystemEvent{{ID: "replayed", NodeID: "node", Kind: "corrected", ReceivedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	verify(func(recovered *boltstore.Store) {
+		items, err := recovered.ListSystemEvents(ctx, "node", "corrected", 10)
+		if err != nil || len(items) != 1 || items[0].ID != "replayed" {
+			t.Fatal("event batch did not synchronize before acknowledgement")
+		}
+	})
 	if err := store.AppendSystemNote(ctx, domain.SystemEvent{ID: "repair", NodeID: "node", Kind: "repair", ReceivedAt: now}, domain.AuditEvent{ID: "note"}); err != nil {
 		t.Fatal(err)
 	}

@@ -20,6 +20,7 @@ import (
 )
 
 const Capability = "host-health-v1"
+const OutboxCapability = "host-event-outbox-v1"
 const IdentifyCapability = "bmc-identify-v1"
 const MaxEvents = 256
 const MaxSensors = 256
@@ -32,6 +33,7 @@ var ErrUnavailable = errors.New("host health operation unavailable")
 
 type Repository interface {
 	PutNodeHealth(context.Context, domain.NodeHealthSnapshot, []domain.SystemEvent) error
+	PutSystemEvents(context.Context, string, []domain.SystemEvent) error
 	GetNodeHealth(context.Context, string) (domain.NodeHealthSnapshot, error)
 	ListSystemEvents(context.Context, string, string, int) ([]domain.SystemEvent, error)
 	AppendSystemNote(context.Context, domain.SystemEvent, domain.AuditEvent) error
@@ -87,15 +89,34 @@ func (service *Service) Report(ctx context.Context, nodeID string, report *xiran
 		seenSensors[sensor.Id] = true
 		snapshot.Sensors = append(snapshot.Sensors, domain.HardwareSensor{ID: sensor.Id, Name: sensor.Name, Source: sensor.Source, Value: sensor.Value, Available: sensor.Available, Unit: sensor.Unit, Status: sensor.Status, LowerCritical: sensor.LowerCritical, UpperCritical: sensor.UpperCritical})
 	}
-	events := make([]domain.SystemEvent, 0, len(report.Events))
-	for _, event := range report.Events {
+	events, err := validatedEvents(nodeID, report.Events, now)
+	if err != nil {
+		return err
+	}
+	return service.repository.PutNodeHealth(ctx, snapshot, events)
+}
+
+func (service *Service) CommitEvents(ctx context.Context, nodeID string, batch *xirangv1.HostEventBatch) error {
+	if !text(nodeID, 256) || batch == nil || !text(batch.BatchId, 128) || len(batch.Events) == 0 || len(batch.Events) > MaxEvents {
+		return ErrInvalid
+	}
+	events, err := validatedEvents(nodeID, batch.Events, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	return service.repository.PutSystemEvents(ctx, nodeID, events)
+}
+
+func validatedEvents(nodeID string, input []*xirangv1.SystemEvent, now time.Time) ([]domain.SystemEvent, error) {
+	events := make([]domain.SystemEvent, 0, len(input))
+	for _, event := range input {
 		if event == nil || (event.Source != "journal" && event.Source != "ipmi-sel") || !text(event.SourceRecordId, 1024) || !text(event.Message, 2048) || !bounded(event.Component, 256) || !knownKind(event.Kind) || event.Kind == "repair" || !severity(event.Severity) {
-			return ErrInvalid
+			return nil, ErrInvalid
 		}
 		value := domain.SystemEvent{NodeID: nodeID, Source: event.Source, SourceRecordID: event.SourceRecordId, Kind: event.Kind, Severity: event.Severity, Message: event.Message, Component: event.Component, ReceivedAt: now}
 		if event.OccurredAt != nil {
 			if event.OccurredAt.CheckValid() != nil || event.OccurredAt.AsTime().After(now.Add(24*time.Hour)) {
-				return ErrInvalid
+				return nil, ErrInvalid
 			}
 			at := event.OccurredAt.AsTime()
 			value.OccurredAt = &at
@@ -104,7 +125,7 @@ func (service *Service) Report(ctx context.Context, nodeID string, report *xiran
 		value.ID = hex.EncodeToString(digest[:])
 		events = append(events, value)
 	}
-	return service.repository.PutNodeHealth(ctx, snapshot, events)
+	return events, nil
 }
 
 func (service *Service) AddNote(ctx context.Context, nodeID, message, related string, actor domain.Principal) (domain.SystemEvent, error) {

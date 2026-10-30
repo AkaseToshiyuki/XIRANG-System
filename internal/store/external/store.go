@@ -525,6 +525,13 @@ func (store *Store) PutAlertPolicy(ctx context.Context, expected uint64, value d
 	return store.persist(ctx)
 }
 
+func (store *Store) PutSystemEvents(ctx context.Context, nodeID string, events []domain.SystemEvent) error {
+	if err := store.Store.PutSystemEvents(ctx, nodeID, events); err != nil {
+		return err
+	}
+	return store.persist(ctx)
+}
+
 func (store *Store) PutNodeHealth(ctx context.Context, snapshot domain.NodeHealthSnapshot, events []domain.SystemEvent) error {
 	if err := store.Store.PutNodeHealth(ctx, snapshot, events); err != nil {
 		return err

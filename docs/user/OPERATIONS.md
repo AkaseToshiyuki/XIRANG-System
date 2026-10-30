@@ -98,6 +98,22 @@ Same-host Prometheus is not independent high availability. For syntax and storag
 options, see the [Prometheus configuration reference](https://prometheus.io/docs/prometheus/latest/configuration/configuration/)
 and [storage guidance](https://prometheus.io/docs/prometheus/latest/storage/).
 
+## Host event queue
+
+The Agent state directory contains `health-outbox.db`, protected with mode 0600.
+Budget disk space beyond its 16 MiB payload bound for bbolt pages and indexes.
+Watch the node health sources for queue write/read failures, journal cursor gaps
+and cumulative eviction counts. A full or inaccessible state filesystem prevents
+safe cursor advancement. Restore capacity/access and let the Agent retry; do not
+clear the database to hide a warning. Source journal/SEL retention can still lose
+records before capture, and the controller's bounded event list is not an archive.
+
+Upgrade both endpoints to enable `host-event-outbox-v1`. An older controller cannot
+acknowledge the new queue. Preserve the database during rollback or backup, stopping
+the Agent before a file copy. Do not copy a node's database to another node or
+reuse it after enrollment changes the node ID. Preserve and explicitly retire the
+old database before re-enrollment; automatic deletion would discard evidence.
+
 ## Upgrade
 
 1. Verify the release archive against `SHA256SUMS` and create a recovery point.

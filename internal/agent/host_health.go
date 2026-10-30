@@ -40,6 +40,7 @@ type hostHealthCollector struct {
 	run             healthCommand
 	selListFailure  string
 	selListRetryAt  time.Time
+	journalState    *journalCheckpoint
 }
 
 func configuredHostHealth() *hostHealthCollector {
@@ -138,6 +139,8 @@ func (collector *hostHealthCollector) collect(ctx context.Context) *xirangv1.Hos
 	journal := &xirangv1.HealthSource{Name: "journal", Status: "unavailable", WindowSeconds: 86400, Limit: 128, Message: "journalctl is unavailable; no system journal was read"}
 	if collector.journalDisabled {
 		journal.Status, journal.Message = "disabled", "System event collection is disabled by host policy"
+	} else if collector.journal != "" && collector.journalState != nil {
+		report.Events, journal = collector.collectJournalIncremental(ctx)
 	} else if collector.journal != "" {
 		journal.Status, journal.Message = "available", "Rolling 24-hour window; at most 64 priority 0–4 records and 64 correction/recovery matches per collection"
 		base := []string{"--system", "--no-pager", "--output=json", "--reverse", "--lines=64", "--since=-24h", "--output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT,SYSLOG_IDENTIFIER,_TRANSPORT,_BOOT_ID"}

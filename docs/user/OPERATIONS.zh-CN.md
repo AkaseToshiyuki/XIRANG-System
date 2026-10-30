@@ -75,6 +75,18 @@ dump/restore，但不代表已经验证独立电源、机架或交换机故障�
 [配置参考](https://prometheus.io/docs/prometheus/latest/configuration/configuration/)及
 [存储说明](https://prometheus.io/docs/prometheus/latest/storage/)。
 
+## 主机事件队列
+
+Agent 状态目录中的 `health-outbox.db` 使用 0600 权限。除 16 MiB 事件内容上限，
+还需为 bbolt 页和索引预留空间。节点健康来源会显示队列读写失败、日志游标缺口和
+累计淘汰数。状态盘写满或无权限时不能安全前进游标；恢复容量/权限后允许 Agent
+重试，不要通过清空数据库隐藏警告。源 journal/SEL 在采集前仍可能丢失，控制器
+有界事件列表也不是完整归档。
+
+两端升级后才能协商 `host-event-outbox-v1`；旧控制器不能确认新队列。回滚或备份
+时保留数据库，复制文件前先停止 Agent。不得复制给另一节点或在节点 ID 变化后
+复用。重新登记前应保留并明确退役旧数据库，自动删除会丢弃证据。
+
 ## 升级
 
 1. 使用 `SHA256SUMS` 校验安装包并创建恢复点。

@@ -32,6 +32,7 @@ message AgentMessage {
     NativeBuildWorker native_build_worker = 21;
     NativeBuildUpdate native_build_update = 22;
     HostHealthReport host_health = 23;
+    HostEventBatch host_events = 24;
   }
 }
 
@@ -57,6 +58,7 @@ message ControlMessage {
     CancelNativeBuild cancel_native_build = 25;
     SetManagementPanel set_management_panel = 26;
     SetBMCIdentify set_bmc_identify = 27;
+    HostEventsCommitted host_events_committed = 28;
   }
 }
 
@@ -554,4 +556,16 @@ message NativeBuildStep {
 // identity; the command cannot redirect the relay to an arbitrary endpoint.
 message SetManagementPanel {
   bool enabled = 1;
+}
+
+// Negotiated separately as host-event-outbox-v1. Acknowledgement follows the
+// durable repository commit. Retries are deduplicated by authenticated node and
+// source record, and never replace the latest sensor snapshot.
+message HostEventBatch {
+  string batch_id = 1;
+  repeated SystemEvent events = 2;
+}
+
+message HostEventsCommitted {
+  string batch_id = 1;
 }

@@ -180,6 +180,10 @@ type NativeBuildReporter interface {
 	RemoveWorker(string)
 }
 
+type HostEventCommitter interface {
+	CommitEvents(context.Context, string, *xirangv1.HostEventBatch) error
+}
+
 type HostHealthReporter interface {
 	Report(context.Context, string, *xirangv1.HostHealthReport) error
 	ConfirmAction(context.Context, string, string, bool, string) error
@@ -381,10 +385,19 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 		}
 	}
 	negotiated := negotiateCapabilities(hello.Capabilities)
+	if _, ok := server.hostHealth.(HostEventCommitter); !ok {
+		filtered := negotiated[:0]
+		for _, capability := range negotiated {
+			if capability != hosthealth.OutboxCapability {
+				filtered = append(filtered, capability)
+			}
+		}
+		negotiated = filtered
+	}
 	if server.hostHealth == nil {
 		filtered := negotiated[:0]
 		for _, capability := range negotiated {
-			if capability != hosthealth.Capability && capability != hosthealth.IdentifyCapability {
+			if capability != hosthealth.Capability && capability != hosthealth.IdentifyCapability && capability != hosthealth.OutboxCapability {
 				filtered = append(filtered, capability)
 			}
 		}
@@ -621,6 +634,22 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 						return status.Error(codes.InvalidArgument, "resource observation is invalid")
 					}
 					return status.Error(codes.Unavailable, "persist resource observation")
+				}
+				continue
+			}
+			if batch := message.GetHostEvents(); batch != nil {
+				committer, ok := server.hostHealth.(HostEventCommitter)
+				if !ok || !hasCapability(negotiated, hosthealth.OutboxCapability) {
+					return status.Error(codes.InvalidArgument, "host event outbox was not negotiated")
+				}
+				if err := committer.CommitEvents(stream.Context(), nodeID, batch); err != nil {
+					if errors.Is(err, hosthealth.ErrInvalid) {
+						return status.Error(codes.InvalidArgument, "invalid host event batch")
+					}
+					return status.Error(codes.Unavailable, "persist host event batch")
+				}
+				if err := stream.Send(&xirangv1.ControlMessage{MessageId: "events_" + batch.BatchId, SentAt: timestamppb.Now(), Payload: &xirangv1.ControlMessage_HostEventsCommitted{HostEventsCommitted: &xirangv1.HostEventsCommitted{BatchId: batch.BatchId}}}); err != nil {
+					return err
 				}
 				continue
 			}
@@ -929,7 +958,7 @@ func negotiateCapabilities(offered []string) []string {
 	negotiated := make([]string, 0, 9)
 	for _, capability := range offered {
 		switch capability {
-		case hosthealth.Capability, hosthealth.IdentifyCapability, heartbeatCapability, nodeModeCapability, nativeExecutorCapability, cgroupExecutorCapability, certificateRotationCapability,
+		case hosthealth.Capability, hosthealth.IdentifyCapability, hosthealth.OutboxCapability, heartbeatCapability, nodeModeCapability, nativeExecutorCapability, cgroupExecutorCapability, certificateRotationCapability,
 			inventorySnapshotCapability, resourceObservationCapability, interfaceHealthCapability, topologyObservationCapability,
 			flowObservationCapability, assignmentLogCapability, deviceInventoryCapability, telemetryIntervalCapability,
 			networkPathProbeCapability, gangAssignmentCapability, mpiLaunchCapability, agentPTYCapability, remoteNativeBuildCapability,
