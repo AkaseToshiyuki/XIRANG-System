@@ -9,6 +9,7 @@ import (
 	"time"
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
+	"github.com/xirang-grid/xirang/internal/controlstream"
 	"github.com/xirang-grid/xirang/internal/domain"
 	"github.com/xirang-grid/xirang/internal/hosthealth"
 	"github.com/xirang-grid/xirang/internal/identity"
@@ -35,7 +36,7 @@ func TestHostHealthRoutesAreAdminOnlyAndLocatorHasAcknowledgement(t *testing.T) 
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	commands := &testCommandQueue{}
+	commands := controlstream.NewHub(4)
 	registerHostHealthRoutes(mux, service, healthTestNodes{}, commands, "admin")
 	handler := accessMiddleware(access, "admin", mux)
 	report := &xirangv1.HostHealthReport{ObservedAt: timestamppb.Now(), IdentifySupported: true}
@@ -69,6 +70,12 @@ func TestHostHealthRoutesAreAdminOnlyAndLocatorHasAcknowledgement(t *testing.T) 
 	}
 	if action.Status != "queued" {
 		t.Fatal("queued command was reported executed")
+	}
+	session := commands.Attach("node")
+	defer session.Detach()
+	queued, ok := session.Take()
+	if !ok || queued.MessageId != action.ID || queued.GetSetBmcIdentify() == nil || !queued.GetSetBmcIdentify().Enabled {
+		t.Fatalf("locator did not reach the real control queue: %v", queued)
 	}
 	if err := service.ConfirmAction(context.Background(), "different-node", action.ID, true, "ok"); err == nil {
 		t.Fatal("wrong node confirmed command")
