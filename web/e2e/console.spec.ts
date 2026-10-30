@@ -1,5 +1,6 @@
 import { expect, Page, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import AxeBuilder from "@axe-core/playwright";
 
 type Role = "admin" | "viewer" | "builder";
 type Language = "zh" | "en";
@@ -350,6 +351,27 @@ test("overview uses the topology bidirectional rate and the product title", asyn
   await page.getByRole("button", { name: "Network topology" }).click();
   const topologyRate = page.locator(".topology-metrics > div").filter({ hasText: "Aggregate bidirectional rate" });
   await expect(topologyRate.locator("strong")).toHaveText("18 Kbit/s");
+  const graph = page.getByRole("group", { name: "XIRANG node network topology" });
+  const node = graph.getByRole("button", { name: /^CTRL node-a / });
+  const link = graph.getByRole("button", { name: /^Link: node-a ↔ node-b / });
+  await node.focus();
+  await page.keyboard.press("Enter");
+  await expect(node).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".topology-inspector h2")).toHaveText("node-a");
+  await link.focus();
+  await page.keyboard.press("Space");
+  await expect(link).toHaveAttribute("aria-pressed", "true");
+  await expect(node).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator(".topology-inspector h2")).toHaveText("node-a ↔ node-b");
+  await expectAccessible(page);
+  await page.getByRole("combobox", { name: "Language", exact: true }).selectOption("zh");
+  await page.setViewportSize({ width: 390, height: 844 });
+  const chineseNode = page.getByRole("button", { name: /^NODE node-b / });
+  await chineseNode.focus();
+  await page.keyboard.press("Space");
+  await expect(page.locator(".topology-inspector h2")).toHaveText("node-b");
+  await expect(chineseNode).toHaveAttribute("aria-pressed", "true");
+  await expectAccessible(page);
 });
 
 test("unavailable nodes do not expose stale link rates or fallback claims", async ({ page }) => {
@@ -474,6 +496,7 @@ test("management role exposes panel state and a consistent role editor", async (
   await expect(page.getByText("Panel enabled")).toBeVisible();
   await page.locator(".action-menu summary").click();
   await page.getByRole("button", { name: "Roles, access and priority" }).click();
+  await expectAccessible(page);
   await expect(page.locator(".action-menu")).toHaveJSProperty("open", false);
   await expect(page.getByText("The management role exposes the XIRANG panel on port 8899 of this node", { exact: false })).toBeVisible();
   await expect(page.locator(".app-shell")).toHaveScreenshot("management-node-panel-dark.png", {
@@ -742,7 +765,7 @@ test("unavailable browser storage does not prevent sign-in or preferences", asyn
   await expect(page.getByRole("heading", { name: "Cluster overview", exact: true })).toBeVisible();
 });
 
-test("terminal remains connected when theme and telemetry interval change", async ({ page }) => {
+test("terminal remains connected when language, theme and telemetry interval change", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("xirang.language", "en"));
   await mockControlPlane(page, "admin");
   await page.route("**/api/v1/nodes", (route) => route.fulfill({ json: { items: [{ id: "node-test", name: "Worker", architecture: "amd64", status: "ready", capacity: { milliCpu: 4000, memoryBytes: 8000000000 } }] } }));
@@ -767,6 +790,12 @@ test("terminal remains connected when theme and telemetry interval change", asyn
   await page.getByPlaceholder("Enter a command and press Enter").fill("echo alive");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.locator(".terminal-output")).toContainText("echo alive");
+  await page.getByRole("combobox", { name: "Language", exact: true }).selectOption("zh");
+  await expect(page.locator(".terminal-output")).toContainText("echo alive");
+  await page.getByRole("combobox", { name: "语言", exact: true }).selectOption("en");
+  await page.getByPlaceholder("Enter a command and press Enter").fill("echo still-alive");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.locator(".terminal-output")).toContainText("echo still-alive");
   expect(connections).toBe(1);
   expect(closed).toBe(0);
 });
@@ -801,4 +830,119 @@ async function signInWithToken(page: Page) {
   await page.getByRole("button", { name: "Token", exact: true }).click();
   await page.getByLabel("Access token").fill("test-token");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
+}
+
+async function expectAccessible(page: Page, soft = false) {
+  const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
+  (soft ? expect.soft : expect)(results.violations.map((violation) => ({ rule: violation.id, targets: violation.nodes.map((node) => ({ target: node.target, detail: node.failureSummary })) }))).toEqual([]);
+}
+
+for (const language of ["en", "zh"] as const) {
+  test(`folder picker supports modal keyboard navigation in ${language}`, async ({ page }, testInfo) => {
+    await loginAsAdmin(page);
+    await page.route("**/api/v1/shared-spaces/share_test/files?*", (route) => {
+      const path = new URL(route.request().url()).searchParams.get("path");
+      return route.fulfill({ json: { items: path ? [] : [{ name: "research", path: "research", directory: true }, { name: "input.txt", path: "input.txt", directory: false }] } });
+    });
+    await page.getByRole("button", { name: "Native builds", exact: true }).click();
+    await page.getByRole("button", { name: "New build", exact: true }).click();
+    const zh = language === "zh";
+    if (zh) await page.getByRole("combobox", { name: "Language", exact: true }).selectOption("zh");
+    await page.setViewportSize({ width: 390, height: 844 });
+    const trigger = page.getByRole("button", { name: zh ? "源码相对路径" : "Source relative path", exact: true });
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: zh ? "选择文件夹" : "Select folder", exact: true });
+    const close = dialog.getByRole("button", { name: zh ? "关闭文件夹选择器" : "Close folder picker" });
+    const select = dialog.getByRole("button", { name: zh ? "选择当前文件夹" : "Select current folder" });
+    await expect(close).toBeFocused();
+    await expect(select).toBeEnabled();
+    await page.keyboard.press("Shift+Tab");
+    await expect(select).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(close).toBeFocused();
+    // Native modality keeps attempts to focus the background from escaping.
+    await trigger.evaluate((element) => (element as HTMLElement).focus());
+    await expect(close).toBeFocused();
+    await expect(dialog.getByRole("button", { name: "input.txt" })).toHaveCount(0);
+    await expectAccessible(page);
+    const box = await dialog.boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`picker-${language}-narrow.png`) });
+    await page.setViewportSize({ width: 320, height: 740 });
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().right <= 320)).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+    await page.keyboard.press("Enter");
+    await dialog.getByRole("button", { name: "research", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect(dialog.getByRole("status")).toHaveText(zh ? "此目录没有子文件夹" : "This folder has no subfolders");
+    await expect(dialog.locator("nav code")).toHaveText("/research");
+    await expect(dialog.getByRole("button", { name: zh ? "上一级" : "Parent" })).toBeFocused();
+    await select.focus();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole("textbox", { name: zh ? "源码相对路径" : "Source relative path", exact: true })).toHaveValue("research");
+    await expect(trigger).toBeFocused();
+    await page.keyboard.press("Enter");
+    await page.mouse.click(2, 2);
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  });
+}
+
+test("folder picker discards stale folder listings and reports failed navigation", async ({ page }) => {
+  await loginAsAdmin(page);
+  let releaseOld: () => void = () => {};
+  const oldResponse = new Promise<void>((resolve) => { releaseOld = resolve; });
+  let sawOld: () => void = () => {};
+  const requestedOld = new Promise<void>((resolve) => { sawOld = resolve; });
+  await page.route("**/api/v1/shared-spaces/share_test/files?*", async (route) => {
+    const path = new URL(route.request().url()).searchParams.get("path");
+    if (path === "research") { sawOld(); await oldResponse; return route.fulfill({ json: { items: [{ path: "research/stale", name: "stale", directory: true }] } }); }
+    if (path === "denied") return route.fulfill({ status: 403, json: { error: "Folder access denied" } });
+    return route.fulfill({ json: { items: [{ path: "research", name: "research", directory: true }, { path: "denied", name: "denied", directory: true }] } });
+  });
+  await page.getByRole("button", { name: "Native builds", exact: true }).click();
+  await page.getByRole("button", { name: "New build", exact: true }).click();
+  await page.getByRole("button", { name: "Source relative path", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "research", exact: true }).click();
+  await requestedOld;
+  await dialog.getByRole("button", { name: "Parent" }).click();
+  await expect(dialog.getByRole("button", { name: "research", exact: true })).toBeVisible();
+  releaseOld();
+  await expect(dialog.locator("nav code")).toHaveText("/");
+  await dialog.getByRole("button", { name: "denied", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Folder access denied");
+  await expect(dialog.getByRole("button", { name: "Select current folder" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "stale", exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+});
+
+for (const language of ["en", "zh"] as const) {
+  test(`console pages pass automated accessibility checks in ${language}`, async ({ page }) => {
+    test.setTimeout(120_000);
+    await loginAsAdmin(page);
+    await expect(page.locator(".sidebar nav button")).toHaveCount(14);
+    if (language === "zh") await page.getByRole("combobox", { name: "Language", exact: true }).selectOption("zh");
+    const navigation = page.locator(".sidebar nav button");
+    await navigation.first().focus();
+    await page.keyboard.press("Shift+Tab");
+    await expect(page.getByRole("link", { name: language === "zh" ? "跳到主要内容" : "Skip to main content" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("main")).toBeFocused();
+    for (let index = 0; index < 14; index += 1) {
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await navigation.nth(index).click();
+      await expect(page.locator("main h1")).toBeVisible();
+      await expectAccessible(page, true);
+      await page.setViewportSize({ width: 320, height: 740 });
+      expect.soft(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), `${await navigation.nth(index).getAttribute("aria-label")} overflows the narrow viewport`).toBe(true);
+    }
+  });
 }

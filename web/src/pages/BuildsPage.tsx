@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useId, useState } from "react";
 import { cancelBuild, cleanupBuilds, deleteBuild, downloadBuildSBOM, getBuildState, getNodes, submitBuild, updateBuildRetention, updateBuildRuntimeTargets } from "../api/client";
 import type { BuildRetentionPolicy, BuildWorker, ClusterNode, NativeBuild } from "../api/contracts";
 import { formatBytes, formatCoreCount, relativeTime } from "../lib/format";
@@ -150,7 +150,7 @@ function parseRuntimeRequirements(value: string): Record<string, string> {
   }
   return parsed as Record<string, string>;
 }
-function BuildPathField({ label, value, set, browse }: { label: string; value: string; set: (value: string) => void; browse: () => void }) { return <label><span>{label}</span><div className="build-path-input"><input value={value} onChange={(event) => set(event.target.value)} required /><button type="button" onClick={browse} aria-label={label}>◇</button></div></label>; }
+function BuildPathField({ label, value, set, browse }: { label: string; value: string; set: (value: string) => void; browse: () => void }) { const id = useId(); return <div className="build-path-field"><label htmlFor={id}>{label}</label><div className="build-path-input"><input id={id} value={value} onChange={(event) => set(event.target.value)} required /><button type="button" onClick={browse} aria-label={label}>◇</button></div></div>; }
 function BuildArea({ label, value, set }: { label: string; value: string; set: (value: string) => void }) { return <label><span>{label}</span><textarea value={value} onChange={(event) => set(event.target.value)} rows={4} required /></label>; }
 function BuildSelect({ label, value, options, set, placeholder = "Select", required = true }: { label: string; value: string; options: string[]; set: (value: string) => void; placeholder?: string; required?: boolean }) { return <label><span>{label}</span><select value={value} onChange={(event) => set(event.target.value)} required={required}><option value="">{placeholder}</option>{options.map((option) => <option value={option} key={option}>{option}</option>)}</select></label>; }
 type WorkerToolchain = { name: string; version?: string; targetArchitectures: string[]; executables?: string[] };

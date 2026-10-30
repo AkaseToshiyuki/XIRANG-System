@@ -25,6 +25,10 @@ XIRANG；这些组件继续适用各自的许可证。
 Open Font License 1.1 和 CC-BY-4.0 的软件包。它们用于生成静态 Web 资源，
 不会作为 XIRANG 服务安装。
 
+可访问性测试使用 MPL-2.0 的 `@axe-core/playwright` 4.11.1 与锁定的
+`axe-core` 4.11.4。这些未修改的开发工具不会被应用导入，也不进入原生发行包；
+其上游软件包保留许可证和第三方声明。
+
 原生发行包会把本次构建实际使用的依赖许可证和声明文件收集到
 `share/licenses`。源码分发保留 `go.sum` 和 `web/package-lock.json`，作为依赖
 精确版本记录。

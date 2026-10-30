@@ -26,6 +26,11 @@ The locked Web toolchain also contains packages under MIT, Apache-2.0, ISC,
 BSD-3-Clause, SIL Open Font License 1.1, and CC-BY-4.0 terms. It is used to
 produce the static Web bundle and is not installed as an XIRANG service.
 
+Accessibility tests use `@axe-core/playwright` 4.11.1 and the locked `axe-core`
+4.11.4 under MPL-2.0. These unmodified development tools are not imported by
+the application or included in native release bundles. Their upstream packages
+retain their licenses and third-party notices.
+
 Native release archives include the exact license and notice files collected
 from the dependency versions used for that build under `share/licenses`.
 Source distributions retain `go.sum` and `web/package-lock.json` as the exact

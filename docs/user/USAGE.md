@@ -34,6 +34,15 @@ future registrations or leave it unset. Changing the setting never rewrites
 existing memberships. XIRANG accounts are control-plane identities and do not
 create Linux users on cluster nodes.
 
+## Keyboard and language controls
+
+Use Tab and Shift+Tab to move between controls. The first link after sign-in
+skips navigation and focuses the main content. In the topology graph, Enter or
+Space selects the focused node or link. The folder picker keeps focus inside the
+modal; Escape, Cancel or the close button returns to its opener. Entering a
+subfolder focuses Parent, and returning to the root focuses the storage selector.
+Changing language preserves the current page, form draft and terminal connection.
+
 ## Cluster settings
 
 Administrators can edit the cluster display name and logo in the separate **Cluster

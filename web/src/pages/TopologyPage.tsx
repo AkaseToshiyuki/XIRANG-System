@@ -112,11 +112,11 @@ export function TopologyPage({ token }: { token: string }) {
       <div className="topology-workspace">
         <div className="topology-stage">
           <div className="graph-toolbar graph-toolbar--managed"><span><i className="graph-key graph-key--healthy" />{t("连接正常", "Healthy")}</span><span><i className="graph-key graph-key--attention" />{t("节点受限", "Node restricted")}</span><span><i className="graph-key graph-key--offline" />{t("连接不可用", "Unavailable")}</span><small>{t("选择连接可查看两个方向对应的节点与速率", "Select a link to inspect both directions and rates")}</small></div>
-          <svg className="topology-graph" viewBox="0 0 960 540" role="img" aria-label={t("XIRANG 节点网络拓扑", "XIRANG node network topology")}>
+          <svg className="topology-graph" viewBox="0 0 960 540" role="group" aria-label={t("XIRANG 节点网络拓扑", "XIRANG node network topology")}>
             {links.map((link) => {
               const source = positions[link.source.id], target = positions[link.target.id];
               const midpoint = { x: (source.x + target.x) / 2, y: (source.y + target.y) / 2 };
-              return <g key={link.id} className={selectedLink?.id === link.id ? "graph-edge-group selected" : "graph-edge-group"} onClick={() => setSelection({ kind: "link", id: link.id })}>
+              return <g key={link.id} className={selectedLink?.id === link.id ? "graph-edge-group selected" : "graph-edge-group"} role="button" tabIndex={0} aria-label={`${t(`连接：${link.source.name} ↔ ${link.target.name}`, `Link: ${link.source.name} ↔ ${link.target.name}`)} ↑ ${formatLinkRate(link, link.forwardBits, t)} · ↓ ${formatLinkRate(link, link.reverseBits, t)} ${negotiatedLabel(link, t, t("协商", "Negotiated"))}${link.fallback === "none" ? "" : ` ${link.fallback === "active" ? t("主链路失效", "Primary link failed") : fallbackAvailableLabel(link.fallbackInterfaces.length, t)}`}`} aria-pressed={selectedLink?.id === link.id} onClick={() => setSelection({ kind: "link", id: link.id })} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelection({ kind: "link", id: link.id }); } }}>
                 <line className="graph-edge-hitbox" x1={source.x} y1={source.y} x2={target.x} y2={target.y} />
                 <line className={`graph-edge graph-edge--managed graph-edge--managed-${link.health}`} style={{ strokeWidth: edgeStrokeWidth((link.forwardBits ?? 0) + (link.reverseBits ?? 0)) }} x1={source.x} y1={source.y} x2={target.x} y2={target.y} />
                 <text className="graph-link-rate" x={midpoint.x} y={midpoint.y - 15} textAnchor="middle">↑ {formatLinkRate(link, link.forwardBits, t)} · ↓ {formatLinkRate(link, link.reverseBits, t)}</text>
@@ -127,7 +127,7 @@ export function TopologyPage({ token }: { token: string }) {
             {nodes.map((node) => {
               const position = positions[node.id];
               const management = effectiveRoles(node).includes("management");
-              return <g className={`graph-vertex graph-vertex--managed graph-vertex--state-${nodeVisualState(node)}${selectedNode?.id === node.id ? " selected" : ""}`} key={node.id} transform={`translate(${position.x} ${position.y})`} role="button" tabIndex={0} onClick={() => setSelection({ kind: "node", id: node.id })}>
+              return <g className={`graph-vertex graph-vertex--managed graph-vertex--state-${nodeVisualState(node)}${selectedNode?.id === node.id ? " selected" : ""}`} key={node.id} transform={`translate(${position.x} ${position.y})`} role="button" tabIndex={0} aria-label={`${management ? "CTRL" : "NODE"} ${node.name} ${roleText(node, t)}`} aria-pressed={selectedNode?.id === node.id} onClick={() => setSelection({ kind: "node", id: node.id })} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelection({ kind: "node", id: node.id }); } }}>
                 <circle className="graph-vertex-halo" r="39" /><circle r="27" /><text textAnchor="middle" y="3">{management ? "CTRL" : "NODE"}</text>
                 <text className="graph-label" textAnchor="middle" y="48">{node.name}</text>
                 <text className="graph-node-rate" textAnchor="middle" y="61">{roleText(node, t)}</text>
