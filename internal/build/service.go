@@ -380,10 +380,10 @@ func (service *Service) execute(ctx context.Context, build domain.Build, source,
 				if runErr != nil {
 					build.Status, build.Failure = domain.BuildStatusFailed, bounded(runErr.Error(), 4096)
 				} else if publish != "" {
-					if publishErr := publishBuildOutput(filepath.Join(service.artifactRoot, build.ID, filepath.Base(build.Recipe.OutputPath)), publish); publishErr != nil {
+					if publishErr := service.publishBuildOutput(filepath.Join(service.artifactRoot, build.ID, filepath.Base(build.Recipe.OutputPath)), publish); publishErr != nil {
 						build.Status, build.Failure = domain.BuildStatusFailed, bounded(publishErr.Error(), 4096)
 					} else if build.Recipe.Application != "" {
-						publishErr := publishBuildOutput(filepath.Join(service.artifactRoot, build.ID, filepath.Base(build.Recipe.OutputPath)+".spdx.json"), publish+".spdx.json")
+						publishErr := service.publishBuildOutput(filepath.Join(service.artifactRoot, build.ID, filepath.Base(build.Recipe.OutputPath)+".spdx.json"), publish+".spdx.json")
 						if publishErr != nil {
 							build.Status, build.Failure = domain.BuildStatusFailed, bounded(publishErr.Error(), 4096)
 						} else {
@@ -842,42 +842,6 @@ func normalizeRuntimeNodeIDs(values []string) ([]string, error) {
 	}
 	sort.Strings(result)
 	return result, nil
-}
-
-func publishBuildOutput(source, destination string) error {
-	info, err := os.Stat(source)
-	if err != nil || !info.Mode().IsRegular() {
-		return errors.New("declared build output cannot be published")
-	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o770); err != nil {
-		return err
-	}
-	input, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer input.Close()
-	output, err := os.CreateTemp(filepath.Dir(destination), "."+filepath.Base(destination)+".xirang-*")
-	if err != nil {
-		return err
-	}
-	temporary := output.Name()
-	if err := output.Chmod(0o550); err != nil {
-		_ = output.Close()
-		_ = os.Remove(temporary)
-		return err
-	}
-	_, copyErr := io.Copy(output, input)
-	closeErr := output.Close()
-	if copyErr != nil {
-		_ = os.Remove(temporary)
-		return copyErr
-	}
-	if closeErr != nil {
-		_ = os.Remove(temporary)
-		return closeErr
-	}
-	return os.Rename(temporary, destination)
 }
 
 func (service *Service) finalizeArtifact(build domain.Build, workspace string, expectedDigests ...string) (domain.BuildArtifact, error) {

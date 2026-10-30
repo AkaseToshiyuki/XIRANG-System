@@ -19,6 +19,7 @@ import (
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
 	"github.com/xirang-grid/xirang/internal/domain"
 	"github.com/xirang-grid/xirang/internal/flow"
+	"github.com/xirang-grid/xirang/internal/hosthealth"
 	"github.com/xirang-grid/xirang/internal/pki"
 	"github.com/xirang-grid/xirang/internal/telemetry"
 	"github.com/xirang-grid/xirang/internal/topology"
@@ -179,7 +180,13 @@ type NativeBuildReporter interface {
 	RemoveWorker(string)
 }
 
+type HostHealthReporter interface {
+	Report(context.Context, string, *xirangv1.HostHealthReport) error
+	ConfirmAction(context.Context, string, string, bool, string) error
+}
+
 type Server struct {
+	hostHealth HostHealthReporter
 	xirangv1.UnimplementedAgentControlServer
 	nodes             NodeHeartbeater
 	heartbeatInterval time.Duration
@@ -195,6 +202,10 @@ type Server struct {
 	intervalMu        sync.RWMutex
 	telemetryInterval time.Duration
 	intervalPath      string
+}
+
+func (server *Server) SetHostHealthReporter(reporter HostHealthReporter) {
+	server.hostHealth = reporter
 }
 
 func (server *Server) SetFlowReporter(reporter FlowReporter) {
@@ -370,6 +381,15 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 		}
 	}
 	negotiated := negotiateCapabilities(hello.Capabilities)
+	if server.hostHealth == nil {
+		filtered := negotiated[:0]
+		for _, capability := range negotiated {
+			if capability != hosthealth.Capability && capability != hosthealth.IdentifyCapability {
+				filtered = append(filtered, capability)
+			}
+		}
+		negotiated = filtered
+	}
 	if !hasCapability(negotiated, heartbeatCapability) {
 		return status.Error(codes.FailedPrecondition, "heartbeat-v1 capability is required")
 	}
@@ -477,6 +497,10 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 			}
 			if command.GetRunNativeBuild() != nil && !hasCapability(negotiated, remoteNativeBuildCapability) {
 				_, _ = session.Acknowledge(command.MessageId)
+				continue
+			}
+			if command.GetSetBmcIdentify() != nil && !hasCapability(negotiated, hosthealth.IdentifyCapability) {
+				session.Acknowledge(command.MessageId)
 				continue
 			}
 			if command.GetSetManagementPanel() != nil && !hasCapability(negotiated, managementPanelCapability) {
@@ -600,6 +624,18 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 				}
 				continue
 			}
+			if report := message.GetHostHealth(); report != nil {
+				if !hasCapability(negotiated, hosthealth.Capability) || server.hostHealth == nil {
+					return status.Error(codes.InvalidArgument, "host health was not negotiated")
+				}
+				if err := server.hostHealth.Report(stream.Context(), nodeID, report); err != nil {
+					if errors.Is(err, hosthealth.ErrInvalid) {
+						return status.Error(codes.InvalidArgument, "invalid host health report")
+					}
+					return status.Error(codes.Unavailable, "persist host health report")
+				}
+				continue
+			}
 			if observation := message.GetTopology(); observation != nil {
 				if !hasCapability(negotiated, topologyObservationCapability) {
 					return status.Error(codes.InvalidArgument, "topology observations were not negotiated")
@@ -671,7 +707,15 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 				if !ok {
 					continue
 				}
-				if command.GetSetNodeMode() != nil {
+				if command.GetSetBmcIdentify() != nil {
+					if server.hostHealth == nil {
+						return status.Error(codes.Unavailable, "BMC action persistence unavailable")
+					}
+					if err := server.hostHealth.ConfirmAction(stream.Context(), nodeID, acknowledgement.CommandMessageId, acknowledgement.Accepted, acknowledgement.Reason); err != nil {
+						_ = server.hub.Enqueue(nodeID, command)
+						return status.Error(codes.Unavailable, "persist BMC acknowledgement")
+					}
+				} else if command.GetSetNodeMode() != nil {
 					confirmer, ok := server.nodes.(NodeModeConfirmer)
 					if !ok {
 						_ = server.hub.Enqueue(nodeID, command)
@@ -885,7 +929,7 @@ func negotiateCapabilities(offered []string) []string {
 	negotiated := make([]string, 0, 9)
 	for _, capability := range offered {
 		switch capability {
-		case heartbeatCapability, nodeModeCapability, nativeExecutorCapability, cgroupExecutorCapability, certificateRotationCapability,
+		case hosthealth.Capability, hosthealth.IdentifyCapability, heartbeatCapability, nodeModeCapability, nativeExecutorCapability, cgroupExecutorCapability, certificateRotationCapability,
 			inventorySnapshotCapability, resourceObservationCapability, interfaceHealthCapability, topologyObservationCapability,
 			flowObservationCapability, assignmentLogCapability, deviceInventoryCapability, telemetryIntervalCapability,
 			networkPathProbeCapability, gangAssignmentCapability, mpiLaunchCapability, agentPTYCapability, remoteNativeBuildCapability,

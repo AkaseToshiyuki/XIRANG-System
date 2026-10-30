@@ -34,6 +34,66 @@ future registrations or leave it unset. Changing the setting never rewrites
 existing memberships. XIRANG accounts are control-plane identities and do not
 create Linux users on cluster nodes.
 
+## Cluster settings
+
+Administrators can edit the cluster display name and logo in the separate **Cluster
+settings** page. Names contain 1–64 characters. Upload a PNG/JPEG up to 512 KiB and
+2048 × 2048 pixels, preview it, save, or restore the defaults. The current sidebar,
+sign-in page and browser title update after saving; other open pages update on
+focus or within one minute. This presentation data is visible before sign-in. It
+does not rename node identities, certificates or protocol identifiers.
+
+Settings are saved and backed up with the controller database and synchronized
+through external PostgreSQL state. Stale concurrent updates are rejected; reload
+before editing again. Regular users have neither the settings entry nor write
+permission on its API.
+
+## System health and BMC
+
+Administrators can select a node in **System health** to inspect source status,
+BMC sensors, system errors, hardware-corrected events, recovery observations and
+operator maintenance records. The Agent collects independently every 60 seconds.
+Older Agents without negotiated `host-health-v1` do not report this data. Missing,
+failed, stale and partial observations are explicit.
+
+- Linux journal collection is automatic: a rolling 24-hour window with up to 64
+  priority 0–4 entries and 64 correction/recovery keyword matches per collection.
+  It requires `journalctl` and access to the system journal. Windows Event Log,
+  OpenRC syslog, the full rasdaemon database and lossless history are not included.
+- An installed `ipmitool` and local IPMI device enable automatic detection;
+  `XIRANG_IPMI_TOOL` can explicitly configure the Agent tool. Up to 256 sensor
+  readings retain their units, states, critical thresholds and reported numerical
+  precision. Decimal places do not establish measurement accuracy; unavailable
+  readings are not fabricated.
+- SEL queries request the latest 128 entries and report full/overflowed logs. If
+  listing times out before returning records, a bounded direct query attempts to
+  read the latest standard event; coverage is then marked partial, with older
+  records missing. No log is cleared. BMC clock/timezone is not independently
+  calibrated: original date/time remains in the message and receipt time is used
+  for ordering. This channel cannot collect while the host or Agent is down.
+- Each node retains up to 2,000 events for 30 days from first receipt. Source records
+  are deduplicated. Older events, bursts and long outages can leave gaps. Automatic
+  classification is a clue; inspect the original message.
+- Neither a hardware correction nor a recovery observation proves root-cause
+  repair. Administrators can append maintenance records with actor/time and an
+  optional link to an original event. Original events remain intact.
+
+Remote BMC access requires a numeric `XIRANG_BMC_HOST` address, `XIRANG_BMC_USERNAME`,
+an absolute `XIRANG_BMC_PASSWORD_FILE`, and an explicit tool path in the Agent
+environment. The password file must be a regular file owned by the Agent user
+with mode 0600. Connections use IPMI v2 `lanplus` and cipher suite 17; the password
+does not enter the Web console or command-line arguments. See the
+[Agent environment example](../../deploy/config/xirang-agent.env.example).
+Existing Redfish support remains a CPU-temperature fallback from a configured
+HTTPS Thermal endpoint, rather than full Redfish management.
+
+Locator control requires host opt-in with `XIRANG_BMC_ALLOW_IDENTIFY=true`. Console
+administrators may request a 120-second light or turn it off. Commands have expiry,
+replay records and auditing; the UI distinguishes queued, acknowledged, failed and
+unknown outcomes. BMC acknowledgement does not replace physical LED verification.
+Power changes, reboot, fan control, threshold writes, raw IPMI and SEL clearing are
+not exposed. Monitoring does not repair or alter hardware automatically.
+
 ## Enroll a node
 
 An administrator can enroll a waiting Agent from the Nodes page:

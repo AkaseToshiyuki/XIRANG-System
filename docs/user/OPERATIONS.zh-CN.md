@@ -68,6 +68,36 @@ systemd 主机升级后应检查 `/etc/xirang/shared-write-paths.d`，并重启�
 构建签名密钥应独立轮换：先把新公钥部署到 Agent，再启用新签名私钥；旧编译
 产物不再使用后，才移除旧公钥。
 
+## 共享目录的宿主机访问
+
+旧版导出辅助程序和安装器会将共享根目录改成 `xirang-task:xirang-task`、`0770`。
+升级后不会再覆盖这些权限，但无法自动还原原属主、属组和 ACL。应在存储宿主机上
+根据已有备份或管理员确定的策略恢复，再使用新版辅助程序补充集群权限：
+
+```bash
+sudo /usr/local/bin/xirang-agent mount-helper prepare share_default /srv/xirang/XirangShare
+getfacl -p /srv/xirang/XirangShare
+```
+
+若站点明确允许所有本地用户列出并进入共享根目录，可先备份该目录的 ACL，再只
+授予这两项权限：
+
+```bash
+umask 077
+sudo getfacl -p /srv/xirang/XirangShare > shared-root.before.acl
+sudo setfacl -n -m o::r-x /srv/xirang/XirangShare
+```
+
+自定义共享请换成实际源路径。该命令不开放所有用户写入，也不递归修改内部文件。
+单独的用户 ACL 仍可能限制对应用户，应通过 `getfacl` 检查；需要写入的宿主机用户组
+应按站点策略单独授权。ACL 掩码会共同影响具名用户和用户组，调整时应核对有效权限，
+参见 [ACL 工具说明](https://man7.org/linux/man-pages/man1/setfacl.1.html)。不要通过
+递归 chown/chmod 修复共享根目录。内部文件及 Web 创建的内容仍遵循各自权限和默认
+ACL。已处于 active 状态的共享不会仅因升级而重新导出，恢复本地策略后应执行 `prepare`。
+
+如需撤回这次 ACL 调整，可在其他元数据变更前执行
+`sudo setfacl --restore=shared-root.before.acl`，再核对宿主机和集群访问。
+
 ## 回滚
 
 停止所有控制节点，恢复由旧版本创建的恢复点，安装匹配的旧版原生包，再启动一个

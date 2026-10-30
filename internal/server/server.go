@@ -13,8 +13,10 @@ import (
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
 	"github.com/xirang-grid/xirang/internal/backup"
+	"github.com/xirang-grid/xirang/internal/branding"
 	"github.com/xirang-grid/xirang/internal/domain"
 	"github.com/xirang-grid/xirang/internal/enrollment"
+	"github.com/xirang-grid/xirang/internal/hosthealth"
 	"github.com/xirang-grid/xirang/internal/identity"
 	"github.com/xirang-grid/xirang/internal/scheduler"
 	"github.com/xirang-grid/xirang/internal/terminal"
@@ -152,6 +154,8 @@ type TelemetryIntervalManager interface {
 }
 
 type Config struct {
+	HostHealth         *hosthealth.Service
+	Branding           *branding.Service
 	Address            string
 	Logger             *slog.Logger
 	Enrollment         *enrollment.Service
@@ -193,6 +197,12 @@ func New(config Config) *Server {
 		logger = slog.Default()
 	}
 	mux := http.NewServeMux()
+	if config.HostHealth != nil {
+		registerHostHealthRoutes(mux, config.HostHealth, config.Enrollment, config.Commands, config.AdminToken)
+	}
+	if config.Branding != nil {
+		registerBrandingRoutes(mux, config.Branding, config.AdminToken)
+	}
 	features := []string{
 		"health", "version", "native-host-inventory", "node-enrollment", "mtls-node-identity",
 		"node-heartbeat", "certificate-rotation", "certificate-revocation", "audit-events", "agent-control-stream",

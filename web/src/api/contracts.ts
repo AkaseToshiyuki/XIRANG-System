@@ -780,3 +780,15 @@ export interface AlertDelivery {
   lastAttemptAt?: string;
   deliveredAt?: string;
 }
+
+export type ClusterBranding = {
+  name: string;
+  logoDataUrl: string;
+  revision: number;
+  updatedAt?: string;
+};
+
+export type HardwareSensor = { id: string; name: string; source: string; value: number; available: boolean; unit: string; status: string; lowerCritical?: number; upperCritical?: number };
+export type NodeHealthSnapshot = { nodeId: string; observedAt: string; receivedAt: string; sources: Array<{ name: string; status: string; message?: string; windowSeconds?: number; limit?: number }>; sensors: HardwareSensor[]; chassisPower: string; identifySupported: boolean };
+export type SystemEvent = { id: string; nodeId: string; source: string; sourceRecordId?: string; kind: string; severity: string; message: string; component?: string; occurredAt?: string; receivedAt: string; actor?: string; relatedEventId?: string };
+export type BMCAction = { id: string; nodeId: string; action: string; actor: string; status: string; message?: string; createdAt: string; completedAt?: string };

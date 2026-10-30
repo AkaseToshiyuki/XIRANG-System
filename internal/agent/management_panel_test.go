@@ -7,8 +7,41 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestManagementPanelRecoversAfterLateLocalAddressAndListenerChanges(t *testing.T) {
+	panel := &ManagementPanel{status: "disabled"}
+	local, listening := false, true
+	refresh := func() {
+		panel.refreshControllerLocked(func(State) bool { return local }, func() bool { return listening })
+	}
+	refresh()
+	if panel.external || panel.status != "disabled" {
+		t.Fatal("an unrelated listener was advertised as our controller")
+	}
+	local = true // The overlay interface received its address after Agent startup.
+	refresh()
+	if !panel.external || panel.status != "controller" {
+		t.Fatal("late local controller was never detected")
+	}
+	listening = false
+	refresh()
+	if panel.external || !strings.Contains(panel.status, "unavailable") {
+		t.Fatal("departed controller kept a stale enabled state")
+	}
+	listening = true
+	refresh()
+	if !panel.external || panel.status != "controller" {
+		t.Fatal("restarted controller was not detected")
+	}
+	local = false
+	refresh()
+	if panel.external || panel.status != "disabled" {
+		t.Fatal("removed local address kept a stale enabled state")
+	}
+}
 
 func TestManagementPanelCertificateContainsLocalHostname(t *testing.T) {
 	directory := t.TempDir()

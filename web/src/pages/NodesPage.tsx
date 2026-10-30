@@ -243,8 +243,9 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
         const cpu = resource ? percentage(resource.latest.usedMilliCpu, node.capacity.milliCpu) : 0;
         const memory = resource ? percentage(resource.latest.usedMemoryBytes, node.capacity.memoryBytes) : 0;
         const accelerators = resource?.latest.accelerators ?? [];
+        const panelState = managementPanelState(node, t);
         return <Fragment key={node.id}><div className="nodes-table__row" role="row">
-          <span className="node-name-cell"><i className={`state-dot state-dot--${node.status}`} /><span><strong>{node.name}</strong><small title={node.id}>{shortID(node.id)}</small><span className="node-role-list">{effectiveRoles(node).map((role) => <i key={role}>{roleLabel(role, t)}</i>)}</span>{node.roles?.includes("management") && <small className={node.managementPanelEnabled ? "management-panel-state management-panel-state--ready" : "management-panel-state"}>{node.pendingManagementCommandId ? t("控制面板切换中", "Panel transitioning") : node.managementPanelEnabled ? t("控制面板已启用", "Panel enabled") : t("控制面板未就绪", "Panel unavailable")}</small>}</span></span>
+          <span className="node-name-cell"><i className={`state-dot state-dot--${node.status}`} /><span><strong>{node.name}</strong><small title={node.id}>{shortID(node.id)}</small><span className="node-role-list">{effectiveRoles(node).map((role) => <i key={role}>{roleLabel(role, t)}</i>)}</span>{node.roles?.includes("management") && <small className={`management-panel-state${panelState.ready ? " management-panel-state--ready" : ""}`} title={`${t("此节点上报的面板状态，不代表整个集群控制服务的健康状态。", "Panel state reported by this node, not the health of the cluster control service.")} ${node.managementPanelStatus || ""}`.trim()}>{panelState.label}</small>}</span></span>
           <span><strong>{node.architecture}</strong><small>{node.distribution || node.os} · {node.kernelVersion || "kernel unknown"}</small><small>{node.cpuModel || inventory?.cpuModel || t("CPU 型号待探测", "CPU model pending")}</small><span className="cpu-features" title={(node.cpuFeatures ?? inventory?.cpuFeatures ?? []).join(", ")}>{importantCPUFeatures(node.cpuFeatures ?? inventory?.cpuFeatures ?? []).map((feature) => <i key={feature}>{feature}</i>)}</span></span>
           <span><strong>{node.capacity.milliCpu / 1000} CPU</strong><small>{formatBytes(node.capacity.memoryBytes)} RAM · {node.numaTopology?.length ?? 0} NUMA</small><small title={computeWeightDetail(inventory)}>{t("自动权重", "Auto weight")} {(node.computeWeight ?? inventory?.computeWeight ?? 0).toFixed(2)} · {t("优先级", "Priority")} {node.computePriority ?? 0}</small>{inventory?.devices?.filter((device) => device.vendor).map((device) => <span className="device-model" key={`${device.resourceName}-${device.deviceId}`} title={gpuDetail(device)}>{device.model || device.vendor?.toUpperCase()}</span>)}{Object.entries(node.capacity.devices ?? {}).length > 0 && <span className="device-list">{Object.entries(node.capacity.devices ?? {}).map(([name, quantity]) => <i key={name} title={deviceLocality(node, name)}>{shortResourceName(name)} × {quantity}</i>)}</span>}</span>
           <span className="resource-cell">
@@ -291,6 +292,16 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
 
 function effectiveRoles(node: ClusterNode): Array<"management" | "compute" | "storage"> {
   return node.roles?.length ? node.roles : ["compute"];
+}
+
+function managementPanelState(node: ClusterNode, t: (zh: string, en: string) => string): { label: string; ready: boolean } {
+  if (node.status === "offline" || node.status === "rejected" || node.status === "pending_approval") return { label: t("面板状态未知", "Panel state unknown"), ready: false };
+  if (node.pendingManagementCommandId) return { label: t("控制面板切换中", "Panel transitioning"), ready: false };
+  if (node.managementPanelStatus?.startsWith("error:")) return { label: t("面板操作失败", "Panel operation failed"), ready: false };
+  if (node.managementPanelEnabled) return { label: node.managementPanelStatus === "controller" ? t("独立控制服务已识别", "Independent controller detected") : t("控制面板已启用", "Panel enabled"), ready: true };
+  if (node.managementPanelStatus === "disabled") return { label: t("节点面板未启用", "Node panel disabled"), ready: false };
+  if (node.managementPanelStatus === "externally managed") return { label: t("面板由外部服务管理", "Panel managed externally"), ready: false };
+  return { label: t("面板状态未上报", "Panel state not reported"), ready: false };
 }
 
 function computeWeightDetail(inventory?: NodeInventorySnapshot): string {

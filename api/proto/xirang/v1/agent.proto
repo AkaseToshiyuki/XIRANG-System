@@ -31,6 +31,7 @@ message AgentMessage {
     TerminalEvent terminal_event = 20;
     NativeBuildWorker native_build_worker = 21;
     NativeBuildUpdate native_build_update = 22;
+    HostHealthReport host_health = 23;
   }
 }
 
@@ -55,6 +56,7 @@ message ControlMessage {
     RunNativeBuild run_native_build = 24;
     CancelNativeBuild cancel_native_build = 25;
     SetManagementPanel set_management_panel = 26;
+    SetBMCIdentify set_bmc_identify = 27;
   }
 }
 
@@ -77,6 +79,55 @@ message HelloAccepted {
 
 message SetTelemetryInterval {
   google.protobuf.Duration interval = 1;
+}
+
+// Read-only bounded observations. Event IDs are derived by the controller from
+// the authenticated node identity and the source record; no arbitrary repair
+// state or operator identity can be supplied by an Agent.
+message HostHealthReport {
+  google.protobuf.Timestamp observed_at = 1;
+  repeated HealthSource sources = 2;
+  repeated HardwareSensor sensors = 3;
+  repeated SystemEvent events = 4;
+  string chassis_power = 5;
+  bool identify_supported = 6;
+}
+
+message HealthSource {
+  string name = 1;
+  string status = 2;
+  string message = 3;
+  int64 window_seconds = 4;
+  int32 limit = 5;
+}
+
+message HardwareSensor {
+  string id = 1;
+  string name = 2;
+  string source = 3;
+  double value = 4;
+  bool available = 5;
+  string unit = 6;
+  string status = 7;
+  optional double lower_critical = 8;
+  optional double upper_critical = 9;
+}
+
+message SystemEvent {
+  string source = 1;
+  string source_record_id = 2;
+  string kind = 3;
+  string severity = 4;
+  string message = 5;
+  string component = 6;
+  google.protobuf.Timestamp occurred_at = 7;
+}
+
+// The only BMC write operation: a timed chassis locator (120 seconds) or off.
+// No power/reset, raw IPMI, threshold mutation, or SEL clearing is exposed.
+message SetBMCIdentify {
+  bool enabled = 1;
+  google.protobuf.Timestamp expires_at = 2;
 }
 
 message Heartbeat {

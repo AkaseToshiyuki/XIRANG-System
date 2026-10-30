@@ -37,6 +37,10 @@ var (
 	usernamesBucket           = []byte("usernames")
 	userGroupsBucket          = []byte("user_groups")
 	accessSettingsBucket      = []byte("access_settings")
+	clusterSettingsBucket     = []byte("cluster_settings")
+	hostHealthBucket          = []byte("host_health")
+	systemEventsBucket        = []byte("system_events")
+	bmcActionsBucket          = []byte("bmc_actions")
 	sharedSpacesBucket        = []byte("shared_spaces")
 	jobTemplatesBucket        = []byte("job_templates")
 	usageDailyBucket          = []byte("usage_daily")
@@ -82,7 +86,7 @@ func Open(path string) (*Store, error) {
 			assignmentsBucket, jobsBucket, jobsByOwnerBucket, activeJobsBucket, jobsFinishedBucket, jobAssignmentsBucket, queuePoliciesBucket,
 			discoveryScansBucket, discoveryCandidatesBucket,
 			buildsBucket, buildSettingsBucket, apiTokensBucket, apiTokenDigestsBucket, usersBucket, usernamesBucket,
-			userGroupsBucket, accessSettingsBucket, sharedSpacesBucket, jobTemplatesBucket, schemaMetadataBucket,
+			userGroupsBucket, accessSettingsBucket, clusterSettingsBucket, hostHealthBucket, systemEventsBucket, bmcActionsBucket, sharedSpacesBucket, jobTemplatesBucket, schemaMetadataBucket,
 			usageDailyBucket, billingRatesBucket,
 		} {
 			if _, err := transaction.CreateBucketIfNotExists(bucket); err != nil {

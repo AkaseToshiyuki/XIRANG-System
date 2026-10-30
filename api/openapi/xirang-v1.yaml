@@ -8,6 +8,149 @@ servers:
 security:
   - managementBearer: []
 paths:
+  /cluster/branding:
+    get:
+      security: []
+      operationId: getClusterBranding
+      summary: Public cluster display name and validated logo
+      responses:
+        "200":
+          description: Current branding, including defaults on an unconfigured cluster
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterBranding" }
+    put:
+      operationId: updateClusterBranding
+      summary: Administrator-only atomic branding update
+      description: Revision must match the current value. PNG/JPEG logos are decoded and re-encoded, limited to 512 KiB and 2048 by 2048 pixels. Empty logoDataUrl restores the default logo. Changes are audited and included in controller backups.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterBranding" }
+      responses:
+        "200":
+          description: Saved branding
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterBranding" }
+        "400": { description: Invalid name, image or request size }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: Stale revision; reload before saving }
+  /nodes/{id}/health:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getNodeHealth
+      summary: Administrator-only latest host health snapshot
+      description: Observations older than 120 seconds are stale. Missing or partial sources do not imply a healthy host. Sensor decimal places are not calibration evidence.
+      responses:
+        "200":
+          description: Latest bounded observation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeHealthSnapshot" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Node or health report not found }
+  /nodes/{id}/health/events:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listSystemEvents
+      summary: Administrator-only errors, corrections, recovery and repair records
+      description: Deduplicated by node and source identity, retained up to 2000 entries per node for 30 days from first receipt. Bounded source queries are not a lossless event archive. Heuristic classification does not prove repair. Unverified BMC timestamps remain in the message.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 100 } }
+        - { name: kind, in: query, schema: { type: string, enum: ["", error, corrected, recovery, repair, info] } }
+      responses:
+        "200":
+          description: Event page, newest first by occurrence time when trustworthy and receipt time otherwise
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, retentionDays, maximumPerNode]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/SystemEvent" } }
+                  retentionDays: { type: integer, const: 30 }
+                  maximumPerNode: { type: integer, const: 2000 }
+        "400": { description: Invalid filter or limit }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /nodes/{id}/health/notes:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: appendSystemRepairRecord
+      summary: Administrator-only append of an attributed maintenance record
+      description: Does not overwrite original events or change node health. An optional related event must belong to the same node. Actor and time come from the server.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              additionalProperties: false
+              properties:
+                message: { type: string, minLength: 1, maxLength: 4096, description: Maximum 4096 UTF-8 bytes }
+                relatedEventId: { type: string, maxLength: 64 }
+      responses:
+        "201":
+          description: Recorded maintenance event
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemEvent" }
+        "400": { description: Invalid maintenance record }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Node or related event not found }
+  /nodes/{id}/health/actions:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: requestBMCIdentify
+      summary: Administrator-only bounded BMC locator request
+      description: Requires fresh observation, negotiated bmc-identify-v1 and Agent host opt-in. Commands expire after 30 seconds and are replay recorded. No power, reset, raw IPMI, fan, threshold or SEL-clear operation is supported. Acknowledgement confirms the BMC request, not physical LED observation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              additionalProperties: false
+              properties:
+                action: { type: string, enum: [identify-on, identify-off] }
+      responses:
+        "202":
+          description: Queued; identify-on requests 120 seconds
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BMCAction" }
+        "400": { description: Unsupported action }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { description: Disabled, stale or unavailable Agent/control channel }
+  /nodes/{id}/health/actions/{actionID}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: actionID, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getBMCAction
+      summary: Administrator-only request outcome
+      description: Queued requests without acknowledgement after one minute have an unknown outcome. The operational cache retains at most 1000 actions; the separate audit remains.
+      responses:
+        "200":
+          description: Action status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BMCAction" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Node or action not found }
   /setup/status:
     get:
       security: []
@@ -1575,6 +1718,76 @@ components:
     NotFound:
       description: Resource not found
   schemas:
+    ClusterBranding:
+      type: object
+      required: [name, logoDataUrl, revision]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+        logoDataUrl: { type: string, maxLength: 699075, description: Empty for default logo; otherwise a validated PNG/JPEG base64 data URL }
+        revision: { type: integer, minimum: 0 }
+        updatedAt: { type: string, format: date-time }
+    NodeHealthSnapshot:
+      type: object
+      required: [nodeId, observedAt, receivedAt, sources, sensors, chassisPower, identifySupported]
+      properties:
+        nodeId: { type: string }
+        observedAt: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time }
+        chassisPower: { type: string, enum: ["", unknown, "on", "off"] }
+        identifySupported: { type: boolean }
+        sources: { type: array, maxItems: 8, items: { $ref: "#/components/schemas/HealthSource" } }
+        sensors: { type: array, maxItems: 256, items: { $ref: "#/components/schemas/HardwareSensor" } }
+    HealthSource:
+      type: object
+      required: [name, status]
+      properties:
+        name: { type: string, maxLength: 64 }
+        status: { type: string, enum: [available, partial, unavailable, disabled] }
+        message: { type: string, maxLength: 512 }
+        windowSeconds: { type: integer, minimum: 0, maximum: 86400 }
+        limit: { type: integer, minimum: 0, maximum: 256 }
+    HardwareSensor:
+      type: object
+      required: [id, name, source, value, available, unit, status]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        source: { type: string }
+        value: { type: number, description: Meaningful only when available is true; zero is a valid reading }
+        available: { type: boolean }
+        unit: { type: string }
+        status: { type: string }
+        lowerCritical: { type: number }
+        upperCritical: { type: number }
+    SystemEvent:
+      type: object
+      required: [id, nodeId, source, kind, severity, message, receivedAt]
+      properties:
+        id: { type: string }
+        nodeId: { type: string }
+        source: { type: string }
+        sourceRecordId: { type: string }
+        kind: { type: string, enum: [error, corrected, recovery, repair, info] }
+        severity: { type: string, enum: [info, warning, critical] }
+        message: { type: string }
+        component: { type: string }
+        occurredAt: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time }
+        actor: { type: string, description: Server-attributed operator for manual repair records }
+        relatedEventId: { type: string }
+    BMCAction:
+      type: object
+      required: [id, nodeId, action, actor, status, createdAt]
+      properties:
+        id: { type: string }
+        nodeId: { type: string }
+        action: { type: string, enum: [identify-on, identify-off] }
+        actor: { type: string }
+        status: { type: string, enum: [queued, succeeded, failed] }
+        message: { type: string }
+        createdAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
     AccessSettings:
       type: object
       additionalProperties: false

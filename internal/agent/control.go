@@ -15,6 +15,7 @@ import (
 	"time"
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
+	"github.com/xirang-grid/xirang/internal/hosthealth"
 	"github.com/xirang-grid/xirang/pkg/version"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -255,11 +256,16 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 	if err != nil {
 		return false, err
 	}
+	healthCollector := configuredHostHealth()
 	capabilities := []string{
+		hosthealth.Capability,
 		"heartbeat-v1", "node-mode-v1", "native-executor-v1", "certificate-rotation-v1",
 		inventorySnapshotCapability, resourceObservationCapability, interfaceHealthCapability, topologyObservationCapability,
 		assignmentLogCapability, deviceInventoryCapability, telemetryIntervalCapability, networkPathProbeCapability,
 		gangAssignmentCapability, mpiLaunchCapability, managementPanelCapability,
+	}
+	if healthCollector.identify {
+		capabilities = append(capabilities, hosthealth.IdentifyCapability)
 	}
 	if config.terminalIdentity != nil {
 		capabilities = append(capabilities, agentPTYCapability)
@@ -448,6 +454,10 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 	if containsCapability(accepted.NegotiatedCapabilities, assignmentLogCapability) {
 		assignmentLogs = executor.Logs()
 	}
+	var healthReports <-chan *xirangv1.HostHealthReport
+	if containsCapability(accepted.NegotiatedCapabilities, hosthealth.Capability) {
+		healthReports = healthCollector.reports(streamContext)
+	}
 	var terminalEvents <-chan *xirangv1.TerminalEvent
 	var terminalManager *TerminalManager
 	if containsCapability(accepted.NegotiatedCapabilities, agentPTYCapability) {
@@ -530,6 +540,7 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 		})
 	}
 	handlers := commandHandlers{
+		setBMCIdentify:  healthCollector.identifyCommand,
 		executor:        executor,
 		terminal:        terminalManager,
 		nativeBuild:     buildManager,
@@ -611,6 +622,14 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 				MessageId: agentMessageID(), SentAt: timestamppb.Now(),
 				Payload: &xirangv1.AgentMessage_AssignmentUsage{AssignmentUsage: snapshot},
 			}); err != nil {
+				return true, err
+			}
+		case report, ok := <-healthReports:
+			if !ok {
+				healthReports = nil
+				continue
+			}
+			if err := stream.Send(&xirangv1.AgentMessage{MessageId: agentMessageID(), SentAt: timestamppb.Now(), Payload: &xirangv1.AgentMessage_HostHealth{HostHealth: report}}); err != nil {
 				return true, err
 			}
 		case event := <-terminalEvents:

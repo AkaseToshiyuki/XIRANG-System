@@ -58,27 +58,19 @@ func RunMountHelper(arguments []string) error {
 		}
 		_, err = fmt.Fprintf(os.Stdout, `{"usedBytes":%d,"availableBytes":%d,"totalBytes":%d}`+"\n", used, available, total)
 		return err
-	case "export":
+	case "prepare", "export":
 		if len(arguments) != 3 || !safeMountPath(arguments[2]) {
-			return errors.New("export requires a safe absolute source path")
+			return errors.New("prepare/export requires a safe absolute source path")
 		}
-		if err := os.MkdirAll(arguments[2], 0o770); err != nil {
-			return err
-		}
-		taskIdentity, err := user.Lookup("xirang-task")
+		uid, gid, err := taskIdentityIDs()
 		if err != nil {
-			return errors.New("xirang-task identity is required")
-		}
-		uid, uidErr := strconv.Atoi(taskIdentity.Uid)
-		gid, gidErr := strconv.Atoi(taskIdentity.Gid)
-		if uidErr != nil || gidErr != nil {
-			return errors.New("xirang-task identity has invalid numeric IDs")
-		}
-		if err := os.Chown(arguments[2], uid, gid); err != nil {
 			return err
 		}
-		if err := os.Chmod(arguments[2], 0o770); err != nil {
+		if err := prepareSharedDirectory(arguments[2], uid, gid); err != nil {
 			return err
+		}
+		if action == "prepare" {
+			return nil
 		}
 		path := filepath.Join("/etc/exports.d", "xirang-"+id+".exports")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -105,18 +97,12 @@ func RunMountHelper(arguments []string) error {
 		if err := updateSystemdSharedPathPolicy(id+"-mount", target, true); err != nil {
 			return err
 		}
-		parent := filepath.Dir(target)
-		if err := os.MkdirAll(parent, 0o755); err != nil {
+		// Create missing mount directories, preserving host-owned parents.
+		directory, err := openOrCreateSharedDirectory(target)
+		if err != nil {
 			return err
 		}
-		// Mount roots such as /shared must be traversable by the task identity.
-		// The mounted export itself retains its own, stricter permissions.
-		if err := os.Chmod(parent, 0o755); err != nil {
-			return err
-		}
-		if err := os.MkdirAll(target, 0o755); err != nil {
-			return err
-		}
+		directory.Close()
 		if err := runMountCommand("mountpoint", "-q", target); err != nil {
 			if err := runMountCommand("mount", "-t", "nfs", "-o", "rw,hard,timeo=60,retrans=2", source, target); err != nil {
 				return err
@@ -141,27 +127,9 @@ func RunMountHelper(arguments []string) error {
 		if err != nil {
 			return err
 		}
-		directory, err := openSharedDirectory(root, relative)
+		result, err := listSharedDirectory(root, relative)
 		if err != nil {
 			return err
-		}
-		defer directory.Close()
-		entries, err := directory.ReadDir(-1)
-		if err != nil {
-			return err
-		}
-		result := make([]sharedFileEntry, 0, len(entries))
-		for _, entry := range entries {
-			info, infoErr := entry.Info()
-			if infoErr != nil || info.Mode()&os.ModeSymlink != 0 {
-				continue
-			}
-			child := filepath.ToSlash(filepath.Join(relative, entry.Name()))
-			result = append(result, sharedFileEntry{
-				Path: child, Name: entry.Name(), Directory: entry.IsDir(),
-				SizeBytes: uint64(maxInt64(info.Size(), 0)), ModifiedAt: info.ModTime().UTC(),
-				Owner: fileOwner(info),
-			})
 		}
 		return json.NewEncoder(os.Stdout).Encode(result)
 	case "file-read":
@@ -260,14 +228,15 @@ func RunMountHelper(arguments []string) error {
 			return err
 		}
 		defer unix.Close(parentFD)
-		if err := unix.Mkdirat(parentFD, leaf, 0o770); err != nil {
-			return err
-		}
 		uid, gid, err := taskIdentityIDs()
 		if err != nil {
 			return err
 		}
-		return unix.Fchownat(parentFD, leaf, uid, gid, unix.AT_SYMLINK_NOFOLLOW)
+		fd, err := createSharedSubdirectory(parentFD, leaf, uid, gid, false)
+		if err != nil {
+			return err
+		}
+		return unix.Close(fd)
 	case "file-rename":
 		if len(arguments) != 5 || !safeMountPath(arguments[2]) {
 			return errors.New("file-rename requires source and destination paths")
@@ -692,20 +661,12 @@ func openSharedParent(root, relative string, createParents bool) (int, string, e
 	for _, part := range parts[:len(parts)-1] {
 		next, openErr := openSharedAt(current, part, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC)
 		if errors.Is(openErr, unix.ENOENT) && createParents {
-			if mkdirErr := unix.Mkdirat(current, part, 0o770); mkdirErr != nil && !errors.Is(mkdirErr, unix.EEXIST) {
-				unix.Close(current)
-				return -1, "", mkdirErr
-			}
 			uid, gid, identityErr := taskIdentityIDs()
 			if identityErr != nil {
 				unix.Close(current)
 				return -1, "", identityErr
 			}
-			if chownErr := unix.Fchownat(current, part, uid, gid, unix.AT_SYMLINK_NOFOLLOW); chownErr != nil {
-				unix.Close(current)
-				return -1, "", chownErr
-			}
-			next, openErr = openSharedAt(current, part, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC)
+			next, openErr = createSharedSubdirectory(current, part, uid, gid, true)
 		}
 		if openErr != nil {
 			unix.Close(current)
@@ -739,6 +700,38 @@ func openSharedDirectory(root, relative string) (*os.File, error) {
 		return nil, err
 	}
 	return os.NewFile(uintptr(fd), relative), nil
+}
+
+func listSharedDirectory(root, relative string) ([]sharedFileEntry, error) {
+	directory, err := openSharedDirectory(root, relative)
+	if err != nil {
+		return nil, err
+	}
+	defer directory.Close()
+	entries, err := directory.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]sharedFileEntry, 0, len(entries))
+	for _, entry := range entries {
+		// The directory's display name can be relative to the share, not the
+		// process cwd. Resolve metadata against its pinned descriptor instead.
+		info, err := os.Lstat(filepath.Join(procDirectoryPath(int(directory.Fd())), entry.Name()))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		result = append(result, sharedFileEntry{
+			Path: filepath.ToSlash(filepath.Join(relative, entry.Name())), Name: entry.Name(), Directory: info.IsDir(),
+			SizeBytes: uint64(maxInt64(info.Size(), 0)), ModifiedAt: info.ModTime().UTC(), Owner: fileOwner(info),
+		})
+	}
+	return result, nil
 }
 
 func openSharedRegularFile(root, relative string) (*os.File, error) {

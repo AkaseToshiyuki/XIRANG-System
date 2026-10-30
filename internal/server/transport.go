@@ -18,11 +18,13 @@ import (
 	"github.com/xirang-grid/xirang/internal/accounting"
 	"github.com/xirang-grid/xirang/internal/alerting"
 	"github.com/xirang-grid/xirang/internal/backup"
+	"github.com/xirang-grid/xirang/internal/branding"
 	"github.com/xirang-grid/xirang/internal/clusterops"
 	"github.com/xirang-grid/xirang/internal/discovery"
 	"github.com/xirang-grid/xirang/internal/domain"
 	"github.com/xirang-grid/xirang/internal/enrollment"
 	"github.com/xirang-grid/xirang/internal/flow"
+	"github.com/xirang-grid/xirang/internal/hosthealth"
 	"github.com/xirang-grid/xirang/internal/identity"
 	"github.com/xirang-grid/xirang/internal/jobtemplate"
 	"github.com/xirang-grid/xirang/internal/notification"
@@ -95,6 +97,16 @@ func decodeJSON(writer http.ResponseWriter, request *http.Request, destination a
 func writeError(writer http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	switch {
+	case errors.Is(err, hosthealth.ErrInvalid):
+		status = http.StatusBadRequest
+	case errors.Is(err, hosthealth.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, hosthealth.ErrUnavailable):
+		status = http.StatusServiceUnavailable
+	case errors.Is(err, branding.ErrInvalid):
+		status = http.StatusBadRequest
+	case errors.Is(err, branding.ErrConflict):
+		status = http.StatusConflict
 	case errors.Is(err, scheduler.ErrUnsatisfiable):
 		status = http.StatusUnprocessableEntity
 	case errors.Is(err, scheduler.ErrInvalidJob):

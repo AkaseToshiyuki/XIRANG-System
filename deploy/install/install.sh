@@ -74,7 +74,9 @@ if [ -z "${DESTDIR}" ] && [ "$(id -u)" -eq 0 ]; then
         # The storage node owns this already-mounted tree and its export policy.
         test -d /srv/xirang/XirangShare/.xirang/builds
     else
-        install -d -m 0770 -o xirang-task -g xirang-task /srv/xirang/XirangShare
+        # Preparing/exporting a share must preserve host ownership and access.
+        # The helper grants the cluster group access through a POSIX ACL.
+        "${PREFIX}/bin/xirang-agent" mount-helper prepare share_default /srv/xirang/XirangShare
         install -d -m 2770 -o xirang-task -g xirang-task \
             /srv/xirang/XirangShare/.xirang \
             /srv/xirang/XirangShare/.xirang/builds \

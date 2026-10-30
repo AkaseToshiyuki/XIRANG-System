@@ -2553,12 +2553,13 @@ func validateSubmission(request SubmitRequest) error {
 			return ErrInvalidJob
 		}
 		mapped := make(map[string]struct{})
+		matchingArchitecture := request.Task.Placement.RequiredArchitecture == ""
 		for _, variant := range request.Task.ArtifactVariants {
 			if !validText(variant.BuildID, 256, false) || !validText(variant.Variant, 128, false) || len(variant.NodeIDs) == 0 || len(variant.NodeIDs) > 1024 || validateNativeArtifact(variant.Artifact) != nil {
 				return ErrInvalidJob
 			}
-			if request.Task.Placement.RequiredArchitecture != "" && request.Task.Placement.RequiredArchitecture != variant.Artifact.Architecture {
-				return fmt.Errorf("%w: placement and application variant architectures differ", ErrInvalidJob)
+			if request.Task.Placement.RequiredArchitecture == variant.Artifact.Architecture {
+				matchingArchitecture = true
 			}
 			for _, nodeID := range variant.NodeIDs {
 				if !validText(nodeID, 256, false) {
@@ -2569,6 +2570,9 @@ func validateSubmission(request SubmitRequest) error {
 					mapped[nodeID] = struct{}{}
 				}
 			}
+		}
+		if !matchingArchitecture {
+			return fmt.Errorf("%w: no application variant matches the required architecture", ErrInvalidJob)
 		}
 	}
 	if len(request.Task.Placement.RequiredLabels) > 64 || len(request.Task.Placement.RequiredTopology) > 64 ||

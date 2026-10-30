@@ -20,6 +20,7 @@ import (
 	"github.com/xirang-grid/xirang/internal/accounting"
 	"github.com/xirang-grid/xirang/internal/alerting"
 	"github.com/xirang-grid/xirang/internal/backup"
+	"github.com/xirang-grid/xirang/internal/branding"
 	buildmanager "github.com/xirang-grid/xirang/internal/build"
 	"github.com/xirang-grid/xirang/internal/clusterops"
 	"github.com/xirang-grid/xirang/internal/controlstream"
@@ -27,6 +28,7 @@ import (
 	"github.com/xirang-grid/xirang/internal/domain"
 	"github.com/xirang-grid/xirang/internal/enrollment"
 	"github.com/xirang-grid/xirang/internal/flow"
+	"github.com/xirang-grid/xirang/internal/hosthealth"
 	"github.com/xirang-grid/xirang/internal/identity"
 	"github.com/xirang-grid/xirang/internal/jobtemplate"
 	"github.com/xirang-grid/xirang/internal/networkhealth"
@@ -403,12 +405,14 @@ func main() {
 		logger.Error("restore pending job assignments", "error", err)
 		os.Exit(1)
 	}
+	hostHealthService := hosthealth.New(state)
 	agentControl := controlstream.New(enrollmentService, *agentHeartbeatInterval, commandHub)
 	if err := agentControl.ConfigureTelemetryInterval(filepath.Join(*dataDirectory, "telemetry-interval")); err != nil {
 		logger.Error("load Agent telemetry interval", "error", err)
 		os.Exit(1)
 	}
 	agentControl.SetTelemetryReporter(telemetryService)
+	agentControl.SetHostHealthReporter(hostHealthService)
 	agentControl.SetTopologyReporter(topologyService)
 	agentControl.SetNetworkProbeTargetProvider(topology.NewProbeTargetProvider(enrollmentService, telemetryService))
 	agentControl.SetFlowReporter(flowService)
@@ -419,8 +423,10 @@ func main() {
 	}
 	application := server.New(server.Config{
 		Address: *address, Logger: logger, AdminToken: adminToken,
+		Branding:   branding.New(state),
 		Enrollment: enrollmentService, JoinTokens: joinTokens, TLSConfig: tlsConfig, Commands: commandHub, NodeEvents: nodeEvents,
 		Telemetry:          telemetryService,
+		HostHealth:         hostHealthService,
 		Topology:           topologyService,
 		Flows:              flowService,
 		Alerts:             alertService,
@@ -606,6 +612,8 @@ func gracefulStopGRPC(ctx context.Context, server *grpc.Server) {
 }
 
 type controlStore interface {
+	hosthealth.Repository
+	branding.Repository
 	enrollment.Repository
 	scheduler.Repository
 	discovery.Repository
