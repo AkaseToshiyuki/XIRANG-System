@@ -1,8 +1,84 @@
 import { expect, Page, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
 
 type Role = "admin" | "viewer" | "builder";
 type Language = "zh" | "en";
 type Theme = "dark" | "light";
+
+test("cluster settings save public branding, survive reload, and restore defaults", async ({ page }) => {
+  await loginAsAdmin(page);
+  await page.getByRole("button", { name: "Cluster settings", exact: true }).click();
+  await page.getByLabel("Cluster name", { exact: true }).fill("North lab · 科学计算");
+  await page.getByLabel("Cluster logo", { exact: true }).setInputFiles({ name: "logo.png", mimeType: "image/png", buffer: readFileSync(new URL("../public/brand/xirang-mark.png", import.meta.url)) });
+  await expect(page.getByRole("img", { name: "Cluster logo preview" })).toHaveAttribute("src", /^data:image\/png;base64,/);
+  await page.getByRole("button", { name: "Save settings", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Cluster settings saved");
+  await expect(page.locator(".sidebar .brand strong")).toHaveText("North lab · 科学计算");
+  await expect(page).toHaveTitle(/North lab/);
+  await expect(page.locator(".app-shell")).toHaveScreenshot("cluster-settings-en-dark.png");
+  await page.reload();
+  await expect(page.locator(".auth-card .brand strong")).toHaveText("North lab · 科学计算");
+  await page.getByRole("button", { name: "Token", exact: true }).click();
+  await page.getByLabel("Access token").fill("admin-token");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByLabel("Cluster name", { exact: true })).toHaveValue("North lab · 科学计算");
+  await page.getByRole("button", { name: "Restore default name and logo" }).click();
+  await page.getByRole("button", { name: "Save settings", exact: true }).click();
+  await expect(page.locator(".sidebar .brand strong")).toHaveText("XIRANG");
+  await expect(page.locator(".sidebar .brand img")).toHaveAttribute("src", "/brand/xirang-mark.png");
+});
+
+test("cluster settings reject unsupported logos and report failed saves", async ({ page }) => {
+  await loginAsAdmin(page);
+  await page.getByRole("button", { name: "Cluster settings", exact: true }).click();
+  await page.getByLabel("Cluster logo", { exact: true }).setInputFiles({ name: "logo.svg", mimeType: "image/svg+xml", buffer: Buffer.from("<svg/>") });
+  await expect(page.getByRole("alert")).toContainText("PNG or JPEG");
+  await page.getByLabel("Cluster name", { exact: true }).fill("Unsaved name");
+  await page.route("**/api/v1/cluster/branding", (route) => route.request().method() === "PUT" ? route.fulfill({ status: 409, json: { error: "Cluster branding changed; reload before saving" } }) : route.fallback());
+  await page.getByRole("button", { name: "Save settings", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("reload before saving");
+  await expect(page.locator(".sidebar .brand strong")).toHaveText("XIRANG");
+});
+
+test("system health keeps corrected events and repair records distinct", async ({ page }) => {
+  await loginAsAdmin(page);
+  await page.route("**/api/v1/nodes", (route) => route.fulfill({ json: { items: [{ id: "node-arm", name: "Health fixture", status: "ready", architecture: "arm64", capacity: { milliCpu: 4000, memoryBytes: 8000000000 } }] } }));
+  let entries = [{ id: "a".repeat(64), nodeId: "node-arm", source: "journal", kind: "corrected", severity: "warning", message: "EDAC: corrected ECC", receivedAt: new Date().toISOString() }];
+  await page.route(/\/api\/v1\/nodes\/[^/]+\/health(?:\?.*)?$/, (route) => route.fulfill({ json: { nodeId: "node-arm", observedAt: new Date().toISOString(), receivedAt: new Date().toISOString(), sources: [{ name: "journal", status: "partial", message: "Bounded window" }, { name: "ipmi-sel", status: "unavailable", message: "BMC unavailable" }], sensors: [{ id: "cpu", name: "CPU1 Temp", value: 47.125, available: true, unit: "degrees C", status: "ok", upperCritical: 90 }, { id: "missing", name: "Missing sensor", value: 0, available: false, unit: "degrees C", status: "na" }], chassisPower: "on", identifySupported: false } }));
+  await page.route("**/health/events?*", (route) => route.fulfill({ json: { items: entries } }));
+  await page.route("**/health/notes", (route) => {
+    const input = route.request().postDataJSON();
+    expect(input.relatedEventId).toBe("a".repeat(64));
+    entries = [...entries, { id: "b".repeat(64), nodeId: "node-arm", source: "operator", kind: "repair", severity: "info", message: input.message, receivedAt: new Date().toISOString() }];
+    return route.fulfill({ status: 201, json: entries[1] });
+  });
+  await page.getByRole("button", { name: "System health", exact: true }).click();
+  await expect(page.getByRole("article").getByText("Hardware corrected", { exact: true })).toBeVisible();
+  await expect(page.getByText("47.125 degrees C", { exact: true })).toBeVisible();
+  await expect(page.getByRole("row", { name: /Missing sensor/ })).toContainText("Unavailable");
+  await expect(page.getByRole("button", { name: "Locate for 120 seconds" })).toBeDisabled();
+  await page.getByRole("button", { name: "Link a repair record" }).click();
+  await page.getByLabel("Operator repair record", { exact: true }).fill("Replaced DIMM; diagnostics passed");
+  await page.getByRole("button", { name: "Save maintenance record" }).click();
+  await expect(page.getByText("Replaced DIMM; diagnostics passed", { exact: true })).toBeVisible();
+  await expect(page.getByText("EDAC: corrected ECC", { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+});
+
+test("regular users cannot open cluster settings or system logs", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("xirang.language", "en"));
+  await mockControlPlane(page, "viewer");
+  await page.goto("/settings");
+  await page.getByRole("button", { name: "Token", exact: true }).click();
+  await page.getByLabel("Access token").fill("viewer-token");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page).toHaveURL("/");
+  await expect(page.getByRole("button", { name: "Cluster settings", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "System health", exact: true })).toHaveCount(0);
+  await page.evaluate(() => { window.history.pushState({}, "", "/health"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  await expect(page).toHaveURL("/");
+});
 
 test("SBOM downloads carry authentication and report server failures", async ({ page }) => {
   await loginAsAdmin(page);
@@ -341,6 +417,27 @@ test("management role exposes panel state and a consistent role editor", async (
   });
 });
 
+test("management panel distinguishes missing, disabled, failed and stale reports", async ({ page }) => {
+  await loginAsAdmin(page);
+  const base = { os: "linux", architecture: "amd64", status: "ready", roles: ["management"], capacity: { milliCpu: 1000, memoryBytes: 1024 }, allocatable: { milliCpu: 1000, memoryBytes: 1024 }, allocated: { milliCpu: 0, memoryBytes: 0 } };
+  const cases = [
+    { id: "missing", name: "Missing report", expected: "Panel state not reported" },
+    { id: "disabled", name: "Disabled relay", managementPanelStatus: "disabled", expected: "Node panel disabled" },
+    { id: "failed", name: "Failed relay", managementPanelEnabled: true, managementPanelStatus: "error: address in use", expected: "Panel operation failed" },
+    { id: "controller", name: "Primary controller", managementPanelEnabled: true, managementPanelStatus: "controller", expected: "Independent controller detected" },
+    { id: "offline", name: "Offline report", status: "offline", managementPanelEnabled: true, managementPanelStatus: "ready", expected: "Panel state unknown" },
+  ];
+  await page.route("**/api/v1/nodes", (route) => route.fulfill({ json: { items: cases.map(({ expected: _expected, ...item }) => ({ ...base, ...item })) } }));
+  await page.getByRole("button", { name: "Node status", exact: true }).click();
+  for (const item of cases) {
+    const report = page.locator(".nodes-table__row").filter({ has: page.getByText(item.name, { exact: true }) }).locator(".management-panel-state");
+    await expect(report).toHaveText(item.expected);
+    await expect(report).toHaveAttribute("title", /Panel state reported by this node/);
+    if (item.id !== "controller") await expect(report).not.toHaveClass(/management-panel-state--ready/);
+  }
+  await expect(page.getByText("Panel unavailable", { exact: true })).toHaveCount(0);
+});
+
 test("administrator can remove an offline node while retaining a tombstone response", async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem("xirang.language", "en");
@@ -391,7 +488,7 @@ async function loginAsAdmin(page: Page) {
 const AUDIT_PAGES = [
   "Cluster overview", "Network topology", "Alert center", "Node status", "Node enrollment",
   "Job scheduling", "Queue policies", "Native builds", "Shared storage", "Usage accounting",
-  "Terminal access", "Identity management",
+  "Terminal access", "Identity management", "Cluster settings", "System health",
 ];
 
 for (const theme of ["light", "dark"] as const) {
@@ -473,13 +570,22 @@ async function mockControlPlane(page: Page, role: Role) {
     { id: "group_unlimited", name: "unlimited-lab", resourceQuota: { milliCpu: 0, memoryBytes: 0, ephemeralStorageBytes: 0 }, storageQuotaBytes: 0, maxConcurrentJobs: 0, maxJobTimeoutSeconds: 604800, disabled: false, createdAt: "2026-08-02T00:00:00Z", updatedAt: "2026-08-02T00:00:00Z" },
     { id: "group_userlabs", name: "UserLabs", resourceQuota: { milliCpu: 8000, memoryBytes: 16_000_000_000, ephemeralStorageBytes: 0 }, storageQuotaBytes: 100_000_000_000, maxConcurrentJobs: 4, maxJobTimeoutSeconds: 604800, disabled: false, createdAt: "2026-08-02T00:00:00Z", updatedAt: "2026-08-02T00:00:00Z" },
   ];
+  let branding = { name: "XIRANG", logoDataUrl: "", revision: 0 };
   let accessSettings = { defaultUserGroupId: "", updatedAt: "2026-08-02T00:00:00Z" };
   let localUsers = [{ id: "user_admin", username: "admin", displayName: "E2E Administrator", role: "admin", groupIds: ["group_userlabs"], status: "active", createdAt: "2026-08-02T00:00:00Z", approvedAt: "2026-08-02T00:00:00Z" }];
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+    if (/\/nodes\/[^/]+\/health$/.test(url.pathname)) return json({ error: "No health report" }, 404);
+    if (/\/nodes\/[^/]+\/health\/events$/.test(url.pathname)) return json({ items: [] });
     switch (url.pathname) {
+      case "/api/v1/cluster/branding":
+        if (request.method() === "PUT") {
+          if (role !== "admin") return json({ error: "administrator required" }, 403);
+          branding = { ...request.postDataJSON(), revision: branding.revision + 1 };
+        }
+        return json(branding);
       case "/api/v1/version":
         return json({ name: "XIRANG", version: "e2e", protocolVersion: "v1", commit: "test", buildTime: "2026-08-02T00:00:00Z", goVersion: "go1.25", os: "linux", architecture: "amd64" });
       case "/api/v1/setup/status":

@@ -1,6 +1,6 @@
 import { FormEvent, ReactNode, useEffect, useState } from "react";
-import { getNodes, getPrincipal, getSetupStatus, getTelemetryInterval, getVersion, loginLocalUser, registerLocalUser, setupAdmin, updateTelemetryInterval } from "../api/client";
-import type { AccessPrincipal, VersionInfo } from "../api/contracts";
+import { getClusterBranding, getNodes, getPrincipal, getSetupStatus, getTelemetryInterval, getVersion, loginLocalUser, registerLocalUser, setupAdmin, updateTelemetryInterval } from "../api/client";
+import type { ClusterBranding, AccessPrincipal, VersionInfo } from "../api/contracts";
 import { OverviewPage } from "../pages/OverviewPage";
 import { AlertsPage } from "../pages/AlertsPage";
 import { NodesPage } from "../pages/NodesPage";
@@ -17,10 +17,14 @@ import { PageErrorBoundary } from "../components/PageErrorBoundary";
 import { WorkspaceIcon } from "../components/WorkspaceIcon";
 import { usePreferences } from "./preferences";
 
+import { HealthPage } from "../pages/HealthPage";
+import { SettingsPage, defaultClusterBranding, defaultClusterLogo } from "../pages/SettingsPage";
+
 const navigation = [
   { label: "Overview", en: "Cluster overview", zh: "集群概览", icon: "overview", path: "/", available: true },
   { label: "Topology", en: "Network topology", zh: "网络拓扑", icon: "topology", path: "/topology", available: true },
   { label: "Alerts", en: "Alert center", zh: "告警中心", icon: "alerts", path: "/alerts", available: true },
+  { label: "Health", en: "System health", zh: "系统健康", icon: "health", path: "/health", available: true },
   { label: "Nodes", en: "Node status", zh: "节点状态", icon: "nodes", path: "/nodes", available: true },
   { label: "Enrollment", en: "Node enrollment", zh: "节点接入", icon: "enrollment", path: "/enrollment", available: true },
   { label: "Jobs", en: "Job scheduling", zh: "作业调度", icon: "jobs", path: "/jobs", available: true },
@@ -29,6 +33,7 @@ const navigation = [
   { label: "Storage", en: "Shared storage", zh: "共享存储", icon: "storage", path: "/storage", available: true },
   { label: "Accounting", en: "Usage accounting", zh: "用量核算", icon: "accounting", path: "/accounting", available: true },
   { label: "Terminal", en: "Terminal access", zh: "终端连接", icon: "terminal", path: "/terminal", available: true },
+  { label: "Settings", en: "Cluster settings", zh: "集群设置", icon: "settings", path: "/settings", available: true },
   { label: "Access", en: "Identity management", zh: "身份管理", icon: "access", path: "/access", available: true },
 ] as const;
 
@@ -37,6 +42,7 @@ type Page = typeof navigation[number]["label"];
 export function App() {
   const { language, refreshSeconds, setRefreshSeconds, t } = usePreferences();
   const [active, setActive] = useState<Page>(() => pageFromPath(window.location.pathname));
+  const [branding, setBranding] = useState<ClusterBranding>(defaultClusterBranding);
   const [version, setVersion] = useState<VersionInfo | null>(null);
   const [principal, setPrincipal] = useState<AccessPrincipal | null>(null);
   const [token, setToken] = useState("");
@@ -50,6 +56,19 @@ export function App() {
   const [refreshDraft, setRefreshDraft] = useState(() => String(refreshSeconds));
   const [refreshSaving, setRefreshSaving] = useState(false);
   const [refreshError, setRefreshError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const refresh = () => getClusterBranding(controller.signal).then((value) => {
+      if (!controller.signal.aborted) setBranding((current) => value.revision >= current.revision ? value : current);
+    }).catch(() => undefined);
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 60000);
+    window.addEventListener("focus", refresh);
+    return () => { controller.abort(); window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, []);
+
+  useEffect(() => { document.title = branding.name === "XIRANG" ? "XIRANG System" : branding.name; }, [branding.name]);
 
   useEffect(() => setRefreshDraft(String(refreshSeconds)), [refreshSeconds]);
 
@@ -157,7 +176,7 @@ export function App() {
   if (!token) {
     return <main className="auth-shell">
       <section className="auth-card" aria-labelledby="auth-title">
-        <div className="auth-topline"><div className="brand"><img className="brand-mark" src="/brand/xirang-mark.png" alt="" aria-hidden="true" /><strong>XIRANG</strong></div><InterfacePreferences /></div>
+        <div className="auth-topline"><div className="brand"><img className="brand-mark" src={branding.logoDataUrl || defaultClusterLogo} alt="" aria-hidden="true" /><strong title={branding.name}>{branding.name}</strong></div><InterfacePreferences /></div>
         <h2 id="auth-title">{setupRequired ? t("创建首位管理员", "Create the first administrator") : authMode === "register" ? t("申请账户", "Request an account") : t("进入控制台", "Enter the console")}</h2>
         {!setupRequired && <div className="auth-tabs"><button type="button" className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>{t("账户登录", "Account login")}</button><button type="button" className={authMode === "register" ? "active" : ""} onClick={() => setAuthMode("register")}>{t("注册申请", "Registration")}</button><button type="button" className={authMode === "token" ? "active" : ""} onClick={() => setAuthMode("token")}>{t("令牌", "Token")}</button></div>}
         {authMode === "token" && !setupRequired ? <form onSubmit={authenticate}>
@@ -195,13 +214,15 @@ export function App() {
     Accounting: () => <AccountingPage token={token} isAdmin={isAdministrator} />,
     Terminal: () => <TerminalPage token={token} />,
     Access: () => <AccessPage token={token} />,
+    Health: () => <HealthPage token={token} />,
+    Settings: () => <SettingsPage token={token} onSaved={setBranding} />,
   };
   const activeView = pageViews[active];
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand"><img className="brand-mark" src="/brand/xirang-mark.png" alt="" aria-hidden="true" /><div><strong>XIRANG</strong></div></div>
+        <div className="brand"><img className="brand-mark" src={branding.logoDataUrl || defaultClusterLogo} alt="" aria-hidden="true" /><div><strong title={branding.name}>{branding.name}</strong></div></div>
         <nav aria-label={t("主导航", "Primary navigation")}>
           {navigation.filter((item) => item.available && Boolean(principal && pagePermitted(item.label, principal))).map((item) => {
             const permitted = item.available && Boolean(principal && pagePermitted(item.label, principal));
@@ -250,6 +271,7 @@ function pageFromPath(pathname: string): Page {
 }
 
 function pagePermitted(page: Page, principal: AccessPrincipal): boolean {
+  if (page === "Settings" || page === "Health") return principal.role === "admin";
   const permission = page === "Access" ? "access.manage"
     : page === "Terminal" ? "access.manage"
       : page === "Storage" || page === "Accounting" ? "cluster.read"

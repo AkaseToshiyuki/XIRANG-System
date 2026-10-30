@@ -132,6 +132,21 @@ to Web terminals or workload executables.
 
 ## Shared-path service permissions
 
+Exporting an existing directory preserves its host owner, owning group, and
+local users' effective access. XIRANG adds a POSIX access ACL for the task group
+instead of taking ownership or forcing mode `0770`. Existing masked ACL entries
+keep their effective permissions; default ACLs and descendant files are unchanged.
+New export roots are host-readable/traversable (`0755` plus the cluster ACL).
+The filesystem must support POSIX ACLs; failure is reported without a chmod
+fallback. NFS continues to use `all_squash` with the task identity.
+
+Installation uses the same permission-preserving preparation for the default
+share. Existing mount-parent permissions are also preserved. Administrators must
+provide traversal through any private parent directories. Directory access does
+not override an individual file's permissions or grant every local user write
+access. See [recovery of older shared directories](OPERATIONS.md#shared-directory-host-access)
+for directories whose original metadata was already overwritten by an older version.
+
 On systemd hosts, XIRANG grants services write access only to exact shared paths,
 not all of `/srv`, `/shared`, or `/mnt`. The privileged mount helper maintains
 the allowlist in `/etc/xirang/shared-write-paths.d` and generates service

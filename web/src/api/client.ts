@@ -1,4 +1,4 @@
-import type { AccessPrincipal, AccessRole, AccessSettings, Alert, AlertDelivery, AlertWebhookStatus, APIToken, BackupManifest, BillingRate, BuildCleanupResult, BuildRetentionPolicy, BuildWorker, ClusterJoinToken, ClusterNode, DiscoveryBootstrap, DiscoveryCandidate, DiscoveryScan, ElasticitySnapshot, Job, JobTemplate, LocalUser, NativeBuild, NodeFlowObservation, NodeInventorySnapshot, NodeResourceObservation, QueuePolicy, SharedFile, SharedSpace, SubmitJobRequest, TelemetryIntervalSettings, TopologySnapshot, UsageSummary, UserGroup, VersionInfo } from "./contracts";
+import type { NodeHealthSnapshot, SystemEvent, BMCAction, ClusterBranding, AccessPrincipal, AccessRole, AccessSettings, Alert, AlertDelivery, AlertWebhookStatus, APIToken, BackupManifest, BillingRate, BuildCleanupResult, BuildRetentionPolicy, BuildWorker, ClusterJoinToken, ClusterNode, DiscoveryBootstrap, DiscoveryCandidate, DiscoveryScan, ElasticitySnapshot, Job, JobTemplate, LocalUser, NativeBuild, NodeFlowObservation, NodeInventorySnapshot, NodeResourceObservation, QueuePolicy, SharedFile, SharedSpace, SubmitJobRequest, TelemetryIntervalSettings, TopologySnapshot, UsageSummary, UserGroup, VersionInfo } from "./contracts";
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -600,4 +600,27 @@ export function createBillingRate(token: string, rate: BillingRate): Promise<Bil
   return requestJSON<BillingRate>("/api/v1/accounting/rates", {
     token, method: "POST", json: rate, label: "Billing rate creation",
   });
+}
+
+export function getClusterBranding(signal?: AbortSignal): Promise<ClusterBranding> {
+  return requestJSON("/api/v1/cluster/branding", { label: "Cluster branding", signal });
+}
+export function updateClusterBranding(value: ClusterBranding, token: string): Promise<ClusterBranding> {
+  return requestJSON("/api/v1/cluster/branding", { label: "Update cluster branding", token, method: "PUT", json: value });
+}
+
+export function getNodeHealth(nodeID: string, token: string, signal?: AbortSignal): Promise<NodeHealthSnapshot> {
+ return requestJSON(`/api/v1/nodes/${encodeURIComponent(nodeID)}/health`, { token, signal, label: "Node health" });
+}
+export function getSystemEvents(nodeID: string, kind: string, token: string, signal?: AbortSignal): Promise<SystemEvent[]> {
+ return requestItems(`/api/v1/nodes/${encodeURIComponent(nodeID)}/health/events?limit=200&kind=${encodeURIComponent(kind)}`, { token, signal, label: "System events" });
+}
+export function addSystemNote(nodeID: string, message: string, relatedEventId: string, token: string): Promise<SystemEvent> {
+ return requestJSON(`/api/v1/nodes/${encodeURIComponent(nodeID)}/health/notes`, { token, method: "POST", json: { message, relatedEventId }, label: "Save maintenance record" });
+}
+export function requestBMCAction(nodeID: string, action: string, token: string): Promise<BMCAction> {
+ return requestJSON(`/api/v1/nodes/${encodeURIComponent(nodeID)}/health/actions`, { token, method: "POST", json: { action }, label: "BMC locator request" });
+}
+export function getBMCAction(nodeID: string, id: string, token: string, signal?: AbortSignal): Promise<BMCAction> {
+ return requestJSON(`/api/v1/nodes/${encodeURIComponent(nodeID)}/health/actions/${encodeURIComponent(id)}`, { token, signal, label: "BMC action status" });
 }

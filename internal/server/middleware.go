@@ -83,7 +83,7 @@ func credentialOptionalRoute(method, path string) bool {
 	switch method {
 	case http.MethodGet:
 		switch path {
-		case "/api/v1/version", "/api/v1/capabilities", "/api/v1/enrollment/ca":
+		case "/api/v1/version", "/api/v1/capabilities", "/api/v1/enrollment/ca", "/api/v1/cluster/branding":
 			return true
 		case "/api/v1/terminal/connect":
 			// Authorized by a single-use ticket in the query string because a
@@ -107,6 +107,15 @@ func credentialOptionalRoute(method, path string) bool {
 }
 
 func requiredPermission(method, path string) string {
+	if strings.HasPrefix(path, "/api/v1/nodes/") && strings.Contains(path, "/health") {
+		return identity.PermissionAccessManage
+	}
+	if path == "/api/v1/cluster/branding" {
+		if method == http.MethodGet {
+			return identity.PermissionRead
+		}
+		return identity.PermissionAccessManage
+	}
 	if strings.HasPrefix(path, "/artifacts/") {
 		return identity.PermissionRead
 	}

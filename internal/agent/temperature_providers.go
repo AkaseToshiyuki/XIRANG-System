@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +28,7 @@ type CPUTemperatureProvider interface {
 }
 
 type IPMITemperatureProvider struct {
+	Args    []string
 	Command string
 }
 
@@ -39,7 +39,7 @@ func (provider IPMITemperatureProvider) ReadCPUTemperature(ctx context.Context) 
 	}
 	probe, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(probe, command, "sdr", "type", "Temperature").CombinedOutput()
+	output, err := runHealthCommand(probe, command, append(append([]string(nil), provider.Args...), "sdr", "type", "Temperature")...)
 	if err != nil {
 		return CPUTemperatureReading{}, fmt.Errorf("IPMI temperature query: %w", err)
 	}
@@ -61,8 +61,14 @@ func parseIPMICPUTemperature(output string) float64 {
 		if !cpuSensorLabel(label) {
 			continue
 		}
-		valueFields := strings.Fields(strings.TrimSpace(fields[1]))
-		if len(valueFields) == 0 {
+		reading := fields[1]
+		// sdr type Temperature uses the extended five-column form: name,
+		// sensor number, status, entity, reading. Never parse the sensor ID.
+		if len(fields) >= 5 {
+			reading = fields[4]
+		}
+		valueFields := strings.Fields(strings.TrimSpace(reading))
+		if len(valueFields) < 3 || !strings.EqualFold(valueFields[1], "degrees") || valueFields[2] != "C" {
 			continue
 		}
 		value, err := strconv.ParseFloat(valueFields[0], 64)
@@ -125,7 +131,7 @@ func (provider RedfishTemperatureProvider) ReadCPUTemperature(ctx context.Contex
 	maximum := float64(0)
 	for _, sensor := range payload.Temperatures {
 		contextName := strings.ToLower(strings.TrimSpace(sensor.PhysicalContext + " " + sensor.Name))
-		if !cpuSensorLabel(contextName) || strings.EqualFold(sensor.Status.State, "Absent") || strings.EqualFold(sensor.Status.Health, "Critical") {
+		if !cpuSensorLabel(contextName) || strings.EqualFold(sensor.Status.State, "Absent") {
 			continue
 		}
 		if validTemperature(sensor.ReadingCelsius) && sensor.ReadingCelsius > maximum {
@@ -133,7 +139,7 @@ func (provider RedfishTemperatureProvider) ReadCPUTemperature(ctx context.Contex
 		}
 	}
 	if maximum == 0 {
-		return CPUTemperatureReading{}, errors.New("the Redfish service returned no healthy CPU temperature sensor")
+		return CPUTemperatureReading{}, errors.New("the Redfish service returned no available CPU temperature sensor")
 	}
 	return CPUTemperatureReading{Celsius: maximum, Source: "redfish", Confidence: "medium"}, nil
 }
@@ -160,8 +166,9 @@ func (provider *cachedTemperatureProvider) ReadCPUTemperature(ctx context.Contex
 
 func configuredTemperatureProviders() []CPUTemperatureProvider {
 	providers := make([]CPUTemperatureProvider, 0, 2)
-	if command := strings.TrimSpace(os.Getenv("XIRANG_IPMI_TOOL")); command != "" {
-		providers = append(providers, &cachedTemperatureProvider{provider: IPMITemperatureProvider{Command: command}, cacheFor: 15 * time.Second})
+	ipmi := configuredHostHealth()
+	if ipmi.ipmi != "" && ipmi.ipmiError == "" {
+		providers = append(providers, &cachedTemperatureProvider{provider: IPMITemperatureProvider{Command: ipmi.ipmi, Args: ipmi.ipmiArgs}, cacheFor: 15 * time.Second})
 	}
 	redfishURL := strings.TrimSpace(os.Getenv("XIRANG_REDFISH_THERMAL_URL"))
 	redfishUser := strings.TrimSpace(os.Getenv("XIRANG_REDFISH_USERNAME"))

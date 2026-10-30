@@ -86,6 +86,42 @@ Rotate build-signing keys separately: deploy the new public key to Agents, activ
 the new signing key, and remove the old trust key only after old compiled outputs
 are no longer scheduled.
 
+## Shared-directory host access
+
+Older export helpers and installers changed the export root to
+`xirang-task:xirang-task` with mode `0770`. Upgrading prevents this overwrite,
+but cannot reconstruct the original owner, group, or ACL. Restore those from a
+known backup or an administrator-approved policy on the storage host, then run
+the updated helper to grant cluster access without replacing that policy:
+
+```bash
+sudo /usr/local/bin/xirang-agent mount-helper prepare share_default /srv/xirang/XirangShare
+getfacl -p /srv/xirang/XirangShare
+```
+
+For a site policy that explicitly permits every local user to list and traverse
+the shared root, back up its ACL first, then grant only that access:
+
+```bash
+umask 077
+sudo getfacl -p /srv/xirang/XirangShare > shared-root.before.acl
+sudo setfacl -n -m o::r-x /srv/xirang/XirangShare
+```
+
+Use the actual source path for a custom share. This command neither grants
+world write access nor rewrites descendant permissions. A named-user ACL may
+still restrict that user; check it with `getfacl`. Host groups that need write
+access should receive an explicit site ACL. ACL masks affect named users and
+groups together; review effective permissions when changing a mask. See the
+[ACL tool documentation](https://man7.org/linux/man-pages/man1/setfacl.1.html).
+Do not recursively chown or chmod a shared tree to repair its root.
+Existing per-file and default ACLs still govern shared content, including
+files created through the Web interface. Upgrading alone does not republish
+already active exports; use `prepare` after restoring their host policy.
+
+To undo the explicit ACL change, run `sudo setfacl --restore=shared-root.before.acl`
+before making other metadata changes, then recheck host and cluster access.
+
 ## Rollback
 
 Stop all controllers, restore the recovery point created by the old version, install

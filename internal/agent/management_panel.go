@@ -41,26 +41,25 @@ type ManagementPanel struct {
 
 func NewManagementPanel(stateDirectory string, state State) *ManagementPanel {
 	panel := &ManagementPanel{stateDirectory: stateDirectory, state: state, status: "disabled"}
-	panel.localController = enrolledControllerIsLocal(state)
-	if panel.localController {
-		if connection, err := net.DialTimeout("tcp", "127.0.0.1:8899", 250*time.Millisecond); err == nil {
-			_ = connection.Close()
-			panel.external = true
-			panel.status = "controller"
-		}
-	}
+	panel.refreshControllerLocked(enrolledControllerIsLocal, localPanelListening)
 	return panel
 }
 
 func (panel *ManagementPanel) SetEnabled(enabled bool) (bool, string) {
 	panel.mu.Lock()
 	defer panel.mu.Unlock()
+	panel.refreshControllerLocked(enrolledControllerIsLocal, localPanelListening)
 	if enabled {
 		if panel.external {
 			return true, ""
 		}
 		if panel.server != nil {
 			return true, ""
+		}
+		if panel.localController {
+			// A relay to our own enrolled endpoint would proxy to itself once
+			// it occupies the controller's port. Wait for xirangd to recover.
+			return false, "local control-plane service is unavailable"
 		}
 		if err := panel.startLocked(); err != nil {
 			panel.status = "error: " + err.Error()
@@ -102,14 +101,41 @@ func (panel *ManagementPanel) SetEnabled(enabled bool) (bool, string) {
 func (panel *ManagementPanel) State() (bool, string) {
 	panel.mu.Lock()
 	defer panel.mu.Unlock()
-	if panel.localController && !panel.external && panel.server == nil {
-		if connection, err := net.DialTimeout("tcp", "127.0.0.1:8899", 100*time.Millisecond); err == nil {
-			_ = connection.Close()
-			panel.external = true
-			panel.status = "controller"
-		}
-	}
+	panel.refreshControllerLocked(enrolledControllerIsLocal, localPanelListening)
 	return panel.server != nil || panel.external, panel.status
+}
+
+// Network-online does not guarantee that an overlay address already exists.
+// Re-evaluate locality on each heartbeat, including after a false startup result,
+// and stop advertising a disappeared listener as an enabled controller.
+func (panel *ManagementPanel) refreshControllerLocked(isLocal func(State) bool, listening func() bool) {
+	if panel.server != nil {
+		return
+	}
+	wasLocal := panel.localController
+	panel.localController = isLocal(panel.state)
+	if !panel.localController {
+		panel.external = false
+		if wasLocal {
+			panel.status = "disabled"
+		}
+		return
+	}
+	panel.external = listening()
+	if panel.external {
+		panel.status = "controller"
+	} else {
+		panel.status = "error: local control-plane service is unavailable"
+	}
+}
+
+func localPanelListening() bool {
+	connection, err := net.DialTimeout("tcp", "127.0.0.1:8899", 100*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = connection.Close()
+	return true
 }
 
 func enrolledControllerIsLocal(state State) bool {
@@ -118,26 +144,21 @@ func enrolledControllerIsLocal(state State) bool {
 		return false
 	}
 	target := strings.TrimSuffix(strings.ToLower(upstream.Hostname()), ".")
-	inventory, err := CollectInventory()
-	if err != nil {
-		return false
-	}
-	if strings.TrimSuffix(strings.ToLower(inventory.Hostname), ".") == target {
+	hostname, _ := os.Hostname()
+	if strings.TrimSuffix(strings.ToLower(hostname), ".") == target {
 		return true
 	}
 	targetIP := net.ParseIP(target)
 	if targetIP == nil {
 		return target == "localhost"
 	}
-	for _, networkInterface := range inventory.NetworkInterfaces {
-		for _, rawAddress := range networkInterface.Addresses {
-			address := rawAddress
-			if ip, _, parseErr := net.ParseCIDR(rawAddress); parseErr == nil {
-				address = ip.String()
-			}
-			if ip := net.ParseIP(address); ip != nil && ip.Equal(targetIP) {
-				return true
-			}
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, address := range addresses {
+		if ip, _, parseErr := net.ParseCIDR(address.String()); parseErr == nil && ip.Equal(targetIP) {
+			return true
 		}
 	}
 	return targetIP.IsLoopback()

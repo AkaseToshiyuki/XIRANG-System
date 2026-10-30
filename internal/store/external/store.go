@@ -510,3 +510,29 @@ func (store *Store) Close() error {
 	dbErr := store.database.Close()
 	return errors.Join(syncErr, localErr, unlockErr, connErr, dbErr)
 }
+
+func (store *Store) PutClusterBranding(ctx context.Context, expected uint64, value domain.ClusterBranding, audit domain.AuditEvent) error {
+	if err := store.Store.PutClusterBranding(ctx, expected, value, audit); err != nil {
+		return err
+	}
+	return store.persist(ctx)
+}
+
+func (store *Store) PutNodeHealth(ctx context.Context, snapshot domain.NodeHealthSnapshot, events []domain.SystemEvent) error {
+	if err := store.Store.PutNodeHealth(ctx, snapshot, events); err != nil {
+		return err
+	}
+	return store.persist(ctx)
+}
+func (store *Store) AppendSystemNote(ctx context.Context, event domain.SystemEvent, audit domain.AuditEvent) error {
+	if err := store.Store.AppendSystemNote(ctx, event, audit); err != nil {
+		return err
+	}
+	return store.persist(ctx)
+}
+func (store *Store) PutBMCAction(ctx context.Context, action domain.BMCAction, audit domain.AuditEvent) error {
+	if err := store.Store.PutBMCAction(ctx, action, audit); err != nil {
+		return err
+	}
+	return store.persist(ctx)
+}

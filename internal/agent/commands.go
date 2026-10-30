@@ -37,6 +37,7 @@ type pendingCertificateRotation struct {
 }
 
 type commandHandlers struct {
+	setBMCIdentify       func(context.Context, *xirangv1.SetBMCIdentify) (bool, string)
 	executor             *NativeExecutor
 	currentIdentity      func() string
 	rotateCertificate    func(context.Context) (string, error)
@@ -132,6 +133,8 @@ func applyControlCommandWithHandlers(ctx context.Context, directory string, stat
 		}
 	} else if command := message.GetUpdateNetworkProbeTargets(); command != nil && handlers.setNetworkTargets != nil {
 		acknowledgement.Accepted, acknowledgement.Reason = handlers.setNetworkTargets(command.Targets)
+	} else if command := message.GetSetBmcIdentify(); command != nil && handlers.setBMCIdentify != nil {
+		acknowledgement.Accepted, acknowledgement.Reason = handlers.setBMCIdentify(ctx, command)
 	} else if command := message.GetSetManagementPanel(); command != nil && handlers.setManagementPanel != nil {
 		acknowledgement.Accepted, acknowledgement.Reason = handlers.setManagementPanel(command.Enabled)
 		if acknowledgement.Accepted {

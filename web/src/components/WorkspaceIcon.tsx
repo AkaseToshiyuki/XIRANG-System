@@ -1,8 +1,10 @@
-type IconName = "overview" | "topology" | "alerts" | "nodes" | "enrollment" | "jobs" | "queues" | "builds" | "storage" | "accounting" | "terminal" | "access";
+type IconName = "overview" | "topology" | "alerts" | "nodes" | "enrollment" | "jobs" | "queues" | "builds" | "storage" | "accounting" | "terminal" | "access" | "settings" | "health";
 
 export function WorkspaceIcon({ name }: { name: IconName }) {
   const common = { fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
   return <span className="workspace-icon" aria-hidden="true"><svg viewBox="0 0 24 24" {...common}>
+    {name === "health" && <><path d="M3 12h4l3-7 4 14 3-7h4" /><rect x="2" y="2" width="20" height="20" rx="4" /></>}
+    {name === "settings" && <><path d="M4 6h16M4 12h16M4 18h16" /><circle cx="9" cy="6" r="2" /><circle cx="16" cy="12" r="2" /><circle cx="8" cy="18" r="2" /></>}
     {name === "overview" && <><path d="M4 4h6v6H4zM14 4h6v4h-6zM14 12h6v8h-6zM4 14h6v6H4z" /></>}
     {name === "topology" && <><circle cx="6" cy="6" r="2.2" /><circle cx="18" cy="7" r="2.2" /><circle cx="12" cy="18" r="2.2" /><path d="m8 7 7.8-.2M7.4 7.8l3.4 8M16.8 9l-3.5 6.8" /></>}
     {name === "alerts" && <><path d="M6.5 9a5.5 5.5 0 0 1 11 0c0 6 2.5 6 2.5 7.5H4c0-1.5 2.5-1.5 2.5-7.5Z" /><path d="M9.5 19a2.7 2.7 0 0 0 5 0" /></>}
