@@ -105,15 +105,11 @@ func (hub *Hub) RestoreNodeModeCommands(nodes []domain.Node) error {
 }
 
 func (hub *Hub) Enqueue(nodeID string, message *xirangv1.ControlMessage) error {
-	if nodeID == "" || message == nil || message.MessageId == "" || message.SentAt == nil {
-		return errors.New("node ID, command message ID, and timestamp are required")
+	if nodeID == "" {
+		return errors.New("node ID is required")
 	}
-	if message.GetRunAssignment() == nil && message.GetCancelAssignment() == nil && message.GetReleaseAssignment() == nil && message.GetSetAssignmentStoragePolicy() == nil &&
-		message.GetSetNodeMode() == nil && message.GetRotateCertificate() == nil &&
-		message.GetSetTelemetryInterval() == nil && message.GetUpdateNetworkProbeTargets() == nil &&
-		message.GetOpenTerminal() == nil && message.GetTerminalInput() == nil && message.GetResizeTerminal() == nil && message.GetCloseTerminal() == nil &&
-		message.GetRunNativeBuild() == nil && message.GetSetManagementPanel() == nil {
-		return errors.New("control message does not contain a command")
+	if err := validateQueuedControlMessage(message); err != nil {
+		return err
 	}
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
@@ -187,7 +183,7 @@ func validateQueuedControlMessage(message *xirangv1.ControlMessage) error {
 		message.GetSetAssignmentStoragePolicy() == nil && message.GetSetNodeMode() == nil && message.GetRotateCertificate() == nil &&
 		message.GetSetTelemetryInterval() == nil && message.GetUpdateNetworkProbeTargets() == nil &&
 		message.GetOpenTerminal() == nil && message.GetTerminalInput() == nil && message.GetResizeTerminal() == nil && message.GetCloseTerminal() == nil &&
-		message.GetRunNativeBuild() == nil && message.GetSetManagementPanel() == nil {
+		message.GetRunNativeBuild() == nil && message.GetSetManagementPanel() == nil && message.GetSetBmcIdentify() == nil {
 		return errors.New("control message does not contain a command")
 	}
 	return nil
