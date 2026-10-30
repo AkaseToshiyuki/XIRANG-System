@@ -1,0 +1,15 @@
+# Replace the example hostname and provision a revocable viewer-role API token.
+# Keep the token file readable only by the Prometheus service identity.
+global:
+  scrape_interval: 60s
+  scrape_timeout: 10s
+scrape_configs:
+  - job_name: xirang
+    scheme: https
+    metrics_path: /api/v1/metrics
+    authorization:
+      credentials_file: /etc/prometheus/xirang-viewer.token
+    tls_config:
+      ca_file: /etc/prometheus/xirang-ca.pem
+    static_configs:
+      - targets: ['controller.example.org:8899']
