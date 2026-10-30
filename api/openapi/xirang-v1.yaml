@@ -8,6 +8,36 @@ servers:
 security:
   - managementBearer: []
 paths:
+  /alert-policy:
+    get:
+      operationId: getAlertPolicy
+      summary: Read effective alert durations, notification routing and delivery objective
+      responses:
+        "200":
+          description: Persisted policy or configured startup defaults before the first save
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      operationId: updateAlertPolicy
+      summary: Administrator-only audited alert policy update with revision comparison
+      description: Durations apply to pending interface alerts. Silencing and route filters affect pending webhook deliveries without hiding alerts; suppressed deliveries remain terminal and are not replayed after silence expires. Destination and signing secrets remain host configuration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertPolicy" }
+      responses:
+        "200":
+          description: Saved policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertPolicy" }
+        "400": { description: Invalid durations, route filters or silence exceeding 30 days }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: Stale revision; reload before saving }
   /cluster/branding:
     get:
       security: []
@@ -1718,6 +1748,25 @@ components:
     NotFound:
       description: Resource not found
   schemas:
+    AlertPolicy:
+      type: object
+      additionalProperties: false
+      required: [triggerAfterSeconds, resolveAfterSeconds, routeEnabled, minimumSeverity, kinds, deliveryTargetSeconds, revision]
+      properties:
+        triggerAfterSeconds: { type: number, minimum: 0.001, maximum: 86400 }
+        resolveAfterSeconds: { type: number, minimum: 0.001, maximum: 86400 }
+        routeEnabled: { type: boolean }
+        minimumSeverity: { type: string, enum: [info, warning, critical] }
+        kinds:
+          type: array
+          maxItems: 4
+          uniqueItems: true
+          description: Empty means no condition types are routed.
+          items: { type: string, enum: [interface_health, job_storage, group_storage, node_storage] }
+        silenceUntil: { type: string, format: date-time, description: At most 30 days ahead; expired values are cleared on save. }
+        deliveryTargetSeconds: { type: integer, minimum: 1, maximum: 86400 }
+        revision: { type: integer, format: int64, minimum: 0 }
+        updatedAt: { type: string, format: date-time }
     ClusterBranding:
       type: object
       required: [name, logoDataUrl, revision]
@@ -3082,7 +3131,7 @@ components:
         alertId: { type: string }
         alertRevision: { type: integer, format: int64, minimum: 1 }
         alert: { $ref: "#/components/schemas/Alert" }
-        state: { type: string, enum: [pending, retrying, delivered, failed] }
+        state: { type: string, enum: [pending, retrying, delivered, failed, suppressed] }
         attempts: { type: integer, minimum: 0 }
         responseStatus: { type: integer, minimum: 100, maximum: 599 }
         lastError: { type: string, maxLength: 512 }
@@ -3090,6 +3139,8 @@ components:
         nextAttemptAt: { type: string, format: date-time }
         lastAttemptAt: { type: string, format: date-time }
         deliveredAt: { type: string, format: date-time }
+        targetSeconds: { type: integer, minimum: 1, maximum: 86400, description: Objective captured when dispatch first evaluates the event; retained across retries. }
+        policyRevision: { type: integer, format: int64, minimum: 0 }
     AuditEvent:
       type: object
       required: [id, actorType, actorId, action, targetKind, targetId, outcome, occurredAt]

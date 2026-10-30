@@ -59,7 +59,8 @@ func (service *Service) dispatch(ctx context.Context, delivery domain.AlertDeliv
 	}
 	if err == nil {
 		delivery.State = domain.AlertDeliveryDelivered
-		delivery.DeliveredAt = &now
+		completed := service.now().UTC()
+		delivery.DeliveredAt = &completed
 		delivery.NextAttemptAt = nil
 		delivery.LastError = ""
 	} else {
@@ -70,7 +71,7 @@ func (service *Service) dispatch(ctx context.Context, delivery domain.AlertDeliv
 			delivery.NextAttemptAt = nil
 		} else {
 			delivery.State = domain.AlertDeliveryRetrying
-			next := now.Add(service.backoff(delivery.Attempts))
+			next := service.now().UTC().Add(service.backoff(delivery.Attempts))
 			delivery.NextAttemptAt = &next
 		}
 	}

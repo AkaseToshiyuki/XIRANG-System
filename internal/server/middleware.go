@@ -107,6 +107,12 @@ func credentialOptionalRoute(method, path string) bool {
 }
 
 func requiredPermission(method, path string) string {
+	if path == "/api/v1/alert-policy" {
+		if method == http.MethodGet {
+			return identity.PermissionRead
+		}
+		return identity.PermissionAccessManage
+	}
 	if strings.HasPrefix(path, "/api/v1/nodes/") && strings.Contains(path, "/health") {
 		return identity.PermissionAccessManage
 	}

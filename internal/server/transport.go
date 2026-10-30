@@ -17,6 +17,7 @@ import (
 
 	"github.com/xirang-grid/xirang/internal/accounting"
 	"github.com/xirang-grid/xirang/internal/alerting"
+	"github.com/xirang-grid/xirang/internal/alertpolicy"
 	"github.com/xirang-grid/xirang/internal/backup"
 	"github.com/xirang-grid/xirang/internal/branding"
 	"github.com/xirang-grid/xirang/internal/clusterops"
@@ -97,6 +98,10 @@ func decodeJSON(writer http.ResponseWriter, request *http.Request, destination a
 func writeError(writer http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	switch {
+	case errors.Is(err, alertpolicy.ErrInvalid):
+		status = http.StatusBadRequest
+	case errors.Is(err, alertpolicy.ErrConflict):
+		status = http.StatusConflict
 	case errors.Is(err, hosthealth.ErrInvalid):
 		status = http.StatusBadRequest
 	case errors.Is(err, hosthealth.ErrNotFound):

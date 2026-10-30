@@ -48,6 +48,15 @@ func TestBrandingHealthAndActionsSynchronizeBeforeShutdown(t *testing.T) {
 			t.Fatal("branding mutation did not sync")
 		}
 	})
+	if err := store.PutAlertPolicy(ctx, 0, domain.AlertPolicy{Revision: 1, TriggerAfterSeconds: 17}, domain.AuditEvent{ID: "policy"}); err != nil {
+		t.Fatal(err)
+	}
+	verify(func(recovered *boltstore.Store) {
+		value, err := recovered.GetAlertPolicy(ctx)
+		if err != nil || value.Revision != 1 || value.TriggerAfterSeconds != 17 {
+			t.Fatal("alert policy mutation did not sync before shutdown")
+		}
+	})
 	if err := store.PutNodeHealth(ctx, domain.NodeHealthSnapshot{NodeID: "node", ObservedAt: now, ReceivedAt: now}, []domain.SystemEvent{{ID: "event", NodeID: "node", Kind: "error", ReceivedAt: now}}); err != nil {
 		t.Fatal(err)
 	}

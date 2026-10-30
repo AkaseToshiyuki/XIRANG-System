@@ -13,8 +13,71 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xirang-grid/xirang/internal/alertpolicy"
 	"github.com/xirang-grid/xirang/internal/domain"
 )
+
+func TestPolicySuppressionIsDurableWithoutSendingAndExpiryAllowsNewEvents(t *testing.T) {
+	base := time.Now().UTC()
+	policy := alertpolicy.Defaults(time.Second, time.Second)
+	until := base.Add(time.Hour)
+	policy.SilenceUntil, policy.Revision = &until, 4
+	repository := newMemoryRepository(deliveryAt("silenced", base))
+	transport := &recordingTransport{status: 204}
+	service, err := NewService(repository, transport, Config{URL: "https://alerts.example.test", Secret: []byte(strings.Repeat("x", 32)), Policy: func(context.Context) (domain.AlertPolicy, error) { return policy, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return base }
+	if err := service.DispatchDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	suppressed := repository.deliveries["silenced"]
+	if transport.request != nil || suppressed.State != domain.AlertDeliverySuppressed || suppressed.Attempts != 0 || suppressed.PolicyRevision != 4 || suppressed.NextAttemptAt != nil || suppressed.LastError == "" {
+		t.Fatalf("silence was not retained without HTTP: %+v", suppressed)
+	}
+	if _, err := service.Retry(context.Background(), "silenced"); !errors.Is(err, ErrInvalidState) {
+		t.Fatal("suppressed event replayed")
+	}
+	base = until.Add(time.Second)
+	repository.deliveries["new"] = deliveryAt("new", base)
+	if err := service.DispatchDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if repository.deliveries["new"].State != domain.AlertDeliveryDelivered || repository.deliveries["silenced"].State != domain.AlertDeliverySuppressed {
+		t.Fatal("expiry did not deliver only new eligible events")
+	}
+}
+
+func TestPolicyReadFailureNeverSendsAndDeliveryUsesCompletionTime(t *testing.T) {
+	base := time.Now().UTC()
+	repository := newMemoryRepository(deliveryAt("one", base))
+	transport := &recordingTransport{status: 204}
+	readErr := errors.New("policy unavailable")
+	policy := alertpolicy.Defaults(time.Second, time.Second)
+	policy.DeliveryTargetSeconds = 3
+	service, err := NewService(repository, transport, Config{URL: "https://alerts.example.test", Secret: []byte(strings.Repeat("x", 32)), Policy: func(context.Context) (domain.AlertPolicy, error) { return policy, readErr }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time {
+		if transport.request != nil {
+			return base.Add(5 * time.Second)
+		}
+		return base
+	}
+	if err := service.DispatchDue(context.Background()); err == nil || transport.request != nil {
+		t.Fatal("policy failure allowed HTTP")
+	}
+	readErr = nil
+	if err := service.DispatchDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	delivered := repository.deliveries["one"]
+	if delivered.TargetSeconds != 3 || delivered.DeliveredAt == nil || !delivered.DeliveredAt.Equal(base.Add(5*time.Second)) {
+		t.Fatalf("latency excludes request duration: %+v", delivered)
+	}
+}
 
 func TestServiceDeliversSignedWebhook(t *testing.T) {
 	base := time.Date(2026, 7, 18, 1, 2, 3, 0, time.UTC)
@@ -256,7 +319,7 @@ func (repository *memoryRepository) PutDelivery(_ context.Context, delivery doma
 func deliveryAt(id string, at time.Time) domain.AlertDelivery {
 	return domain.AlertDelivery{
 		ID: id, EventType: "alert.firing", AlertID: "alert-1", AlertRevision: 2,
-		Alert: domain.Alert{ID: "alert-1", Status: domain.AlertStatusFiring, Revision: 2},
+		Alert: domain.Alert{ID: "alert-1", Kind: "interface_health", Severity: domain.AlertSeverityWarning, Status: domain.AlertStatusFiring, Revision: 2},
 		State: domain.AlertDeliveryPending, CreatedAt: at, NextAttemptAt: &at,
 	}
 }

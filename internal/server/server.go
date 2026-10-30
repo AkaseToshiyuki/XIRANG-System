@@ -12,6 +12,7 @@ import (
 	"time"
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
+	"github.com/xirang-grid/xirang/internal/alertpolicy"
 	"github.com/xirang-grid/xirang/internal/backup"
 	"github.com/xirang-grid/xirang/internal/branding"
 	"github.com/xirang-grid/xirang/internal/domain"
@@ -154,6 +155,7 @@ type TelemetryIntervalManager interface {
 }
 
 type Config struct {
+	AlertPolicy        *alertpolicy.Service
 	HostHealth         *hosthealth.Service
 	Branding           *branding.Service
 	Address            string
@@ -294,6 +296,9 @@ func New(config Config) *Server {
 	}
 	if config.Alerts != nil {
 		registerAlertRoutes(mux, config.Alerts, config.AdminToken)
+	}
+	if config.AlertPolicy != nil {
+		registerAlertPolicyRoutes(mux, config.AlertPolicy, config.AdminToken)
 	}
 	if config.Notifications != nil {
 		registerNotificationRoutes(mux, config.Notifications, config.AdminToken)

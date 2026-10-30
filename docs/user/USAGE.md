@@ -48,6 +48,27 @@ through external PostgreSQL state. Stale concurrent updates are rejected; reload
 before editing again. Regular users have neither the settings entry nor write
 permission on its API.
 
+## Alert and notification policy
+
+Administrators can save trigger/recovery durations, notification filters, a
+silence end time, and a delivery objective in **Cluster settings**. Durations
+apply to interface alerts; job and storage protection remains immediate. Saved
+policy survives restart and takes effect on subsequent evaluations/deliveries.
+If another administrator changed it, reload before saving again.
+
+Routing uses the webhook configured by the host administrator. Enabling the
+route does not create a destination. Silence (up to 30 days), disabled routing,
+severity and type filters affect notifications only. Suppressed records retain
+their reason, cannot be manually retried and are not replayed when silence ends.
+Clear the silence end time to resume notifications for new transitions.
+
+The alert center reports delivery objectives over its latest **up to 200**
+records, from event creation through successful HTTP completion. It separately
+shows excluded suppressed, not-yet-due and older unmeasured records. This bounded
+view is not a complete long-term SLO. A successful HTTP response does not prove
+that a person received or read the message. Use arrow keys, Home and End to
+switch alert tabs; alert title buttons open details using the keyboard.
+
 ## System health and BMC
 
 Administrators can select a node in **System health** to inspect source status,

@@ -5,6 +5,70 @@ type Role = "admin" | "viewer" | "builder";
 type Language = "zh" | "en";
 type Theme = "dark" | "light";
 
+test("alert policy saves, reloads, rejects stale edits and fits narrow screens", async ({ page }) => {
+  await loginAsAdmin(page);
+  await page.getByRole("button", { name: "Cluster settings", exact: true }).click();
+  const form = page.getByRole("form", { name: "Alert policy", exact: true });
+  await expect(form.getByText(/No notification destination is configured/)).toBeVisible();
+  await form.getByLabel("Trigger duration (seconds)").fill("12.5");
+  await form.getByLabel("Recovery duration (seconds)").fill("45");
+  await form.getByLabel("Minimum notification severity").selectOption("critical");
+  await form.getByLabel("Delivery objective (seconds)").fill("120");
+  await form.getByLabel("Job storage", { exact: true }).uncheck();
+  const silence = new Date(Date.now() + 3600_000).toISOString().slice(0, 16);
+  await form.getByLabel(/Silence until/).fill(silence);
+  const saved = page.waitForRequest((request) => request.method() === "PUT" && request.url().endsWith("/alert-policy"));
+  await form.getByRole("button", { name: "Save alert policy", exact: true }).click();
+  expect((await saved).postDataJSON()).toMatchObject({ triggerAfterSeconds: 12.5, resolveAfterSeconds: 45, minimumSeverity: "critical", deliveryTargetSeconds: 120, kinds: ["interface_health", "group_storage", "node_storage"], revision: 0 });
+  await expect(form.getByRole("status")).toContainText("Alert policy saved");
+  await form.getByLabel("Trigger duration (seconds)").fill("99");
+  await form.getByRole("button", { name: "Reload alert policy" }).click();
+  await expect(form.getByLabel("Trigger duration (seconds)")).toHaveValue("12.5");
+  await expect(form.getByLabel(/Silence until/)).toHaveValue(silence);
+  await page.route("**/api/v1/alert-policy", (route) => route.request().method() === "PUT" ? route.fulfill({ status: 409, json: { error: "Alert policy changed; reload before saving" } }) : route.fallback());
+  await form.getByRole("button", { name: "Save alert policy", exact: true }).click();
+  await expect(form.getByRole("alert")).toContainText("reload before saving");
+  await expect(form.getByRole("status")).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await form.getByRole("button", { name: "Reload alert policy" }).scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+});
+
+test("alert delivery objectives distinguish exclusions and support keyboard navigation", async ({ page }) => {
+  await loginAsAdmin(page);
+  const at = new Date(Date.now() - 600_000).toISOString();
+  const alert = { id: "alert-fixture", revision: 1, kind: "interface_health", sourceInterface: "eth0", summary: "Interface packet loss", severity: "critical", status: "firing", firstObservedAt: at, lastObservedAt: at };
+  await page.route("**/api/v1/alerts?*", (route) => route.fulfill({ json: { items: [alert] } }));
+  const base = { alertId: alert.id, alertRevision: 1, eventType: "alert.firing", alert, attempts: 1, createdAt: at, targetSeconds: 60 };
+  await page.route("**/api/v1/alert-deliveries?*", (route) => route.fulfill({ json: { webhook: { enabled: true, destination: "receiver.example.test" }, items: [
+    { ...base, id: "suppressed", state: "suppressed", lastError: "notification silenced by policy" },
+    { ...base, id: "on-time", state: "delivered", deliveredAt: new Date(Date.parse(at) + 30_000).toISOString() },
+    { ...base, id: "late", state: "delivered", deliveredAt: new Date(Date.parse(at) + 61_000).toISOString() },
+    { ...base, id: "overdue", state: "retrying" },
+    { ...base, id: "waiting", state: "pending", createdAt: new Date().toISOString() },
+    { ...base, id: "legacy", state: "delivered", targetSeconds: undefined },
+  ] } }));
+  await page.getByRole("button", { name: "Alert center", exact: true }).click();
+  const summary = page.getByLabel("Delivery objective summary");
+  await expect(summary).toContainText("33%");
+  await expect(summary).toContainText("1/3");
+  await expect(summary).toContainText("2 late or failed, 1 suppressed");
+  await expect(summary).toContainText("1 not yet due and 1 without a recorded objective");
+  const active = page.getByRole("tab", { name: /^Active/ });
+  await active.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("tab", { name: /^Critical/ })).toBeFocused();
+  await expect(page.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "alert-tab-critical");
+  await page.keyboard.press("End");
+  await expect(page.getByRole("tab", { name: /^All/ })).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(active).toBeFocused();
+  await page.getByRole("button", { name: "View alert: Interface packet loss" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".alert-inspector")).toContainText("notification silenced by policy");
+  await expect(page.getByRole("button", { name: "Retry now" })).toHaveCount(0);
+});
+
 test("cluster settings save public branding, survive reload, and restore defaults", async ({ page }) => {
   await loginAsAdmin(page);
   await page.getByRole("button", { name: "Cluster settings", exact: true }).click();
@@ -571,6 +635,7 @@ async function mockControlPlane(page: Page, role: Role) {
     { id: "group_userlabs", name: "UserLabs", resourceQuota: { milliCpu: 8000, memoryBytes: 16_000_000_000, ephemeralStorageBytes: 0 }, storageQuotaBytes: 100_000_000_000, maxConcurrentJobs: 4, maxJobTimeoutSeconds: 604800, disabled: false, createdAt: "2026-08-02T00:00:00Z", updatedAt: "2026-08-02T00:00:00Z" },
   ];
   let branding = { name: "XIRANG", logoDataUrl: "", revision: 0 };
+  let alertPolicy = { triggerAfterSeconds: 30, resolveAfterSeconds: 30, routeEnabled: true, minimumSeverity: "info", kinds: ["interface_health", "job_storage", "group_storage", "node_storage"], deliveryTargetSeconds: 300, revision: 0 };
   let accessSettings = { defaultUserGroupId: "", updatedAt: "2026-08-02T00:00:00Z" };
   let localUsers = [{ id: "user_admin", username: "admin", displayName: "E2E Administrator", role: "admin", groupIds: ["group_userlabs"], status: "active", createdAt: "2026-08-02T00:00:00Z", approvedAt: "2026-08-02T00:00:00Z" }];
   await page.route("**/api/v1/**", async (route) => {
@@ -580,6 +645,15 @@ async function mockControlPlane(page: Page, role: Role) {
     if (/\/nodes\/[^/]+\/health$/.test(url.pathname)) return json({ error: "No health report" }, 404);
     if (/\/nodes\/[^/]+\/health\/events$/.test(url.pathname)) return json({ items: [] });
     switch (url.pathname) {
+      case "/api/v1/alert-policy":
+        if (request.method() === "PUT") {
+          if (role !== "admin") return json({ error: "administrator required" }, 403);
+          if (request.postDataJSON().revision !== alertPolicy.revision) return json({ error: "Alert policy changed; reload before saving" }, 409);
+          alertPolicy = { ...request.postDataJSON(), revision: alertPolicy.revision + 1 };
+        }
+        return json(alertPolicy);
+      case "/api/v1/alert-deliveries":
+        return json({ webhook: { enabled: false }, items: [] });
       case "/api/v1/cluster/branding":
         if (request.method() === "PUT") {
           if (role !== "admin") return json({ error: "administrator required" }, 403);

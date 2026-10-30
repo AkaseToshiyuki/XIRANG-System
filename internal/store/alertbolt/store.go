@@ -320,7 +320,7 @@ func pruneDeliveries(bucket *bbolt.Bucket, retention int) error {
 		if err := json.Unmarshal(encoded, &delivery); err != nil {
 			return err
 		}
-		if delivery.State == domain.AlertDeliveryDelivered || delivery.State == domain.AlertDeliveryFailed {
+		if delivery.State == domain.AlertDeliveryDelivered || delivery.State == domain.AlertDeliveryFailed || delivery.State == domain.AlertDeliverySuppressed {
 			completed = append(completed, completedDelivery{id: string(key), at: delivery.CreatedAt})
 		}
 		return nil
