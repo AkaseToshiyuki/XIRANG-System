@@ -38,6 +38,8 @@ type hostHealthCollector struct {
 	ipmiError       string
 	identify        bool
 	run             healthCommand
+	selListFailure  string
+	selListRetryAt  time.Time
 }
 
 func configuredHostHealth() *hostHealthCollector {
@@ -225,13 +227,34 @@ func (collector *hostHealthCollector) collectSEL(ctx context.Context) ([]*xirang
 	}
 	info, infoErr := run("sel", "info")
 	fields := parseIPMIFields(info)
+	// Retry an unsuccessful linear walk only when metadata changes or after a
+	// bounded cooldown. Continue reading the latest record on every report.
+	// The raw info text includes last-add/erase times, count and overflow state;
+	// missing or malformed metadata never suppresses a fresh attempt.
+	metadataKey := ""
+	if _, countErr := strconv.ParseUint(fields["Entries"], 10, 16); infoErr == nil && countErr == nil && fields["Last Add Time"] != "" && fields["Last Del Time"] != "" {
+		digest := sha256.Sum256(info)
+		metadataKey = hex.EncodeToString(digest[:])
+	}
 	capacity := ""
 	if strings.EqualFold(fields["Overflow"], "true") || strings.HasPrefix(fields["Free Space"], "0 bytes") {
 		capacity = "; SEL is full or overflowed: events may be missing and new events may not be recorded; no log was cleared"
 	}
 	// Even basic `list last` walks older records before producing any output.
 	// A full BMC log can exceed the deadline before the requested tail is reached.
-	data, err := run("-c", "sel", "list", "last", "128")
+	var data []byte
+	var err error
+	coolingDown := metadataKey != "" && metadataKey == collector.selListFailure && time.Now().Before(collector.selListRetryAt)
+	if coolingDown {
+		err = errors.New("unchanged SEL list query is in cooldown")
+	} else {
+		data, err = run("-c", "sel", "list", "last", "128")
+		if err != nil && metadataKey != "" {
+			collector.selListFailure, collector.selListRetryAt = metadataKey, time.Now().Add(10*time.Minute)
+		} else {
+			collector.selListFailure, collector.selListRetryAt = "", time.Time{}
+		}
+	}
 	events, partial := parseIPMISEL(data)
 	if err != nil {
 		status.Message = "SEL list query failed or timed out; returned records may be incomplete. BMC clock and timezone are unverified"

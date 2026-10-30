@@ -152,6 +152,52 @@ func TestSELFullLogFallsBackWithoutClaimingCompleteHistory(t *testing.T) {
 	}
 }
 
+func TestSELFailedWalkCooldownTracksMetadataAndRetries(t *testing.T) {
+	info := "Entries : 3639\nFree Space : 0 bytes\nOverflow : true\nLast Add Time : 08/02/2026 08:54:22\nLast Del Time : 06/20/2026 06:24:00\n"
+	latest := "SEL Record ID : 0e37\nRecord Type : 02\nTimestamp : 08/02/2026 08:54:22\nSensor Type : Memory\nSensor Number : 5c\nEvent Direction : Assertion Event\nEvent Data : a00a20\nDescription : Correctable ECC\n"
+	walks, direct := 0, 0
+	collector := &hostHealthCollector{ipmi: "/ipmitool", run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		switch strings.Join(args, " ") {
+		case "sel info":
+			return []byte(info), nil
+		case "-c sel list last 128":
+			walks++
+			return nil, context.DeadlineExceeded
+		case "sel get 0xffff":
+			direct++
+			return []byte(latest), nil
+		default:
+			t.Fatalf("unexpected hardware operation: %v", args)
+			return nil, nil
+		}
+	}}
+	for range 3 {
+		events, source := collector.collectSEL(context.Background())
+		if len(events) != 1 || source.Status != "partial" || !strings.Contains(source.Message, "Earlier records are missing") {
+			t.Fatalf("incomplete history was hidden: %v %v", events, source)
+		}
+	}
+	if walks != 1 || direct != 3 {
+		t.Fatalf("unchanged SEL was walked again: walks=%d direct=%d", walks, direct)
+	}
+	info = strings.Replace(info, "Entries : 3639", "Entries : 3638", 1)
+	collector.collectSEL(context.Background())
+	if walks != 2 {
+		t.Fatal("metadata change did not trigger retry")
+	}
+	collector.selListRetryAt = time.Now().Add(-time.Second)
+	collector.collectSEL(context.Background())
+	if walks != 3 {
+		t.Fatal("cooldown expiry did not trigger retry")
+	}
+	info = "Entries : malformed\n"
+	collector.collectSEL(context.Background())
+	collector.collectSEL(context.Background())
+	if walks != 5 {
+		t.Fatal("malformed metadata suppressed collection")
+	}
+}
+
 func TestBMCIdentifyPolicyDeadlineAndCommandReplay(t *testing.T) {
 	calls := 0
 	collector := &hostHealthCollector{ipmi: "/ipmitool", run: func(_ context.Context, _ string, arguments ...string) ([]byte, error) {
