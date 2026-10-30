@@ -37,6 +37,13 @@ func (store *Store) PutNodeHealth(ctx context.Context, snapshot domain.NodeHealt
 	})
 }
 
+func (store *Store) PutSystemEvents(ctx context.Context, nodeID string, events []domain.SystemEvent) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return store.database.Update(func(tx *bbolt.Tx) error { return putSystemEvents(tx, nodeID, events) })
+}
+
 func putSystemEvents(tx *bbolt.Tx, nodeID string, events []domain.SystemEvent) error {
 	bucket, err := tx.Bucket(systemEventsBucket).CreateBucketIfNotExists([]byte(nodeID))
 	if err != nil {

@@ -77,8 +77,10 @@ operator maintenance records. The Agent collects independently every 60 seconds.
 Older Agents without negotiated `host-health-v1` do not report this data. Missing,
 failed, stale and partial observations are explicit.
 
-- Linux journal collection is automatic: a rolling 24-hour window with up to 64
-  priority 0–4 entries and 64 correction/recovery keyword matches per collection.
+- Linux journal collection starts within the last 24 hours and then resumes from
+  persistent cursors, reading up to 64 oldest new priority 0–4 entries and 64
+  correction/recovery keyword matches per collection. Missing cursors are reported
+  as coverage gaps; source retention and event rate still limit coverage.
   It requires `journalctl` and access to the system journal. Windows Event Log,
   OpenRC syslog, the full rasdaemon database and lossless history are not included.
 - An installed `ipmitool` and local IPMI device enable automatic detection;
@@ -114,6 +116,19 @@ replay records and auditing; the UI distinguishes queued, acknowledged, failed a
 unknown outcomes. BMC acknowledgement does not replace physical LED verification.
 Power changes, reboot, fan control, threshold writes, raw IPMI and SEL clearing are
 not exposed. Monitoring does not repair or alter hardware automatically.
+
+The Agent continues collection while its controller connection is unavailable.
+Selected events are stored locally and, with negotiated `host-event-outbox-v1`,
+removed only after the controller confirms its durable commit. Retries are
+idempotent and do not replace current sensor snapshots. The queue is bounded by
+4,096 events, 16 MiB of encoded event content and seven days since capture,
+whichever is reached first; database overhead adds disk use. `event-outbox` reports
+cumulative unacknowledged evictions and journal cursor/skipped-record gaps. Such
+warnings persist across restart and do not prove an exact global loss count.
+Controller retention remains 2,000 events per node and 30 days. A running Agent
+is required; this is not lossless archival or independent backup. Older controllers
+receive legacy snapshots while the pending queue stays bounded and delivery is
+marked partial. See [operations](OPERATIONS.md#host-event-queue) for recovery.
 
 ## Enroll a node
 

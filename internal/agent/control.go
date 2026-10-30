@@ -65,6 +65,7 @@ type ControlLoopConfig struct {
 	NativeBuild       NativeBuildConfig
 	TerminalUser      string
 	terminalIdentity  *terminalIdentity
+	healthWorker      *healthWorker
 }
 
 func DefaultControlAddress(state State) (string, error) {
@@ -147,11 +148,26 @@ func RunControlLoop(ctx context.Context, state State, config ControlLoopConfig) 
 			emitControlEvent(config, fmt.Sprintf("eBPF flow monitoring active cgroup=%s", flowCollector.config.CgroupPath))
 		}
 	}
+	outbox, err := openHealthOutbox(config.StateDirectory, state.NodeID)
+	if err != nil {
+		return fmt.Errorf("open host event outbox: %w", err)
+	}
+	workerContext, stopWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	config.healthWorker = &healthWorker{collector: configuredHostHealth(), outbox: outbox, updates: make(chan struct{}, 1)}
+	go func() {
+		defer close(workerDone)
+		config.healthWorker.run(workerContext, time.Minute, func(message string) { emitControlEvent(config, message) })
+	}()
+	defer func() { stopWorker(); <-workerDone; outbox.db.Close() }()
 	backoff := config.MinBackoff
 	for {
 		currentState, err := LoadState(config.StateDirectory)
 		if err != nil {
 			return fmt.Errorf("reload Agent identity: %w", err)
+		}
+		if currentState.NodeID != state.NodeID {
+			return errors.New("agent node identity changed while the event outbox was open")
 		}
 		connected, err := runControlSession(ctx, currentState, config, executor, flowCollector, buildManager, managementPanel)
 		if ctx.Err() != nil {
@@ -263,6 +279,9 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 		inventorySnapshotCapability, resourceObservationCapability, interfaceHealthCapability, topologyObservationCapability,
 		assignmentLogCapability, deviceInventoryCapability, telemetryIntervalCapability, networkPathProbeCapability,
 		gangAssignmentCapability, mpiLaunchCapability, managementPanelCapability,
+	}
+	if config.healthWorker != nil {
+		capabilities = append(capabilities, hosthealth.OutboxCapability)
 	}
 	if healthCollector.identify {
 		capabilities = append(capabilities, hosthealth.IdentifyCapability)
@@ -455,8 +474,52 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 		assignmentLogs = executor.Logs()
 	}
 	var healthReports <-chan *xirangv1.HostHealthReport
+	var healthUpdates <-chan struct{}
+	durableHealth := config.healthWorker != nil && containsCapability(accepted.NegotiatedCapabilities, hosthealth.OutboxCapability)
 	if containsCapability(accepted.NegotiatedCapabilities, hosthealth.Capability) {
-		healthReports = healthCollector.reports(streamContext)
+		if config.healthWorker != nil {
+			healthUpdates = config.healthWorker.updates
+		} else {
+			healthReports = healthCollector.reports(streamContext)
+		}
+	}
+	var pendingHealth *pendingHealthBatch
+	var healthTicks <-chan time.Time
+	if durableHealth {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		healthTicks = ticker.C
+	}
+	sendHealthBatch := func() error {
+		if !durableHealth {
+			return nil
+		}
+		if pendingHealth != nil {
+			if time.Since(pendingHealth.sentAt) > 30*time.Second {
+				return errors.New("host event commit acknowledgement timed out")
+			}
+			return nil
+		}
+		batch, err := config.healthWorker.outbox.batch(time.Now())
+		if err != nil {
+			return fmt.Errorf("read host event outbox: %w", err)
+		}
+		if batch == nil {
+			return nil
+		}
+		batch.sentAt = time.Now()
+		pendingHealth = batch
+		return stream.Send(&xirangv1.AgentMessage{MessageId: agentMessageID(), SentAt: timestamppb.Now(), Payload: &xirangv1.AgentMessage_HostEvents{HostEvents: batch.message}})
+	}
+	sendHealthSnapshot := func() error {
+		if config.healthWorker == nil || !containsCapability(accepted.NegotiatedCapabilities, hosthealth.Capability) {
+			return nil
+		}
+		report := config.healthWorker.snapshot(durableHealth)
+		if report == nil {
+			return nil
+		}
+		return stream.Send(&xirangv1.AgentMessage{MessageId: agentMessageID(), SentAt: timestamppb.Now(), Payload: &xirangv1.AgentMessage_HostHealth{HostHealth: report}})
 	}
 	var terminalEvents <-chan *xirangv1.TerminalEvent
 	var terminalManager *TerminalManager
@@ -512,6 +575,12 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 		})
 	}
 	if err := sendHeartbeat(); err != nil {
+		return true, err
+	}
+	if err := sendHealthSnapshot(); err != nil {
+		return true, err
+	}
+	if err := sendHealthBatch(); err != nil {
 		return true, err
 	}
 	sendObservation := func() error {
@@ -594,6 +663,19 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 			if message.MessageId == "" || message.SentAt == nil {
 				return true, errors.New("control command requires an ID and timestamp")
 			}
+			if committed := message.GetHostEventsCommitted(); committed != nil {
+				if !durableHealth {
+					return true, errors.New("unexpected host event acknowledgement capability")
+				}
+				if err := config.healthWorker.outbox.acknowledge(pendingHealth, committed.BatchId); err != nil {
+					return true, err
+				}
+				pendingHealth = nil
+				if err := sendHealthBatch(); err != nil {
+					return true, err
+				}
+				continue
+			}
 			var acknowledgement *xirangv1.CommandAcknowledgement
 			commands, acknowledgement, err = applyControlCommandWithHandlers(ctx, config.StateDirectory, commands, message, handlers)
 			if err != nil {
@@ -622,6 +704,17 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 				MessageId: agentMessageID(), SentAt: timestamppb.Now(),
 				Payload: &xirangv1.AgentMessage_AssignmentUsage{AssignmentUsage: snapshot},
 			}); err != nil {
+				return true, err
+			}
+		case <-healthUpdates:
+			if err := sendHealthSnapshot(); err != nil {
+				return true, err
+			}
+			if err := sendHealthBatch(); err != nil {
+				return true, err
+			}
+		case <-healthTicks:
+			if err := sendHealthBatch(); err != nil {
 				return true, err
 			}
 		case report, ok := <-healthReports:

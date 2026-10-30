@@ -2,6 +2,7 @@ package controlstream
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,6 +15,80 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+type failingEventRepository struct {
+	hosthealth.Repository
+	fail bool
+}
+
+func (repository *failingEventRepository) PutSystemEvents(ctx context.Context, nodeID string, events []domain.SystemEvent) error {
+	if repository.fail {
+		return errors.New("injected persistence failure")
+	}
+	return repository.Repository.PutSystemEvents(ctx, nodeID, events)
+}
+
+func TestHostEventAcknowledgementRequiresNegotiationAndDurableCommit(t *testing.T) {
+	for _, scenario := range []string{"committed", "write-failed", "not-negotiated", "legacy-reporter", "invalid"} {
+		t.Run(scenario, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.db")
+			store, err := boltstore.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repository := &failingEventRepository{Repository: store, fail: scenario == "write-failed"}
+			service := hosthealth.New(repository)
+			hello := helloMessage("node_test")
+			if scenario != "not-negotiated" {
+				hello.GetHello().Capabilities = append(hello.GetHello().Capabilities, hosthealth.OutboxCapability)
+			}
+			event := &xirangv1.SystemEvent{Source: "journal", SourceRecordId: "durable-cursor", Message: "corrected ECC", Kind: "corrected", Severity: "warning", OccurredAt: timestamppb.New(time.Now().Add(-48 * time.Hour))}
+			if scenario == "invalid" {
+				event.Kind = "repair"
+			}
+			message := &xirangv1.AgentMessage{MessageId: "events", SentAt: timestamppb.Now(), Payload: &xirangv1.AgentMessage_HostEvents{HostEvents: &xirangv1.HostEventBatch{BatchId: "batch-1", Events: []*xirangv1.SystemEvent{event}}}}
+			stream := newTestStream("node_test", []*xirangv1.AgentMessage{hello, message, message})
+			server := New(&testHeartbeater{}, time.Second)
+			server.SetHostHealthReporter(service)
+			if scenario == "legacy-reporter" {
+				server.SetHostHealthReporter(&healthTestReporter{})
+			}
+			err = server.Connect(stream)
+			if scenario == "committed" {
+				if err != nil || len(stream.sent) != 3 || stream.sent[1].GetHostEventsCommitted().GetBatchId() != "batch-1" || stream.sent[2].GetHostEventsCommitted().GetBatchId() != "batch-1" {
+					t.Fatalf("missing commit ACK: %v %v", stream.sent, err)
+				}
+			} else {
+				want := codes.InvalidArgument
+				if scenario == "write-failed" {
+					want = codes.Unavailable
+				}
+				if status.Code(err) != want || len(stream.sent) != 1 {
+					t.Fatalf("failed batch acknowledged: %v %v", stream.sent, err)
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store, err = boltstore.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			events, err := store.ListSystemEvents(context.Background(), "node_test", "", 200)
+			want := 0
+			if scenario == "committed" {
+				want = 1
+			}
+			if err != nil || len(events) != want {
+				t.Fatalf("durable deduplicated event count=%d want=%d err=%v", len(events), want, err)
+			}
+			if len(events) > 0 && (events[0].NodeID != "node_test" || events[0].Actor != "") {
+				t.Fatal("authenticated node or operator boundary lost")
+			}
+		})
+	}
+}
 
 type healthTestReporter struct {
 	nodeID string
