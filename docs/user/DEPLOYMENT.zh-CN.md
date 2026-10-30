@@ -139,9 +139,17 @@ drop-in。导出源目录操作始终限制在特权辅助程序内；升级时�
 路径后，应在维护窗口重启相关服务，使新的 systemd 挂载命名空间策略生效；
 重启 Agent 前应先排空正在运行的任务。
 
-共享空间管理还要求把控制节点的 SSH 公钥授权给每个参与节点上配置的管理用户。
-该用户的免密 sudo 应只允许 `xirang-agent mount-helper`；如果不能接受首次连接
-信任，应预先填充控制节点的 known-hosts 文件。
+共享挂载/导出控制要求升级两端并显式启用 Agent 的 `-shared-mount-control`
+参数，默认关闭且仅支持 root/systemd。它使用 mTLS 通道及固定、限时的宿主机
+服务，在 Agent 私有挂载命名空间之外运行；启用时保留已有环境参数。不自动回退
+SSH，关闭能力不移除已有挂载。
+
+文件传输和容量查询仍使用控制器 SSH 密钥及管理账户。新交互安装仅在 sudoers
+列举 `stats`、`file-list`、`file-read`、`file-write`、`file-mkdir`、
+`file-rename`、`file-delete`。旧 `mount-helper *` 规则须显式迁移，使用
+`visudo -cf` 验证并预先核对主机密钥。该账户仍是可信特权身份，API 所有权不构成
+直接 NFS/SSH 租户边界。迁移与故障语义见[共享存储](USAGE.zh-CN.md#配置共享空间)。
+回滚旧 Agent 前必须移除新参数；文件专用 sudo 规则不会恢复旧 SSH 挂载变更。
 
 ## 服务检查
 

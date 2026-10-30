@@ -234,8 +234,13 @@ if [ -z "${DESTDIR}" ] && [ "$(id -u)" -eq 0 ] && [ -t 0 ] && [ "${XIRANG_NONINT
             chown "${controller_ssh_user}:${controller_group}" "${controller_home}/.ssh/authorized_keys"
             chmod 0600 "${controller_home}/.ssh/authorized_keys"
             sudoers_path=/etc/sudoers.d/xirang-mount-helper
-            printf "%s ALL=(root) NOPASSWD: %s/bin/xirang-agent mount-helper *\n" \
-                "${controller_ssh_user}" "${PREFIX}" > "${sudoers_path}"
+            # Mount/export mutations now use the opt-in Agent mTLS capability.
+            # SSH remains a trusted-administrator path for file data and stats.
+            : > "${sudoers_path}"
+            for file_action in stats file-list file-read file-write file-mkdir file-rename file-delete; do
+                printf "%s ALL=(root) NOPASSWD: %s/bin/xirang-agent mount-helper %s *\n" \
+                    "${controller_ssh_user}" "${PREFIX}" "${file_action}" >> "${sudoers_path}"
+            done
             chmod 0440 "${sudoers_path}"
             if command -v visudo >/dev/null 2>&1; then
                 visudo -cf "${sudoers_path}" >/dev/null

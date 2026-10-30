@@ -32,6 +32,7 @@ import (
 	"github.com/xirang-grid/xirang/internal/hosthealth"
 	"github.com/xirang-grid/xirang/internal/identity"
 	"github.com/xirang-grid/xirang/internal/jobtemplate"
+	"github.com/xirang-grid/xirang/internal/mountcontrol"
 	"github.com/xirang-grid/xirang/internal/networkhealth"
 	"github.com/xirang-grid/xirang/internal/notification"
 	"github.com/xirang-grid/xirang/internal/pki"
@@ -282,8 +283,10 @@ func main() {
 		os.Exit(1)
 	}
 	enrollmentService := enrollment.NewService(state, authority)
-	sharedSpaceService := clusterops.New(state, enrollmentService, clusterops.SSHRunner{
-		KeyPath: *terminalSSHKey, KnownHostsPath: *terminalKnownHosts,
+	commandHub := controlstream.NewHub(128)
+	mountBroker := mountcontrol.New(commandHub, state.AppendAuditEvent)
+	sharedSpaceService := clusterops.New(state, enrollmentService, clusterops.AgentRunner{
+		Mounts: mountBroker, Files: clusterops.SSHRunner{KeyPath: *terminalSSHKey, KnownHostsPath: *terminalKnownHosts},
 	})
 	sharedSpaceService.EnableDefault("/srv/xirang/XirangShare", "/srv/xirang/XirangShare")
 	joinTokens, joinTokenCreated, err := enrollment.OpenJoinTokenManager(
@@ -334,7 +337,6 @@ func main() {
 		logger.Error("configure restricted network discovery", "error", err)
 		os.Exit(2)
 	}
-	commandHub := controlstream.NewHub(128)
 	remoteBuildPool := buildmanager.NewRemotePool(commandHub)
 	var buildService server.BuildManager = buildmanager.NewUnavailableManager(runtime.GOARCH)
 	registries := make(buildmanager.CompositeRegistry, 0, 2)
@@ -422,6 +424,7 @@ func main() {
 	agentControl.SetFlowReporter(flowService)
 	agentControl.SetAssignmentReporter(jobCoordinator)
 	agentControl.SetTerminalReporter(terminalBroker)
+	agentControl.SetMountReporter(mountBroker)
 	if *remoteBuildEnabled {
 		agentControl.SetNativeBuildReporter(remoteBuildPool)
 	}

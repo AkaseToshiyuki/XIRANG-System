@@ -82,6 +82,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+	case "__xirang-shared-mount":
+		if err := agent.RunHostSharedMount(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	case "version", "--version":
 		info := version.Current()
 		fmt.Printf("%s agent %s (%s/%s)\n", version.Name, version.Version, info.OS, info.Architecture)
@@ -325,6 +330,7 @@ func runAgent(arguments []string) {
 	buildGroup := flags.String("build-group", "", "native build group (defaults to the build user's primary group)")
 	buildMaxConcurrent := flags.Int("build-max-concurrent", 1, "maximum concurrent native builds on this Agent (currently fixed at 1)")
 	terminalUser := flags.String("terminal-user", "", "dedicated non-root identity for administrator terminal sessions (empty disables terminals)")
+	sharedMountControl := flags.Bool("shared-mount-control", false, "allow bounded shared mount/export operations over the Agent mTLS stream (requires root and systemd)")
 	var buildToolchains repeatedFlag
 	flags.Var(&buildToolchains, "build-toolchain", "toolchain advertised by the native build worker; repeat as needed")
 	var trustKeyFiles repeatedFlag
@@ -375,8 +381,9 @@ func runAgent(arguments []string) {
 			Enabled: *buildEnabled, WorkspaceRoot: *buildWorkspaceRoot, LocalWorkspaceRoot: *buildLocalWorkspaceRoot, CgroupRoot: *buildCgroupRoot,
 			User: *buildUser, Group: *buildGroup, Toolchains: buildToolchains, MaxConcurrent: *buildMaxConcurrent,
 		},
-		TerminalUser:      *terminalUser,
-		ArtifactTrustKeys: trustKeys,
+		TerminalUser:       *terminalUser,
+		SharedMountControl: *sharedMountControl,
+		ArtifactTrustKeys:  trustKeys,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

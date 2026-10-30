@@ -46,6 +46,7 @@ type commandHandlers struct {
 	setManagementPanel   func(bool) (bool, string)
 	terminal             *TerminalManager
 	nativeBuild          *NativeBuildManager
+	mounts               *sharedMountManager
 }
 
 func loadCommandState(directory string) (commandState, error) {
@@ -90,6 +91,13 @@ func applyControlCommandWithHandlers(ctx context.Context, directory string, stat
 	}
 	if terminalCommand(message) {
 		accepted, reason := applyTerminalCommand(message, handlers.terminal)
+		return state, &xirangv1.CommandAcknowledgement{CommandMessageId: message.MessageId, Accepted: accepted, Reason: reason}, nil
+	}
+	if operation := message.GetSharedMountOperation(); operation != nil {
+		if operation.OperationId != message.MessageId {
+			return state, &xirangv1.CommandAcknowledgement{CommandMessageId: message.MessageId, Reason: "mount operation ID must match command ID"}, nil
+		}
+		accepted, reason := handlers.mounts.Start(operation)
 		return state, &xirangv1.CommandAcknowledgement{CommandMessageId: message.MessageId, Accepted: accepted, Reason: reason}, nil
 	}
 	for _, recorded := range state.Acknowledgements {

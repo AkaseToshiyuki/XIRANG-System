@@ -16,6 +16,7 @@ import (
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
 	"github.com/xirang-grid/xirang/internal/hosthealth"
+	"github.com/xirang-grid/xirang/internal/mountcontrol"
 	"github.com/xirang-grid/xirang/pkg/version"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -54,18 +55,20 @@ const (
 )
 
 type ControlLoopConfig struct {
-	Address           string
-	StateDirectory    string
-	MinBackoff        time.Duration
-	MaxBackoff        time.Duration
-	OnEvent           func(string)
-	FlowMonitoring    FlowMonitoringConfig
-	ExecutorIsolation ExecutorIsolationConfig
-	ArtifactTrustKeys []ed25519.PublicKey
-	NativeBuild       NativeBuildConfig
-	TerminalUser      string
-	terminalIdentity  *terminalIdentity
-	healthWorker      *healthWorker
+	Address            string
+	StateDirectory     string
+	MinBackoff         time.Duration
+	MaxBackoff         time.Duration
+	OnEvent            func(string)
+	FlowMonitoring     FlowMonitoringConfig
+	ExecutorIsolation  ExecutorIsolationConfig
+	ArtifactTrustKeys  []ed25519.PublicKey
+	NativeBuild        NativeBuildConfig
+	TerminalUser       string
+	SharedMountControl bool
+	mountExecution     mountExecution
+	terminalIdentity   *terminalIdentity
+	healthWorker       *healthWorker
 }
 
 func DefaultControlAddress(state State) (string, error) {
@@ -77,6 +80,13 @@ func DefaultControlAddress(state State) (string, error) {
 }
 
 func RunControlLoop(ctx context.Context, state State, config ControlLoopConfig) error {
+	if config.SharedMountControl {
+		run, err := configuredMountExecution()
+		if err != nil {
+			return err
+		}
+		config.mountExecution = run
+	}
 	if config.Address == "" {
 		address, err := DefaultControlAddress(state)
 		if err != nil {
@@ -282,6 +292,9 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 	}
 	if config.healthWorker != nil {
 		capabilities = append(capabilities, hosthealth.OutboxCapability)
+	}
+	if config.mountExecution != nil {
+		capabilities = append(capabilities, mountcontrol.Capability)
 	}
 	if healthCollector.identify {
 		capabilities = append(capabilities, hosthealth.IdentifyCapability)
@@ -522,6 +535,15 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 		return stream.Send(&xirangv1.AgentMessage{MessageId: agentMessageID(), SentAt: timestamppb.Now(), Payload: &xirangv1.AgentMessage_HostHealth{HostHealth: report}})
 	}
 	var terminalEvents <-chan *xirangv1.TerminalEvent
+	var mountResults <-chan *xirangv1.SharedMountResult
+	var mounts *sharedMountManager
+	if containsCapability(accepted.NegotiatedCapabilities, mountcontrol.Capability) {
+		if config.mountExecution == nil {
+			return true, errors.New("shared mount capability was not enabled locally")
+		}
+		mounts = newSharedMountManager(streamContext, config.mountExecution)
+		mountResults = mounts.results
+	}
 	var terminalManager *TerminalManager
 	if containsCapability(accepted.NegotiatedCapabilities, agentPTYCapability) {
 		if config.terminalIdentity == nil {
@@ -609,6 +631,7 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 		})
 	}
 	handlers := commandHandlers{
+		mounts:          mounts,
 		setBMCIdentify:  healthCollector.identifyCommand,
 		executor:        executor,
 		terminal:        terminalManager,
@@ -730,6 +753,10 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 				MessageId: agentMessageID(), SentAt: timestamppb.Now(),
 				Payload: &xirangv1.AgentMessage_TerminalEvent{TerminalEvent: event},
 			}); err != nil {
+				return true, err
+			}
+		case result := <-mountResults:
+			if err := stream.Send(&xirangv1.AgentMessage{MessageId: agentMessageID(), SentAt: timestamppb.Now(), Payload: &xirangv1.AgentMessage_SharedMountResult{SharedMountResult: result}}); err != nil {
 				return true, err
 			}
 		case update := <-buildManagerEvents(buildManager):

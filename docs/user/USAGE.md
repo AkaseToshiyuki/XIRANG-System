@@ -152,13 +152,27 @@ set of nodes. An all-node or group assignment is reconciled when membership chan
 Verify permissions and the displayed directory usage and source-filesystem capacity
 before scheduling jobs that use the path.
 
-Shared-space export and mount actions currently require each participating node to
-have a management address and SSH user configured. Authorize the controller's SSH
-public key for that account and restrict passwordless sudo to
-`/usr/local/bin/xirang-agent mount-helper`; do not grant a general passwordless
-shell. This management path is separate from the browser terminal, which uses Agent
-mTLS. Preload the expected SSH host keys when the management network is not already
-trusted.
+Shared-space export and mount mutations use the Agent mTLS channel. Upgrade both
+endpoints and explicitly append `-shared-mount-control` to the participating
+systemd Agents' `XIRANG_AGENT_ARGS`; it is disabled by default and requires a
+root-owned installed Agent running as root. Preserve existing flags. Restart only
+after draining jobs. The source still needs a management address for NFS. A node
+without the capability fails explicitly; mutations never fall back to SSH. OpenRC
+hosts do not support this capability yet.
+
+File browsing, transfers and capacity reads still require the configured SSH user
+and controller key. Limit its sudo rule to `mount-helper stats`, `file-list`,
+`file-read`, `file-write`, `file-mkdir`, `file-rename` and `file-delete`; prepopulate
+verified host keys. Existing broad helper rules must be migrated separately.
+This SSH account remains a trusted administrator. Web ownership checks isolate API
+users, but do not establish per-user authentication for direct all-squash NFS or
+privileged SSH access.
+
+A command acceptance is not completion. A lost result or timeout reports an unknown
+outcome; inspect node results and the audit log before retrying. Existing mounts
+must match the requested NFS source. Unmount refuses missing or ambiguous XIRANG
+fstab ownership. Interrupted operations can leave partial effects; no automatic
+rollback removes data or unrelated mounts.
 
 ## Submit a job
 

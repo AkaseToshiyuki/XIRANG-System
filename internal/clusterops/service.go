@@ -12,11 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/xirang-grid/xirang/internal/domain"
+	"github.com/xirang-grid/xirang/internal/mountcontrol"
 )
 
 var ErrInvalid = errors.New("invalid shared-space request")
@@ -261,8 +263,8 @@ func (service *Service) applyLocked(ctx context.Context, requested domain.Shared
 	if err != nil {
 		return domain.SharedSpace{}, err
 	}
-	if nodeUnavailable(source) || !source.HasRole(domain.NodeRoleStorage) || source.ManagementAddress == "" || source.SSHUser == "" {
-		return domain.SharedSpace{}, fmt.Errorf("%w: source must be a storage node with SSH access", ErrInvalid)
+	if nodeUnavailable(source) || !source.HasRole(domain.NodeRoleStorage) || source.ManagementAddress == "" || !hasStorageControl(source) {
+		return domain.SharedSpace{}, fmt.Errorf("%w: source must be a storage node with shared-space control access", ErrInvalid)
 	}
 	nodes, err := service.nodes.ListNodes(ctx)
 	if err != nil {
@@ -641,7 +643,11 @@ func nodeListed(nodes []domain.Node, id string) bool {
 
 func defaultSourceEligible(node domain.Node) bool {
 	return !nodeUnavailable(node) && node.HasRole(domain.NodeRoleManagement) && node.HasRole(domain.NodeRoleStorage) &&
-		node.ManagementAddress != "" && node.SSHUser != ""
+		node.ManagementAddress != "" && hasStorageControl(node)
+}
+
+func hasStorageControl(node domain.Node) bool {
+	return node.SSHUser != "" || slices.Contains(node.Capabilities, mountcontrol.Capability)
 }
 
 func selectDefaultSource(nodes []domain.Node, preferredAddress string) (domain.Node, bool) {
