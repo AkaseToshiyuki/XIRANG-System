@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 # Destructive operations are confined to a freshly-created temporary directory
 # and loopback ports. Set XIRANG_HA_KEEP=1 to retain logs after a failure.
@@ -11,8 +12,13 @@ HTTPS_PORT=${XIRANG_HA_HTTPS_PORT:-18999}
 GRPC_PORT=${XIRANG_HA_GRPC_PORT:-18444}
 if [[ -n "${XIRANG_HA_WORK_DIR:-}" ]]; then
   WORK_DIR=$XIRANG_HA_WORK_DIR
-  rm -rf "$WORK_DIR"
-  mkdir -p "$WORK_DIR"
+  # Never repurpose an existing directory, including a symlink. A previous run
+  # may contain the only copy of its evidence or unrelated operator files.
+  if [[ -e "$WORK_DIR" || -L "$WORK_DIR" ]]; then
+    printf '[ha-drill] ERROR: work directory already exists; choose a new path\n' >&2
+    exit 1
+  fi
+  mkdir -m 0700 -- "$WORK_DIR"
 else
   WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/xirang-ha.XXXXXX")
 fi
@@ -31,9 +37,19 @@ TOKEN=$(openssl rand -hex 32)
 CONTROLLER_PID=
 STANDBY_PID=
 PG_STARTED=0
+CA_FILE="$ACTIVE_DATA/pki/ca.crt"
 
 log() { printf '[ha-drill] %s\n' "$*"; }
 fail() { printf '[ha-drill] ERROR: %s\n' "$*" >&2; exit 1; }
+
+mark() {
+  python3 - "$WORK_DIR/timeline.jsonl" "$1" <<'PY'
+import datetime, json, sys, time
+with open(sys.argv[1], "a") as output:
+    output.write(json.dumps({"event": sys.argv[2], "monotonic_ns": time.monotonic_ns(),
+                             "utc": datetime.datetime.now(datetime.timezone.utc).isoformat()}) + "\n")
+PY
+}
 
 stop_pid() {
   local pid=${1:-}
@@ -71,6 +87,25 @@ for command in curl openssl python3; do
 done
 [[ -x "$ROOT_DIR/bin/xirangd" ]] || fail "build bin/xirangd first (make build)"
 [[ -x "$ROOT_DIR/bin/xirang-maint" ]] || fail "build bin/xirang-maint first (make build)"
+
+python3 - "$PG_PORT" "$HTTPS_PORT" "$GRPC_PORT" <<'PY'
+import socket, sys
+sockets = []
+try:
+    for value in sys.argv[1:]:
+        port = int(value)
+        if not 1024 <= port <= 65535:
+            raise ValueError("drill ports must be unprivileged")
+        listener = socket.socket()
+        sockets.append(listener)
+        listener.bind(("127.0.0.1", port))
+except (ValueError, OSError) as error:
+    raise SystemExit("isolated drill port preflight failed: " + str(error))
+finally:
+    for listener in sockets:
+        listener.close()
+PY
+mark started
 
 mkdir -p "$PG_SOCKET" "$ACTIVE_DATA" "$STANDBY_DATA" "$RECOVERY_DATA" "$RESTORE_DATA"
 printf '%s\n' "$TOKEN" | tee \
@@ -113,7 +148,7 @@ start_controller() {
 
 wait_https() {
   for _ in {1..150}; do
-    if curl --silent --fail --insecure "https://127.0.0.1:$HTTPS_PORT/api/v1/version" >/dev/null; then
+    if curl --silent --fail --cacert "$CA_FILE" --connect-timeout 1 --max-time 2 "https://127.0.0.1:$HTTPS_PORT/api/v1/version" >/dev/null; then
       return 0
     fi
     sleep 0.1
@@ -123,7 +158,7 @@ wait_https() {
 
 api() {
   local method=$1 path=$2 data=${3:-}
-  local args=(--silent --show-error --insecure --request "$method" \
+  local args=(--silent --show-error --fail-with-body --cacert "$CA_FILE" --connect-timeout 1 --max-time 10 --request "$method" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
   [[ -n "$data" ]] && args+=(--data "$data")
   curl "${args[@]}" "https://127.0.0.1:$HTTPS_PORT$path"
@@ -135,9 +170,27 @@ queue_exists() {
     'import json,sys; name=sys.argv[1]; data=json.load(sys.stdin); raise SystemExit(0 if any(x.get("name")==name for x in data.get("items",[])) else 1)' "$name"
 }
 
+markers_present() {
+  api GET /api/v1/queues >"$WORK_DIR/queues-observed.json"
+  python3 - "$WORK_DIR/queues-observed.json" "$MARKER_QUEUE" <<'PY'
+import json, sys
+with open(sys.argv[1]) as source:
+    rows = {row["name"]: row for row in json.load(source)["items"]}
+for index in range(16):
+    row = rows.get(f"{sys.argv[2]}-{index}", {})
+    if row.get("weight") != 7 or row.get("backfill") is not True:
+        raise SystemExit("acknowledged marker missing or changed")
+PY
+}
+
 log "starting active and passive controllers against one advisory-lock namespace"
 start_controller "$ACTIVE_DATA" "$DSN" "$WORK_DIR/active.log"
 wait_https || fail "active controller did not become ready"
+# PostgreSQL stores application state, not CA/private keys. Pre-provision the
+# same protected trust material, as an actual deployment must do separately.
+for replica in "$STANDBY_DATA" "$RECOVERY_DATA" "$RESTORE_DATA"; do
+  cp -a "$ACTIVE_DATA/pki" "$replica/pki"
+done
 ACTIVE_PID=$CONTROLLER_PID
 start_controller "$STANDBY_DATA" "$DSN" "$WORK_DIR/standby.log" standby
 STANDBY_PID=$CONTROLLER_PID
@@ -147,16 +200,21 @@ kill -0 "$STANDBY_PID" 2>/dev/null || fail "standby exited instead of waiting fo
 grep -q 'waiting for PostgreSQL leadership' "$WORK_DIR/standby.log" || fail "standby did not report lock contention"
 
 MARKER_QUEUE="ha-marker-$$"
-api PUT "/api/v1/queues/$MARKER_QUEUE" '{"weight":7,"backfill":true}' >"$WORK_DIR/queue-created.json"
-queue_exists "$MARKER_QUEUE" || fail "durable marker was not written"
+for index in {0..15}; do
+  api PUT "/api/v1/queues/$MARKER_QUEUE-$index" '{"weight":7,"backfill":true}' >"$WORK_DIR/queue-created-$index.json"
+done
+markers_present || fail "durable markers were not written"
+mark markers_committed
 
 log "simulating abrupt active-controller failure"
+mark failover_start
 kill -KILL "$ACTIVE_PID"
 wait "$ACTIVE_PID" 2>/dev/null || true
 CONTROLLER_PID=$STANDBY_PID
 STANDBY_PID=
 wait_https || fail "standby did not acquire leadership and bind the service port"
-queue_exists "$MARKER_QUEUE" || fail "standby did not restore the committed control state"
+markers_present || fail "standby did not restore the committed control state"
+mark failover_ready
 
 log "creating and cryptographically verifying an online XIRANG recovery point"
 BACKUP_JSON=$(api POST /api/v1/system/backups)
@@ -175,24 +233,28 @@ if "$ROOT_DIR/bin/xirang-maint" verify "$CORRUPT_BACKUP" >"$WORK_DIR/corrupt-ver
 fi
 
 log "simulating PostgreSQL outage; writes must fail closed"
+mark database_outage_start
 "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast stop >/dev/null
 PG_STARTED=0
-HTTP_CODE=$(curl --silent --insecure --output "$WORK_DIR/outage-write.json" --write-out '%{http_code}' \
+HTTP_CODE=$(curl --silent --cacert "$CA_FILE" --connect-timeout 1 --max-time 10 --output "$WORK_DIR/outage-write.json" --write-out '%{http_code}' \
   --request PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   --data '{"weight":9,"backfill":true}' \
   "https://127.0.0.1:$HTTPS_PORT/api/v1/queues/ha-outage-rejected") || true
 [[ "$HTTP_CODE" == 500 ]] || fail "database outage write returned HTTP $HTTP_CODE instead of 500"
+mark outage_write_rejected
 
+mark database_recovery_start
 "$PG_BIN/pg_ctl" -D "$PG_DATA" -l "$WORK_DIR/postgresql-restarted.log" start >/dev/null
 PG_STARTED=1
 stop_pid "$CONTROLLER_PID"
 CONTROLLER_PID=
 start_controller "$RECOVERY_DATA" "$DSN" "$WORK_DIR/recovery.log"
 wait_https || fail "controller did not recover after PostgreSQL restart"
-queue_exists "$MARKER_QUEUE" || fail "committed marker was lost after database restart"
+markers_present || fail "committed marker was lost after database restart"
 if queue_exists ha-outage-rejected; then
   fail "failed write leaked into durable state"
 fi
+mark database_recovery_ready
 
 log "dumping and restoring the PostgreSQL control-state database"
 "$PG_BIN/pg_dump" -h 127.0.0.1 -p "$PG_PORT" --format=custom --file "$WORK_DIR/control-state.dump" "$DB_NAME"
@@ -203,11 +265,44 @@ if "$PG_BIN/pg_restore" --list "$WORK_DIR/control-state-corrupt.dump" >"$WORK_DI
   fail "truncated PostgreSQL dump passed structural verification"
 fi
 "$PG_BIN/createdb" -h 127.0.0.1 -p "$PG_PORT" "$RESTORE_DB"
+mark dump_restore_start
 "$PG_BIN/pg_restore" -h 127.0.0.1 -p "$PG_PORT" --dbname "$RESTORE_DB" "$WORK_DIR/control-state.dump"
 stop_pid "$CONTROLLER_PID"
 CONTROLLER_PID=
 start_controller "$RESTORE_DATA" "$RESTORE_DSN" "$WORK_DIR/restored.log"
 wait_https || fail "controller did not start from restored PostgreSQL database"
-queue_exists "$MARKER_QUEUE" || fail "restored database does not contain the committed marker"
+markers_present || fail "restored database does not contain the committed marker"
+mark dump_restore_ready
+mark completed
+
+python3 - "$WORK_DIR" "$ROOT_DIR" "$PG_BIN/postgres" <<'PY'
+import hashlib, json, pathlib, platform, subprocess, sys
+work, root = map(pathlib.Path, sys.argv[1:3])
+timeline = [json.loads(line) for line in (work / "timeline.jsonl").read_text().splitlines()]
+times = {row["event"]: row["monotonic_ns"] for row in timeline}
+def duration(start, end):
+    return round((times[end] - times[start]) / 1e9, 6)
+result = {
+    "passed": True, "scope": "single-host isolated loopback process and database recovery",
+    "independent_failure_domains": False, "production_workloads": False,
+    "tls_verified_with_original_ca": True, "repetitions": 1,
+    "acknowledged_markers": 16, "missing_markers_after_each_recovery": 0,
+    "failed_outage_write_absent": True,
+    "durations_seconds": {
+        "controller_failover_to_authenticated_marker_read": duration("failover_start", "failover_ready"),
+        "database_recovery_to_authenticated_marker_read": duration("database_recovery_start", "database_recovery_ready"),
+        "dump_restore_to_authenticated_marker_read": duration("dump_restore_start", "dump_restore_ready"),
+        "total": duration("started", "completed")},
+    "environment": {"platform": platform.platform(), "architecture": platform.machine(),
+        "postgres": subprocess.check_output([sys.argv[3], "--version"], text=True).strip(),
+        "controller_version": subprocess.check_output([str(root / "bin/xirangd"), "-version"], text=True).strip(),
+        "controller_sha256": hashlib.sha256((root / "bin/xirangd").read_bytes()).hexdigest()},
+    "timeline": timeline,
+    "limits": ["One local trial; not a production RTO/RPO guarantee.",
+               "Zero loss applies only to the 16 acknowledged markers.",
+               "No in-flight job, independent network/power failure, or consensus replication was tested."]}
+(work / "report.json").write_text(json.dumps(result, indent=2) + "\n")
+print(json.dumps({"passed": True, "durations_seconds": result["durations_seconds"], "report": str(work / "report.json")}))
+PY
 
 log "PASS: lock exclusion, failover, fail-closed outage handling, corruption rejection, recovery-point verification, and PostgreSQL restore"

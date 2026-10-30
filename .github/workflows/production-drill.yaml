@@ -27,7 +27,20 @@ jobs:
         env:
           XIRANG_HA_KEEP: "1"
           XIRANG_HA_WORK_DIR: ${{ runner.temp }}/xirang-ha-drill
-        run: make ha-drill
+        run: |
+          python3 -m unittest discover -s scripts -p test_ha_drill.py
+          make ha-drill
+      - name: Preserve synthetic recovery measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: postgresql-ha-summary-${{ github.run_id }}
+          # Only synthetic measurements; no databases, PKI or token files.
+          path: |
+            ${{ runner.temp }}/xirang-ha-drill/report.json
+            ${{ runner.temp }}/xirang-ha-drill/timeline.jsonl
+          if-no-files-found: warn
+          retention-days: 14
       - name: Preserve drill evidence
         # The work directory includes ephemeral credentials and database state.
         # Preserve it only within the canonical private repository.

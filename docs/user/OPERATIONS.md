@@ -44,6 +44,15 @@ Configure both controllers with the same TLS-protected PostgreSQL DSN and namesp
 start the passive instance with `-standby`. A namespace belongs to exactly one
 XIRANG cluster.
 
+Provision the same protected `pki/` CA/key material on each controller before
+failover, with server certificates covering the stable client endpoint. Keep its
+backup separate from application database snapshots. PostgreSQL replication does
+not replicate CA keys or host-local credentials; a fresh independent CA would
+break the trust established at Agent enrollment. Keep administrator authentication
+and any configured signing/Webhook secrets consistent through an explicit secure
+provisioning process. Verify failover with the original CA; do not disable TLS
+verification to make the check pass.
+
 XIRANG recovery points protect the application-level database image. Also take a
 native PostgreSQL backup, store its checksum separately, and test its restoration
 into a separate database. Stop both controllers before replacing an existing
@@ -65,8 +74,14 @@ make ha-drill
 ```
 
 The drill covers leadership exclusion, controller failure, database outage,
-state continuity, corruption rejection, and dump/restore. It does not simulate
-independent power, rack, or network failure domains.
+state continuity, corruption rejection, and dump/restore using the original CA.
+It records monotonic timings to authenticated reads of 16 acknowledged markers in
+`report.json`, with a binary digest and environment metadata. Use
+`XIRANG_HA_KEEP=1 make ha-drill` to retain the temporary evidence directory;
+`XIRANG_HA_WORK_DIR` must name a new, nonexistent directory. Existing evidence is
+never overwritten. A single trial and zero missing markers are not general
+RTO/RPO guarantees. The drill does not simulate independent power, rack, network
+failure domains, in-flight jobs or consensus replication.
 
 ## Numerical history with Prometheus
 
