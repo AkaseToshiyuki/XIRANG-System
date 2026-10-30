@@ -2,7 +2,7 @@
 
 [English](DEPLOYMENT.md) | [简体中文](DEPLOYMENT.zh-CN.md)
 
-Applies to XIRANG **1.2.0**.
+Applies to XIRANG **1.3.0**.
 
 This guide installs a prebuilt native release. A container runtime is not
 required.
@@ -50,21 +50,21 @@ host before enrollment. `--skip-dependencies` never silently disables this check
 Install a specific release:
 
 ```bash
-./install.sh --version 1.2.0
+./install.sh --version 1.3.0
 ```
 
 Install a downloaded package. The installer reads `SHA256SUMS` and
 `SHA256SUMS.sig` from the same directory:
 
 ```bash
-./install.sh --archive ~/Downloads/xirang-1.2.0-linux-amd64.tar.gz
+./install.sh --archive ~/Downloads/xirang-1.3.0-linux-amd64.tar.gz
 ```
 
 If no checksum file is present, supply a trusted SHA-256 value:
 
 ```bash
 ./install.sh \
-  --archive ~/Downloads/xirang-1.2.0-linux-amd64.tar.gz \
+  --archive ~/Downloads/xirang-1.3.0-linux-amd64.tar.gz \
   --sha256 EXPECTED_SHA256
 ```
 

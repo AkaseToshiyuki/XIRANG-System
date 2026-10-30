@@ -2,7 +2,7 @@
 
 [English](DEPLOYMENT.md) | [简体中文](DEPLOYMENT.zh-CN.md)
 
-适用于 XIRANG **1.2.0**。
+适用于 XIRANG **1.3.0**。
 
 本指南使用预构建原生包部署控制节点或被控节点，不需要容器运行时。
 
@@ -48,20 +48,20 @@ mTLS 证书有效期、OIDC 会话、遥测排序和用量核算要求主机具�
 安装指定 Release：
 
 ```bash
-./install.sh --version 1.2.0
+./install.sh --version 1.3.0
 ```
 
 安装已下载的包时，安装器会读取同目录下的 `SHA256SUMS` 和 `SHA256SUMS.sig`：
 
 ```bash
-./install.sh --archive ~/Downloads/xirang-1.2.0-linux-amd64.tar.gz
+./install.sh --archive ~/Downloads/xirang-1.3.0-linux-amd64.tar.gz
 ```
 
 如果没有校验文件，必须显式提供可信的 SHA-256：
 
 ```bash
 ./install.sh \
-  --archive ~/Downloads/xirang-1.2.0-linux-amd64.tar.gz \
+  --archive ~/Downloads/xirang-1.3.0-linux-amd64.tar.gz \
   --sha256 EXPECTED_SHA256
 ```
 

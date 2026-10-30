@@ -1,71 +1,71 @@
-# XIRANG 1.2.0 release notes
+# XIRANG 1.3.0 release notes
 
 [English](RELEASE_NOTES.md) | [简体中文](RELEASE_NOTES.zh-CN.md)
 
-XIRANG 1.2.0 strengthens build isolation and authorization and refreshes the
-bilingual console. It supersedes 1.1.0. The management API and Agent protocol
-remain `v1`.
+XIRANG 1.3.0 adds persistent cluster settings, host-health visibility, configurable
+alerts and numerical-history export. It supersedes 1.2.0; the management API and
+Agent protocol remain `v1`.
 
-## Security and correctness
+## Administration and monitoring
 
-- API-token permissions now intersect the account's current permissions;
-  account demotion takes effect without enlarging existing token grants.
-- Flow metadata requires administrator access. Private build artifacts require
-  ownership or administrator authorization, including resolved-path checks.
-- Global application publication and node mappings require administrator
-  approval. Unapproved legacy mappings are excluded from application resolution.
-- Build output collection uses pinned descriptors and rejects parent/leaf
-  symlinks. Local artifact reads reject FIFOs and other special files without
-  blocking. Build logs retain a bounded 64 KiB tail while draining output.
-- Builds sharing an OS identity serialize staging, execution, collection and
-  cleanup across Controller and Agent processes. Landlock restricts compiler
-  filesystem access; incomplete cleanup or a daemon crash quarantines the UID.
-- Recursive owned shared-directory deletion uses directory descriptors and
-  refuses replaced or newly untracked entries.
-- Agent authority is rechecked independently of incoming heartbeats. Revoked,
-  replaced or expired certificates cannot retain a selectable build worker or
-  continue exchanging commands; silent streams expire.
-- Updated gRPC to 1.83.2 and x/text to 0.41.0, including required transitive
-  updates, to address dependency security advisories.
-- Relative controller state paths work with backup initialization. Browser SBOM
-  downloads carry authentication and display download failures.
+- Administrators can set the cluster name and PNG/JPEG logo. Changes persist and
+  appear in navigation, login and page titles.
+- Node health combines available journal, IPMI sensor, SEL and chassis readings.
+  The console distinguishes reported faults, hardware correction, recovery and
+  recorded maintenance. Unavailable or partial collection remains visible.
+- Alert settings persist trigger/recovery durations, severity/type routing and
+  silence deadlines. Silenced events remain recorded; delivery history explains
+  suppression and reports bounded per-destination status.
+- Authenticated Prometheus metrics expose numerical observations with freshness
+  timestamps. Configure a viewer token, trusted CA and external retention limits
+  as described in [Operations](OPERATIONS.md).
+- Agents retain a bounded host-event outbox across restarts and reconnects.
+  Journal rotation gaps, queue errors and eviction counts are surfaced.
 
-## Console
+## Shared storage and compatibility
 
-The console uses neutral surfaces and one primary accent, with less repeated
-copy and decoration. Navigation has accessible names and current-page state;
-login exposes language and theme choices. Terminal sessions remain connected
-across theme and telemetry-interval changes. Browser-storage failures, node
-stream reconnect state, builder controls, narrow layouts and rendered contrast
-have regression coverage.
+Shared mount/export control now uses bounded commands over the Agent mTLS stream
+with acknowledgement and audit. Upgrade both endpoints and explicitly enable
+`-shared-mount-control` on participating root/systemd Agents. The option defaults
+to off. File access continues to use trusted management SSH; the stream does not
+provide an arbitrary shell. See [Deployment](DEPLOYMENT.md).
 
-## Upgrade requirements
+Shared-root preparation preserves existing owner, mode and ACL semantics instead
+of replacing them. Old permissions are not automatically restored; use the
+migration instructions and verify access with the affected host identities.
+Nested shared-directory metadata lookup, mixed-architecture application filters,
+and published-artifact group access are corrected.
 
-Back up controller state before upgrading; upgrade passive controllers before
-the active instance. Use the current installer so service permissions and the
-host build-identity lock directory are provisioned.
+## Console and engineering updates
 
-**Native builds require enabled Landlock ABI 3 or newer (Linux 6.2+)**, a
-dedicated non-root identity and delegated cgroup v2. Toolchains and dependencies
-must be installed in the standard system paths listed in [Usage](USAGE.md).
-Unsupported native-build hosts fail closed; this requirement is specific to
-native builds. Confirm these capabilities before enabling a build worker.
+Keyboard focus is retained after dialogs, menus and toasts. Language changes
+preserve drafts and terminal state. English/Chinese, 320-pixel layouts and
+automated accessibility checks are covered by browser regression tests.
 
-Administrators must re-save legacy application target mappings to approve them
-for global resolution. After a build crash or failed cleanup, follow the UID
-recovery procedure in [Usage](USAGE.md) before admitting another build.
+The toolchain is Go 1.26.10, with x/net 0.60.0 and required dependency updates.
+Native builds retain the Landlock ABI 3+, dedicated non-root identity and
+delegated cgroup v2 requirements introduced in 1.2.0. Previously unapproved
+application mappings still require administrator approval.
 
-## Verification and operating boundaries
+## Upgrade and operating boundaries
 
-Go tests, race/static checks, Linux AMD64/ARM64 compilation, API/Proto contracts,
-Web audits and all 25 browser regressions passed for the release candidate.
-Hardware, MPI, multi-node NFS and HA behavior still require site qualification.
-Browser access to `file://` SBOM locations retains its existing deployment limit.
+Create and verify a controller backup first. Drain work before restarting an
+Agent and retain its `health-outbox.db`; do not copy that database to another
+node. For PostgreSQL deployments, pre-provision the same CA, credentials and
+stable TLS endpoint on both controllers, then upgrade passive instances first.
+Keep the previous programs and verified state backup for rollback.
 
-Nested shared-directory metadata lookup and explicit architecture filtering of
-mixed-architecture application variants retain their existing limitations.
-Use correctly mapped, explicitly selected nodes for the latter case.
+Hardware locator control requires a separate host opt-in and administrator
+authorization. Monitoring does not clear hardware logs or change power, fans or
+thresholds. Historical events do not prove a present fault or its repair.
+Prometheus is optional and is not installed automatically. Same-host monitoring
+or service restart does not establish independent high availability. Sensor
+accuracy, multi-node NFS, physical fabrics and actual MPI workloads require site
+qualification. Browser access to `file://` SBOM locations retains its deployment
+limit.
 
-Release assets contain the Linux AMD64 and ARM64 archives, `SHA256SUMS` and its
-Ed25519 signature `SHA256SUMS.sig`. Keep all verification files with the archive;
-the installer verifies the signature and checksum before installation.
+Release verification covers Go tests, race/static checks, API/Proto contracts,
+Web audits, 37 browser regressions and Linux AMD64/ARM64 builds. Native packages,
+`SHA256SUMS` and `SHA256SUMS.sig` are the four release assets. Keep verification
+files with the package; the installer checks the Ed25519 signature before the
+archive checksum.

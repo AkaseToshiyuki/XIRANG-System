@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: XIRANG Management API
-  version: 1.8.0-dev
+  version: 1.3.0
   description: Multi-user cluster management, native-host observability, restricted discovery, resource-aware scheduling, administrator-curated job templates, shared storage, administrator terminals, native builds, RBAC, and recovery contract. The Web console and API share HTTPS port 8899 by default.
 servers:
   - url: /api/v1
