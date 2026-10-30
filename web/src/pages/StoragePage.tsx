@@ -302,8 +302,8 @@ function SharedFileBrowser({ space, token, isAdmin, reportError }: { space: Shar
       <button type="button" className="secondary-button" disabled={busy} onClick={() => void createDirectory()}>{t("新建文件夹", "New folder")}</button>
       <button type="button" className="secondary-button" disabled={busy} onClick={() => folderInput.current?.click()}>{t("上传文件夹", "Upload folder")}</button>
       <button type="button" className="primary-button" disabled={busy} onClick={() => uploadInput.current?.click()}>{t("上传文件", "Upload files")}<span>↑</span></button>
-      <input ref={uploadInput} className="sr-only" type="file" multiple onChange={(event) => void upload(event, false)} />
-      <input ref={folderInput} className="sr-only" type="file" multiple onChange={(event) => void upload(event, true)} />
+      <input ref={uploadInput} hidden aria-label={t("上传文件", "Upload files")} type="file" multiple onChange={(event) => void upload(event, false)} />
+      <input ref={folderInput} hidden aria-label={t("上传文件夹", "Upload folder")} type="file" multiple onChange={(event) => void upload(event, true)} />
     </div></header>
     <div className="file-browser-toolbar"><nav aria-label={t("当前文件夹路径", "Current folder path")}><button className={!destination ? "active" : ""} onClick={() => void navigate("")} type="button">{t("根目录", "Root")}</button>{breadcrumb.map((segment, index) => { const path = breadcrumb.slice(0, index + 1).join("/"); return <span key={path}>› <button className={path === destination ? "active" : ""} onClick={() => void navigate(path)} type="button">{segment}</button></span>; })}</nav><label><span aria-hidden="true">⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("筛选当前文件夹", "Filter current folder")} /></label><small>{t(`${visibleEntries.length} 项`, `${visibleEntries.length} items`)}</small></div>
     <div className="file-browser-workspace">

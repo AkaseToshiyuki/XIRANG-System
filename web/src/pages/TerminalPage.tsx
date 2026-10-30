@@ -17,12 +17,15 @@ export function TerminalPage({ token }: { token: string }) {
   useEffect(() => {
     const controller = new AbortController();
     getNodes(token, controller.signal).then((items) => {
+      if (controller.signal.aborted) return;
       const accessible = items.filter((node) => node.status === "ready" || node.status === "cordoned" || node.status === "draining");
       setNodes(accessible);
-      setNodeID(accessible[0]?.id ?? "");
-    }).catch((cause) => setError(cause instanceof Error ? cause.message : t("无法初始化终端", "Unable to initialize terminal")));
-    return () => { controller.abort(); socket.current?.close(); };
+      setNodeID((current) => accessible.some((node) => node.id === current) ? current : accessible[0]?.id ?? "");
+    }).catch((cause) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : t("无法初始化终端", "Unable to initialize terminal")); });
+    return () => controller.abort();
   }, [token, t]);
+
+  useEffect(() => () => { socket.current?.close(); socket.current = null; }, [token]);
 
   useEffect(() => {
     outputElement.current?.scrollTo({ top: outputElement.current.scrollHeight });
@@ -67,8 +70,8 @@ export function TerminalPage({ token }: { token: string }) {
       <button type="button" disabled={status !== "open"} onClick={() => socket.current?.send("\u0003")}>{t("发送 Ctrl-C", "Send Ctrl-C")}</button>
     </div>
     <p className="terminal-key">{t("闲置 10 分钟或连接满 30 分钟后自动断开；离开此页面会结束会话。", "Disconnects after 10 minutes idle or 30 minutes total. Leaving this page ends the session.")}</p>
-    <pre ref={outputElement} className="terminal-output" aria-live="polite">{output}</pre>
-    <form className="terminal-input" onSubmit={send}><span>$</span><input value={command} onChange={(event) => setCommand(event.target.value)} disabled={status !== "open"} autoComplete="off" spellCheck={false} placeholder={status === "open" ? t("输入命令并按 Enter", "Enter a command and press Enter") : t("请先连接节点", "Connect to a node first")} /><button disabled={status !== "open" || !command}>{t("发送", "Send")}</button></form>
+    <pre ref={outputElement} className="terminal-output" tabIndex={0} aria-label={t("终端输出", "Terminal output")} aria-live="polite">{output}</pre>
+    <form className="terminal-input" onSubmit={send}><span>$</span><input aria-label={t("终端命令", "Terminal command")} value={command} onChange={(event) => setCommand(event.target.value)} disabled={status !== "open"} autoComplete="off" spellCheck={false} placeholder={status === "open" ? t("输入命令并按 Enter", "Enter a command and press Enter") : t("请先连接节点", "Connect to a node first")} /><button disabled={status !== "open" || !command}>{t("发送", "Send")}</button></form>
   </section>;
 }
 

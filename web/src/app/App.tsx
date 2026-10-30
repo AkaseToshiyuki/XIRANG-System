@@ -221,6 +221,7 @@ export function App() {
 
   return (
     <div className="app-shell">
+      <a className="skip-navigation" href="#main-content" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>{t("跳到主要内容", "Skip to main content")}</a>
       <aside className="sidebar">
         <div className="brand"><img className="brand-mark" src={branding.logoDataUrl || defaultClusterLogo} alt="" aria-hidden="true" /><div><strong title={branding.name}>{branding.name}</strong></div></div>
         <nav aria-label={t("主导航", "Primary navigation")}>
@@ -238,7 +239,7 @@ export function App() {
           <button type="button" onClick={() => { setToken(""); setPrincipal(null); }}>{t("退出登录", "Sign out")}</button>
         </div>
       </aside>
-      <main className="main-content">
+      <main className="main-content" id="main-content" tabIndex={-1}>
         <div className="workspace-controls" aria-label={t("界面偏好", "Interface preferences")}>
           <label className={`refresh-control${refreshError ? " refresh-control--error" : ""}`} title={refreshError || (principal?.role === "admin" ? t("同步设置浏览器轮询与所有 Agent 的遥测上报间隔", "Synchronizes browser polling and telemetry reporting for every Agent") : t("遥测间隔由管理员统一设置", "Telemetry interval is managed by an administrator"))}>
             <span>{refreshSaving ? t("同步中", "Syncing") : t("遥测", "Telemetry")}</span>
@@ -247,7 +248,7 @@ export function App() {
           </label>
           <InterfacePreferences />
         </div>
-        <PageErrorBoundary key={`${active}-${language}`} page={active} language={language}>
+        <PageErrorBoundary key={active} page={active} language={language}>
           {activeView ? activeView() : (
             <section className="empty-state">
               <span className="eyebrow">{t("页面不可用", "Page unavailable")}</span>

@@ -295,9 +295,9 @@ export function unshareSharedSpace(id: string, token: string): Promise<void> {
   return requestVoid(`/api/v1/shared-spaces/${encodeURIComponent(id)}/unshare`, { token, method: "POST", label: "Shared space unshare" });
 }
 
-export function getSharedFiles(spaceId: string, path: string, token: string): Promise<SharedFile[]> {
+export function getSharedFiles(spaceId: string, path: string, token: string, signal?: AbortSignal): Promise<SharedFile[]> {
   return requestItems<SharedFile>(`/api/v1/shared-spaces/${encodeURIComponent(spaceId)}/files?path=${encodeURIComponent(path)}`, {
-    token, label: "Shared file listing",
+    token, label: "Shared file listing", signal,
   });
 }
 
