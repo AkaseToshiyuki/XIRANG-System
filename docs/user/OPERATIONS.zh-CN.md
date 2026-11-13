@@ -2,7 +2,7 @@
 
 [English](OPERATIONS.md) | [简体中文](OPERATIONS.zh-CN.md)
 
-适用于 XIRANG **1.3.0**。
+适用于 XIRANG **1.4.1**。
 
 本手册包含备份、恢复、升级和回滚。可能中断服务的操作应安排在维护窗口，并将
 恢复点复制到独立于控制节点的存储中。
@@ -37,8 +37,44 @@ sudo systemctl start xirangd
 
 ## PostgreSQL 主备部署
 
-两个控制节点应使用相同的 TLS PostgreSQL DSN 和命名空间，被动实例增加
-`-standby`。一个命名空间只能属于一个 XIRANG 集群。
+两个控制节点使用相同的 TLS PostgreSQL DSN 和命名空间，明确指定一主一备。
+两端安装完整控制器/网页程序，在节点页面分配管理职责，并记录节点 ID。分别
+把下列参数加入受保护的控制器环境文件，保留已有监听、TLS 与执行配置：
+
+```bash
+# 主管理节点的 XIRANGD_ARGS：
+-controller-role=primary -controller-node-id=PRIMARY_NODE_ID \
+-external-state-dsn=POSTGRESQL_URL -external-state-namespace=CLUSTER_NAMESPACE
+# 备用管理节点：
+-controller-role=backup -controller-node-id=BACKUP_NODE_ID \
+-external-state-dsn=POSTGRESQL_URL -external-state-namespace=CLUSTER_NAMESPACE
+```
+
+两端服务持续运行，但被动端不开面板和 Agent 端口。数据库使闲置领导会话在
+8 秒后过期；运行进程每秒及每次 HTTP/Agent 消息前检查会话。主控失效后备用
+取得同一独占状态锁，恢复已提交状态再监听。主控返回后发出交还请求；持续可用
+默认 15 秒（`-controller-failback-delay` 可调）后，备用关闭服务、释放锁并重新
+等待。不能只依据节点心跳判定另一控制器可以成为主控。
+
+HTTPS `8899` 和 Agent gRPC `8444` 均须提供稳定 TLS 入口，只路由到当前就绪
+控制器；Agent 注册时使用此入口。故障主机的固定地址不会自动变成备用地址。
+任一管理主机故障时数据库仍须可访问。程序不会自动安装 PostgreSQL、VIP、负载
+均衡或复制本地目录；两个独立 bbolt 文件不能实现跨主机接管。
+
+命名空间持久保存两个节点席位及信任摘要，拒绝重复角色、第三节点、不同信任材料
+和未指定角色的控制器。替换已退役控制身份时，先停止两端并备份 PostgreSQL，
+由数据库管理员仅移除 `xirang_controller_members` 中该命名空间的退役成员行，
+再使用新节点 ID 重启；两端运行期间禁止修改。迁移前停止旧控制器，保留原 CA，
+按需用 `xirang-maint import-postgresql` 导入已验证控制状态。
+
+两端停止时，先导入已有已验证离线备份：
+
+```bash
+xirang-maint import-postgresql /path/to/verified-backup /etc/xirang/postgresql.dsn CLUSTER_NAMESPACE
+```
+
+DSN 文件须仅所有者可读。导入校验完整备份，拒绝覆盖已有命名空间。本地观测库
+恢复和 PKI 配置单独完成。
 
 切换前须为控制器预置相同且受保护的 `pki/` CA/密钥，服务端证书应覆盖稳定的
 客户端访问地址。单独备份这套信任材料；PostgreSQL 不复制 CA 密钥和主机凭据，
@@ -47,6 +83,19 @@ Webhook 秘密也需明确、安全地预置一致。验收必须使用原 CA，
 
 XIRANG 恢复点保护应用层数据库镜像；还应执行 PostgreSQL 原生备份，单独保存
 校验和，并先在独立数据库中演练恢复。覆盖已有命名空间前必须停止两个控制节点。
+
+管理角色不再开启转发面板，只有当选 `xirangd` 提供面板服务，被动节点报告安装
+状态。本地观测库、SSH 密钥、产物路径和站点服务仍需一致配置。
+
+构建后运行自动主备演练：
+
+```bash
+python3 scripts/controller_pair_drill.py --binary bin/xirangd
+```
+
+演练只创建权限受限的临时数据库、控制器目录和回环监听，保留 JSON 报告，不操作
+生产服务。暂停的进程在恢复前可能仍保有内核监听套接字；数据库会话检查拒绝旧
+状态请求，旧进程关闭并重新载入后才能再次服务。报告区分监听套接字和就绪服务。
 
 维护者安装 PostgreSQL 16 工具后，可在无容器环境中运行隔离的主备与恢复演练：
 
@@ -64,8 +113,11 @@ dump/restore，全程校验原 CA。`report.json` 记录恢复到认证读回 16
 ## 使用 Prometheus 留存数值历史
 
 认证接口 `/api/v1/metrics` 导出节点调度容量、资源用量、网络计数和可用的 CPU/GPU
-读数。先在身份管理创建可撤销的 **viewer** API 令牌，存入仅 Prometheus 服务身份
-可读的保护文件；配置控制器 CA 与证书包含的主机名。修改[抓取示例](../../examples/prometheus/xirang.yml)，
+读数。1.4.1 起，新建 API 令牌只允许一次认证。重复抓取应使用受管理的 **viewer**
+角色 OIDC 凭据，或把未用 viewer token 以 JSON `{"token":"..."}` 提交到
+`POST /api/v1/auth/token`，将返回的独立会话密钥写入凭据文件。会话最多十二小时，
+且不超过原 token 到期时间，必须安排到期前替换。不要直接把一次性 token 用于
+周期抓取。凭据文件仅供监控服务身份读取；配置控制器 CA 与证书包含的主机名。修改[抓取示例](../../examples/prometheus/xirang.yml)，
 再执行 `promtool check config /etc/prometheus/prometheus.yml` 验证。
 
 启动 Prometheus 时明确保留限制，例如

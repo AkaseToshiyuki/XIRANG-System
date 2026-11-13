@@ -2,14 +2,19 @@ package mountcontrol
 
 import (
 	"errors"
+	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
+	"github.com/xirang-grid/xirang/internal/networkhealth"
 )
 
 const Capability = "shared-mount-control-v1"
+const QuotaCapability = "shared-project-quota-v1"
+const PathCapability = "shared-path-selection-v1"
 const Timeout = 30 * time.Second
 
 // Arguments is the complete remote mutation allowlist. File I/O and local
@@ -21,7 +26,25 @@ func Arguments(operation *xirangv1.SharedMountOperation, now time.Time) ([]strin
 		return nil, errors.New("invalid or expired shared mount operation")
 	}
 	args := []string{"", operation.SpaceId}
+	if operation.Action != xirangv1.SharedMountOperation_ACTION_REPATH && (operation.ClientAddress != "" || operation.ClientInterface != "") {
+		return nil, errors.New("client route is only valid for a path selection operation")
+	}
+	if operation.Action != xirangv1.SharedMountOperation_ACTION_QUOTA_SET && operation.QuotaBytes != 0 {
+		return nil, errors.New("capacity limit is only valid for a quota operation")
+	}
 	switch operation.Action {
+	case xirangv1.SharedMountOperation_ACTION_REPATH:
+		if net.ParseIP(operation.SourceHost) == nil || net.ParseIP(operation.ClientAddress) == nil || !networkhealth.ValidInterface(operation.ClientInterface) || !safePath(operation.SourcePath) || !safePath(operation.MountPath) {
+			return nil, errors.New("invalid shared path selection")
+		}
+		args[0] = "repath"
+		args = append(args, operation.SourceHost, operation.SourcePath, operation.MountPath, operation.ClientAddress, operation.ClientInterface)
+	case xirangv1.SharedMountOperation_ACTION_QUOTA_SET:
+		if !safePath(operation.SourcePath) || operation.SourceHost != "" || operation.MountPath != "" || operation.QuotaBytes > 1<<60 || operation.QuotaBytes%1024 != 0 {
+			return nil, errors.New("invalid shared capacity limit")
+		}
+		args[0] = "quota-set"
+		args = append(args, operation.SourcePath, strconv.FormatUint(operation.QuotaBytes, 10))
 	case xirangv1.SharedMountOperation_ACTION_PREPARE, xirangv1.SharedMountOperation_ACTION_EXPORT, xirangv1.SharedMountOperation_ACTION_UNEXPORT:
 		if !safePath(operation.SourcePath) || operation.SourceHost != "" || operation.MountPath != "" {
 			return nil, errors.New("invalid shared source path")

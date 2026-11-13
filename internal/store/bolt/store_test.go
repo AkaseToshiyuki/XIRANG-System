@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -285,4 +286,71 @@ func testCSR(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+}
+
+func TestManagementPairAssignmentsAreAtomicAndRetirementReleasesSlot(t *testing.T) {
+	store, err := boltstore.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	authority, err := pki.OpenOrCreate(filepath.Join(t.TempDir(), "pki"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := enrollment.NewService(store, authority)
+	token, err := service.CreateToken(context.Background(), enrollment.TokenOptions{Name: "pair", TTL: time.Hour, MaxUses: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{}
+	for i := 0; i < 4; i++ {
+		result, err := service.Register(context.Background(), token.Secret, testCSR(t), domain.InventorySummary{Hostname: fmt.Sprint("node", i), OS: "linux", Architecture: "amd64", CPUCount: 1, MemoryBytes: 1 << 30})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, result.Node.ID)
+	}
+	roles := []domain.NodeRole{domain.NodeRoleManagement, domain.NodeRoleCompute}
+	if _, err := service.SetNodeConfiguration(context.Background(), ids[0], roles, "", "", "", 0, "primary"); err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	for _, id := range ids[1:3] {
+		go func(id string) {
+			_, err := service.SetNodeConfiguration(context.Background(), id, roles, "", "", "", 0, "backup")
+			results <- err
+		}(id)
+	}
+	successes := 0
+	for i := 0; i < 2; i++ {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if !errors.Is(err, enrollment.ErrConflict) {
+			t.Fatal(err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent backup requests admitted %d nodes", successes)
+	}
+	if _, err := service.SetNodeConfiguration(context.Background(), ids[3], roles, "", "", "", 0, "primary"); !errors.Is(err, enrollment.ErrConflict) {
+		t.Fatalf("third manager admitted: %v", err)
+	}
+	var backup string
+	nodes, _ := store.ListNodes(context.Background())
+	for _, node := range nodes {
+		if node.ManagementRole == "backup" {
+			backup = node.ID
+		}
+	}
+	if _, err := store.UpdateNode(context.Background(), backup, func(n *domain.Node) error { n.Status = domain.NodeStatusOffline; return nil }, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RemoveNode(context.Background(), backup); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SetNodeConfiguration(context.Background(), ids[3], roles, "", "", "", 0, "backup"); err != nil {
+		t.Fatalf("retired slot stayed occupied: %v", err)
+	}
 }

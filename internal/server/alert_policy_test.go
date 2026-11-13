@@ -24,7 +24,7 @@ func TestAlertPolicyAuthorizationConflictAuditAndRestart(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	access := identity.NewAccessService(store, nil, nil)
 	actor := domain.Principal{Subject: "admin", Role: "admin", Permissions: []string{"*"}, AuthMethod: "api_token"}
-	viewer, err := access.CreateToken(ctx, "viewer", "viewer", time.Hour, actor)
+	viewer, err := createTestSession(t, access, ctx, "viewer", "viewer", time.Hour, actor)
 	if err != nil {
 		t.Fatal(err)
 	}

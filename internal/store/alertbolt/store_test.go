@@ -6,9 +6,55 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xirang-grid/xirang/internal/alerting"
 	"github.com/xirang-grid/xirang/internal/domain"
 	alertbolt "github.com/xirang-grid/xirang/internal/store/alertbolt"
 )
+
+func TestIgnoredAlertAndNotificationPersistAcrossReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "alerts.db")
+	store, err := alertbolt.Open(path, 50, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := alerting.NewService(store, alerting.Config{RecordTransitions: true})
+	alert, err := service.ReportCondition(ctx, "node-storage", "node_storage", "node", domain.AlertSeverityCritical, "space exhausted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ignored, err := service.Ignore(ctx, alert.ID, "operator-alice", alert.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = alertbolt.Open(path, 50, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	service = alerting.NewService(store, alerting.Config{RecordTransitions: true})
+	active, err := service.List(ctx, false)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("ignored incident active after reopen: %+v %v", active, err)
+	}
+	history, err := service.List(ctx, true)
+	if err != nil || len(history) != 1 || history[0].IgnoredBy != "operator-alice" || history[0].Revision != ignored.Revision || history[0].ResolvedAt != nil {
+		t.Fatalf("ignore metadata lost: %+v %v", history, err)
+	}
+	deliveries, err := store.ListDueDeliveries(ctx, time.Now().Add(time.Second), 50)
+	if err != nil || len(deliveries) != 2 {
+		t.Fatalf("missing durable transitions: %+v %v", deliveries, err)
+	}
+	for _, delivery := range deliveries {
+		if delivery.EventType == "alert.ignored" && delivery.Alert.IgnoredBy == "operator-alice" {
+			return
+		}
+	}
+	t.Fatal("ignored transition missing from outbox")
+}
 
 func TestStorePersistsAndPrunesOldestResolvedAlerts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "alerts.db")

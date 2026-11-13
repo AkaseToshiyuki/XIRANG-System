@@ -65,7 +65,7 @@ func accessMiddleware(service *identity.AccessService, bootstrapToken string, ne
 
 func publicIdentityRoute(method, path string) bool {
 	return (method == http.MethodGet && path == "/api/v1/setup/status") ||
-		(method == http.MethodPost && (path == "/api/v1/setup/admin" || path == "/api/v1/auth/register" || path == "/api/v1/auth/login"))
+		(method == http.MethodPost && (path == "/api/v1/setup/admin" || path == "/api/v1/auth/register" || path == "/api/v1/auth/login" || path == "/api/v1/auth/token"))
 }
 
 // credentialOptionalRoute reports whether a request carrying no Authorization
@@ -83,6 +83,9 @@ func credentialOptionalRoute(method, path string) bool {
 	switch method {
 	case http.MethodGet:
 		switch path {
+		case "/api/v1/network-paths":
+			// The handler validates the active enrolled node certificate.
+			return true
 		case "/api/v1/version", "/api/v1/capabilities", "/api/v1/enrollment/ca", "/api/v1/cluster/branding":
 			return true
 		case "/api/v1/terminal/connect":
@@ -107,6 +110,9 @@ func credentialOptionalRoute(method, path string) bool {
 }
 
 func requiredPermission(method, path string) string {
+	if path == "/api/v1/network-paths" {
+		return identity.PermissionAccessManage
+	}
 	if path == "/api/v1/alert-policy" {
 		if method == http.MethodGet {
 			return identity.PermissionRead
@@ -308,7 +314,7 @@ func rateLimitMiddleware(rate, burst float64, next http.Handler) http.Handler {
 
 func credentialThrottleRoute(method, path string) bool {
 	return method == http.MethodPost &&
-		(path == "/api/v1/auth/login" || path == "/api/v1/auth/register" || path == "/api/v1/setup/admin")
+		(path == "/api/v1/auth/login" || path == "/api/v1/auth/token" || path == "/api/v1/auth/register" || path == "/api/v1/setup/admin")
 }
 
 // throttleMiddleware applies a per-peer token bucket. When applies is nil every

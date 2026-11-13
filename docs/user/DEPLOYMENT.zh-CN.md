@@ -2,7 +2,7 @@
 
 [English](DEPLOYMENT.md) | [简体中文](DEPLOYMENT.zh-CN.md)
 
-适用于 XIRANG **1.3.0**。
+适用于 XIRANG **1.4.1**。
 
 本指南使用预构建原生包部署控制节点或被控节点，不需要容器运行时。
 
@@ -43,25 +43,33 @@ mTLS 证书有效期、OIDC 会话、遥测排序和用量核算要求主机具�
 `--allow-unsynchronized-clock` 带警告继续，但必须在节点接入前完成时间同步。
 `--skip-dependencies` 不会静默绕过时间检查。
 
+systemd 的控制器和 Agent 单元还会等待 `time-sync.target`。
+当 `systemd-timesyncd` 正在运行时，原生安装器会为后续开机启用
+`systemd-time-wait-sync.service`。使用 Chrony 或其他 NTP 服务时，应将其对应的
+校时等待服务配置在 `time-sync.target` 之前；仅设置 target 启动顺序并不能确认
+时间有效。无法访问时间源时，主机可能会等待校时后才启动 XIRANG。
+若运行中的控制器发生时间回拨，早于缓存服务证书的有效期，控制器会在下一次
+TLS 握手时使用原集群 CA 重新签发该服务证书。
+
 ## 选择版本或本地包
 
 安装指定 Release：
 
 ```bash
-./install.sh --version 1.3.0
+./install.sh --version 1.4.1
 ```
 
 安装已下载的包时，安装器会读取同目录下的 `SHA256SUMS` 和 `SHA256SUMS.sig`：
 
 ```bash
-./install.sh --archive ~/Downloads/xirang-1.3.0-linux-amd64.tar.gz
+./install.sh --archive ~/Downloads/xirang-1.4.1-linux-amd64.tar.gz
 ```
 
 如果没有校验文件，必须显式提供可信的 SHA-256：
 
 ```bash
 ./install.sh \
-  --archive ~/Downloads/xirang-1.3.0-linux-amd64.tar.gz \
+  --archive ~/Downloads/xirang-1.4.1-linux-amd64.tar.gz \
   --sha256 EXPECTED_SHA256
 ```
 
@@ -120,8 +128,10 @@ Agent 本身仍是特权的结构化代理，因为 cgroup、设备、挂载和�
 导出已有目录时会保留宿主机的原属主、属组及本地用户的有效访问权限。XIRANG
 通过 POSIX 访问 ACL 为任务组增加权限，不再接管目录属主或强制改成 `0770`。
 原有 ACL 被掩码限制的权限不会被意外放开；默认 ACL 和目录内的文件保持原样。
-新建导出根目录允许宿主机用户读取和进入（`0755` 加集群 ACL）。文件系统必须
-支持 POSIX ACL；不支持时会明确报错，不会回退到修改模式位。NFS 仍使用
+新建导出根目录允许宿主机用户读取和进入（`0755` 加集群 ACL）。不支持 POSIX
+ACL 的文件系统，仅当已有目录的 Unix 权限已经允许任务身份及任务组完整访问时
+才接受；权限不足时明确失败，不对宿主机数据执行 chmod 或 chown。XIRANG 新建
+的目录即使受到服务 umask 限制，也会保留任务所有权及任务组访问。NFS 仍使用
 `all_squash` 映射到任务身份。
 
 安装器也使用同一准备流程处理默认共享目录，并保留已有挂载父目录的权限。
@@ -138,6 +148,20 @@ drop-in。导出源目录操作始终限制在特权辅助程序内；升级时�
 默认 `/srv/xirang/XirangShare` 会在首次启动前得到授权。增加或解除其他共享
 路径后，应在维护窗口重启相关服务，使新的 systemd 挂载命名空间策略生效；
 重启 Agent 前应先排空正在运行的任务。
+
+替换内置共享空间时，在控制器已有 `XIRANGD_ARGS` 中增加
+`-default-shared-space=false`，并在维护窗口重启控制器。这会停用自动重建并允许
+解除 `share_default`；参数本身不会删除共享配置或数据。先创建并验证替代空间，
+迁移所需程序文件，更新控制器的 `-job-artifact-root` 及构建目录参数，再解除原
+共享空间。未设置此参数时，默认空间仍自动管理并受到删除保护。
+
+以 NAS 为共享源时，先将远程文件系统挂载到准确的源路径，再登记共享空间。
+配置持久挂载和 systemd 依赖，防止 XIRANG 在未挂载的本地空目录上启动。已挂载
+的 NFS 源会配置稳定的显式 `fsid` 及 `mountpoint` 导出保护。NFS 再导出存在
+[内核锁与文件句柄限制](https://www.kernel.org/doc/html/latest/filesystems/nfs/reexport.html)；
+本地文件操作成功不代表下游工作负载或文件锁已经通过验证。NAS 应保留数字身份，
+并用实际任务账户验证权限。NAS 未提供所需的本地配额接口时，文件系统项目配额
+仍不可用。
 
 共享挂载/导出控制要求升级两端并显式启用 Agent 的 `-shared-mount-control`
 参数，默认关闭且仅支持 root/systemd。它使用 mTLS 通道及固定、限时的宿主机

@@ -1,7 +1,9 @@
+import { mergeAlerts } from "../lib/alerts";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { getNodeInventory, getNodeObservations, getNodes, removeNode, revokeNodeCertificate, rotateNodeCertificate, setNodeMode, setNodeTaints, updateNodeConfiguration, updateNodeStatus, watchNodes } from "../api/client";
-import type { ClusterNode, NodeInventorySnapshot, NodeResourceObservation } from "../api/contracts";
+import { getAlerts, getNodeHealth, getNodeInventory, getNodeObservations, getNodes, removeNode, revokeNodeCertificate, rotateNodeCertificate, setNodeMode, setNodeTaints, updateNodeConfiguration, updateNodeStatus, watchAlerts, watchNodes } from "../api/client";
+import type { Alert, NodeHealthSnapshot, ClusterNode, NodeInventorySnapshot, NodeResourceObservation } from "../api/contracts";
 import { clockTime, formatByteRate, formatBytes, networkDirectionBytesPerSecond, percentage, relativeTime } from "../lib/format";
+import { nodeStatusTone } from "../lib/node-status";
 import { usePreferences } from "../app/preferences";
 
 interface LiveResources {
@@ -18,12 +20,14 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
   const [lastUpdatedAt, setLastUpdatedAt] = useState("");
   const [resources, setResources] = useState<Record<string, LiveResources>>({});
   const [inventories, setInventories] = useState<Record<string, NodeInventorySnapshot>>({});
+  const [health, setHealth] = useState<Record<string, NodeHealthSnapshot>>({});
+  const [alerts, setAlerts] = useState<Alert[]>([]);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [taintEditorID, setTaintEditorID] = useState("");
   const [taintDraft, setTaintDraft] = useState("");
   const [configurationEditorID, setConfigurationEditorID] = useState("");
-  const [configurationDraft, setConfigurationDraft] = useState<{ roles: Array<"management" | "compute" | "storage">; managementAddress: string; sshUser: string; group: string; computePriority: number }>({ roles: ["compute"], managementAddress: "", sshUser: "", group: "", computePriority: 0 });
+  const [configurationDraft, setConfigurationDraft] = useState<{ roles: Array<"management" | "compute" | "storage">; managementAddress: string; sshUser: string; group: string; computePriority: number; managementRole: "primary" | "backup" }>({ roles: ["compute"], managementAddress: "", sshUser: "", group: "", computePriority: 0, managementRole: "primary" });
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
@@ -75,6 +79,19 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
     };
   }, [token]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    let retry: number | undefined;
+    const connect = async () => {
+      try {
+        await watchAlerts(token, (alert) => setAlerts((current) => mergeAlerts(current, [alert])), () => undefined, controller.signal);
+      } catch { /* Polling continues while the event stream reconnects. */ }
+      if (!controller.signal.aborted) retry = window.setTimeout(connect, 1500);
+    };
+    void connect();
+    return () => { controller.abort(); if (retry !== undefined) window.clearTimeout(retry); };
+  }, [token]);
+
   const nodeIDs = nodes.map((node) => node.id).sort().join(",");
   useEffect(() => {
     if (!nodeIDs) {
@@ -84,26 +101,32 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
     }
     const controller = new AbortController();
     const refresh = async () => {
+      const recentAlerts = await getAlerts(token, true, controller.signal).catch(() => undefined);
+      if (recentAlerts && !controller.signal.aborted) setAlerts((current) => mergeAlerts(current, recentAlerts));
       const updates = await Promise.all(nodes.map(async (node) => {
         try {
-          const [observations, inventory] = await Promise.all([
+          const [observations, inventory, snapshot] = await Promise.all([
             getNodeObservations(node.id, token, 2, controller.signal),
             getNodeInventory(node.id, token, controller.signal).catch(() => undefined),
+            isAdmin ? getNodeHealth(node.id, token, controller.signal).catch(() => undefined) : Promise.resolve(undefined),
           ]);
-          return { nodeId: node.id, inventory, resource: observations.length ? { latest: observations[0], networkRates: networkDirectionBytesPerSecond(observations) } : undefined };
+          return { nodeId: node.id, inventory, snapshot, resource: observations.length ? { latest: observations[0], networkRates: networkDirectionBytesPerSecond(observations) } : undefined };
         } catch {
           return undefined;
         }
       }));
       if (!controller.signal.aborted) {
         const next: Record<string, LiveResources> = {};
+        const nextHealth: Record<string, NodeHealthSnapshot> = {};
         const nextInventories: Record<string, NodeInventorySnapshot> = {};
         for (const entry of updates) {
           if (entry?.resource) next[entry.nodeId] = entry.resource;
+          if (entry?.snapshot) nextHealth[entry.nodeId] = entry.snapshot;
           if (entry?.inventory) nextInventories[entry.nodeId] = entry.inventory;
         }
         setResources(next);
         setInventories(nextInventories);
+        setHealth(nextHealth);
       }
     };
     void refresh();
@@ -112,7 +135,7 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
       controller.abort();
       window.clearInterval(interval);
     };
-  }, [token, nodeIDs, refreshMs]);
+  }, [token, nodeIDs, refreshMs, isAdmin]);
 
   const statuses = useMemo(() => [...new Set(nodes.map((node) => node.status))].sort(), [nodes]);
   const filteredNodes = useMemo(() => nodes.filter((node) => {
@@ -196,6 +219,7 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
       sshUser: node.sshUser ?? "",
       group: node.group ?? "",
       computePriority: node.computePriority ?? 0,
+      managementRole: node.managementRole ?? (nodes.some((other) => other.id !== node.id && other.roles?.includes("management") && (other.managementRole === "primary" || other.managementPanelStatus === "controller")) ? "backup" : "primary"),
     });
   }
 
@@ -235,7 +259,7 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
     {error && <p className="error-banner" role="alert">{error}</p>}
     <div className="nodes-table" role="table" aria-label={t("集群节点", "Cluster nodes")} tabIndex={0}>
       <div className="nodes-table__header" role="row">
-        <span role="columnheader">{t("节点", "Node")}</span><span role="columnheader">{t("宿主机", "Host")}</span><span role="columnheader">{t("容量与能力", "Capacity")}</span><span role="columnheader">{t("实时资源", "Live resources")}</span><span role="columnheader">{t("温度", "Temperature")}</span><span role="columnheader">{t("状态", "Status")}</span><span role="columnheader" aria-label={t("操作", "Actions")}>•••</span>
+        <span role="columnheader">{t("节点", "Node")}</span><span role="columnheader">{t("宿主机", "Host")}</span><span role="columnheader">{t("容量与能力", "Capacity")}</span><span role="columnheader">{t("实时资源", "Live resources")}</span><span role="columnheader">{t("温度", "Temperature")}</span><span role="columnheader">{t("状态", "Status")}</span><span role="columnheader" aria-label={t("操作", "Actions")}><MoreActionsIcon /></span>
       </div>
       {filteredNodes.map((node) => {
         const resource = resources[node.id];
@@ -244,8 +268,10 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
         const memory = resource ? percentage(resource.latest.usedMemoryBytes, node.capacity.memoryBytes) : 0;
         const accelerators = resource?.latest.accelerators ?? [];
         const panelState = managementPanelState(node, t);
+        const tone = nodeStatusTone(node, health[node.id], alerts);
+        const toneLabel = t(({ ready: "可用", warning: "警告", critical: "异常", offline: "离线" })[tone], ({ ready: "Available", warning: "Warning", critical: "Critical", offline: "Offline" })[tone]);
         return <Fragment key={node.id}><div className="nodes-table__row" role="row">
-          <span role="cell" className="node-name-cell"><i className={`state-dot state-dot--${node.status}`} /><span><strong>{node.name}</strong><small title={node.id}>{shortID(node.id)}</small><span className="node-role-list">{effectiveRoles(node).map((role) => <i key={role}>{roleLabel(role, t)}</i>)}</span>{node.roles?.includes("management") && <small className={`management-panel-state${panelState.ready ? " management-panel-state--ready" : ""}`} title={`${t("此节点上报的面板状态，不代表整个集群控制服务的健康状态。", "Panel state reported by this node, not the health of the cluster control service.")} ${node.managementPanelStatus || ""}`.trim()}>{panelState.label}</small>}</span></span>
+          <span role="cell" className="node-name-cell"><i className={`state-dot state-dot--${tone}`} role="img" aria-label={toneLabel} title={toneLabel} /><span><strong>{node.name}</strong><small title={node.id}>{shortID(node.id)}</small><span className="node-role-list">{effectiveRoles(node).map((role) => <i key={role}>{role === "management" && node.managementRole ? (node.managementRole === "primary" ? t("主管理", "Primary") : t("备管理", "Backup")) : roleLabel(role, t)}</i>)}</span>{node.roles?.includes("management") && <small className={`management-panel-state${panelState.ready ? " management-panel-state--ready" : ""}`}>{panelState.label}</small>}</span></span>
           <span role="cell"><strong>{node.architecture}</strong><small>{node.distribution || node.os} · {node.kernelVersion || "kernel unknown"}</small><small>{node.cpuModel || inventory?.cpuModel || t("CPU 型号待探测", "CPU model pending")}</small><span className="cpu-features" title={(node.cpuFeatures ?? inventory?.cpuFeatures ?? []).join(", ")}>{importantCPUFeatures(node.cpuFeatures ?? inventory?.cpuFeatures ?? []).map((feature) => <i key={feature}>{feature}</i>)}</span></span>
           <span role="cell"><strong>{node.capacity.milliCpu / 1000} CPU</strong><small>{formatBytes(node.capacity.memoryBytes)} RAM · {node.numaTopology?.length ?? 0} NUMA</small><small title={computeWeightDetail(inventory)}>{t("自动权重", "Auto weight")} {(node.computeWeight ?? inventory?.computeWeight ?? 0).toFixed(2)} · {t("优先级", "Priority")} {node.computePriority ?? 0}</small>{inventory?.devices?.filter((device) => device.vendor).map((device) => <span className="device-model" key={`${device.resourceName}-${device.deviceId}`} title={gpuDetail(device)}>{device.model || device.vendor?.toUpperCase()}</span>)}{Object.entries(node.capacity.devices ?? {}).length > 0 && <span className="device-list">{Object.entries(node.capacity.devices ?? {}).map(([name, quantity]) => <i key={name} title={deviceLocality(node, name)}>{shortResourceName(name)} × {quantity}</i>)}</span>}</span>
           <span role="cell" className="resource-cell">
@@ -257,7 +283,7 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
           </span>
           <span role="cell"><strong className={`node-state node-state--${node.status}`}>{statusLabel(node.status, t)}</strong><small>{node.desiredStatus ? `${t("正在切换", "Transitioning")} → ${statusLabel(node.desiredStatus, t)}` : relativeTime(node.lastSeenAt)}</small>{(node.taints?.length ?? 0) > 0 && <span className="taint-list">{node.taints?.map((taint) => <i key={`${taint.key}-${taint.effect}`} title={`${taint.key}${taint.value ? `=${taint.value}` : ""}:${taint.effect}`}>{taint.key} · {taint.effect}</i>)}</span>}</span>
           <span role="cell" className="node-actions">
-            {isAdmin && <details className="action-menu"><summary aria-label={`${t("操作", "Actions")} ${node.name}`}>•••</summary><div>
+            {isAdmin && <details className="action-menu"><summary aria-label={`${t("操作", "Actions")} ${node.name}`}><MoreActionsIcon /></summary><div>
               {node.status === "pending_approval" && <><button type="button" onClick={() => void act(node, "approve")}>{t("批准", "Approve")}</button><button type="button" className="danger" onClick={() => void act(node, "reject")}>{t("拒绝", "Reject")}</button></>}
               {!node.pendingModeCommandId && node.status === "ready" && <button type="button" onClick={() => void changeMode(node, "cordoned")}>{t("隔离", "Cordon")}</button>}
               {!node.pendingModeCommandId && node.status === "cordoned" && <><button type="button" onClick={() => void changeMode(node, "ready")}>{t("恢复", "Resume")}</button><button type="button" onClick={() => void changeMode(node, "draining")}>{t("排空", "Drain")}</button></>}
@@ -269,9 +295,10 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
             </div></details>}
           </span>
         </div>{isAdmin && configurationEditorID === node.id && <div role="row"><div role="cell" aria-colspan={7}><div className="node-editor node-configuration-editor">
-          <header><strong>{t("节点角色与管理连接", "Node roles and management access")}</strong><small>{t("启用管理角色会在该节点开放 8899 端口的 XIRANG 控制面板；移除管理角色会关闭由 Agent 托管的面板。只有计算节点会接收任务。", "The management role exposes the XIRANG panel on port 8899 of this node; removing it stops the Agent-managed panel. Only compute nodes receive jobs.")}</small></header>
+          <header><strong>{t("节点角色与管理连接", "Node roles and management access")}</strong></header>
           <div className="node-configuration-fields">
             <fieldset><legend>{t("节点角色", "Node roles")}</legend>{(["management", "compute", "storage"] as const).map((role) => <label key={role}><input type="checkbox" checked={configurationDraft.roles.includes(role)} disabled={Boolean(node.pendingManagementCommandId)} onChange={(event) => setConfigurationDraft((current) => ({ ...current, roles: event.target.checked ? [...current.roles, role] : current.roles.filter((item) => item !== role) }))} />{roleLabel(role, t)}</label>)}</fieldset>
+            {configurationDraft.roles.includes("management") && <label><span>{t("管理职责", "Management responsibility")}</span><select value={configurationDraft.managementRole} disabled={Boolean(node.pendingManagementCommandId)} onChange={(event) => setConfigurationDraft({ ...configurationDraft, managementRole: event.target.value as "primary" | "backup" })}><option value="primary">{t("主控制节点", "Primary controller")}</option><option value="backup">{t("备用管理节点", "Backup controller")}</option></select></label>}
             <label><span>{t("管理地址", "Management address")}</span><input value={configurationDraft.managementAddress} onChange={(event) => setConfigurationDraft({ ...configurationDraft, managementAddress: event.target.value })} placeholder={t("192.0.2.25 或 node.example", "192.0.2.25 or node.example")} /></label>
             <label><span>{t("SSH 用户", "SSH user")}</span><input value={configurationDraft.sshUser} onChange={(event) => setConfigurationDraft({ ...configurationDraft, sshUser: event.target.value })} placeholder="yang" /></label>
             <label><span>{t("节点分组", "Node group")}</span><input value={configurationDraft.group} onChange={(event) => setConfigurationDraft({ ...configurationDraft, group: event.target.value })} placeholder={t("gpu 或 storage-a", "gpu or storage-a")} /></label>
@@ -279,7 +306,7 @@ export function NodesPage({ token, isAdmin }: { token: string; isAdmin: boolean 
           </div>
           <div className="taint-editor__actions"><button type="button" onClick={() => setConfigurationEditorID("")}>{t("取消", "Cancel")}</button><button type="button" disabled={Boolean(node.pendingManagementCommandId)} onClick={() => void saveConfiguration(node)}>{node.pendingManagementCommandId ? t("正在切换控制面板…", "Panel transitioning…") : t("保存配置", "Save configuration")}</button></div>
         </div></div></div>}{isAdmin && taintEditorID === node.id && <div role="row"><div role="cell" aria-colspan={7}><div className="node-editor taint-editor">
-          <header><strong>{t("节点污点", "Node taints")}</strong><small>{t("每行填写 key[=value]:NoSchedule 或 key[=value]:NoExecute。NoExecute 当前阻止新任务；不会强制终止运行中任务。", "Enter one key[=value]:NoSchedule or key[=value]:NoExecute per line. NoExecute currently blocks new jobs and does not terminate running jobs.")}</small></header>
+          <header><strong>{t("节点污点", "Node taints")}</strong><small>{t("每行填写 key[=value]:NoSchedule 或 key[=value]:NoExecute。", "Enter one key[=value]:NoSchedule or key[=value]:NoExecute per line. ")}</small></header>
           <textarea value={taintDraft} onChange={(event) => setTaintDraft(event.target.value)} placeholder={"dedicated=gpu:NoSchedule\nmaintenance:NoExecute"} aria-label={t("节点污点", "Node taints")} />
           <div className="taint-editor__actions"><button type="button" onClick={() => setTaintEditorID("")}>{t("取消", "Cancel")}</button><button type="button" onClick={() => void saveTaints(node)}>{t("保存约束", "Save constraints")}</button></div>
         </div></div></div>}</Fragment>;
@@ -294,13 +321,17 @@ function effectiveRoles(node: ClusterNode): Array<"management" | "compute" | "st
   return node.roles?.length ? node.roles : ["compute"];
 }
 
+function MoreActionsIcon() {
+  return <svg className="more-actions-icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="19" cy="12" r="1.8" /></svg>;
+}
+
 function managementPanelState(node: ClusterNode, t: (zh: string, en: string) => string): { label: string; ready: boolean } {
-  if (node.status === "offline" || node.status === "rejected" || node.status === "pending_approval") return { label: t("面板状态未知", "Panel state unknown"), ready: false };
-  if (node.pendingManagementCommandId) return { label: t("控制面板切换中", "Panel transitioning"), ready: false };
+  if (node.status === "offline" || node.status === "unreachable" || node.status === "rejected" || node.status === "pending_approval") return { label: t("面板状态未知", "Panel state unknown"), ready: false };
+  if (node.pendingManagementCommandId) return { label: t("控制面板配置中", "Configuring control panel"), ready: false };
+  if (node.controllerActive || (!node.controllerConfigured && node.managementRole !== "backup" && node.managementPanelEnabled && node.managementPanelStatus === "controller")) return { label: t("控制面板已启动", "Control panel started"), ready: true };
   if (node.managementPanelStatus?.startsWith("error:")) return { label: t("面板操作失败", "Panel operation failed"), ready: false };
-  if (node.managementPanelEnabled) return { label: node.managementPanelStatus === "controller" ? t("独立控制服务已识别", "Independent controller detected") : t("控制面板已启用", "Panel enabled"), ready: true };
+  if (node.managementPanelStatus === "installed" || node.controllerConfigured) return { label: t("控制面板已安装", "Control panel installed"), ready: false };
   if (node.managementPanelStatus === "disabled") return { label: t("节点面板未启用", "Node panel disabled"), ready: false };
-  if (node.managementPanelStatus === "externally managed") return { label: t("面板由外部服务管理", "Panel managed externally"), ready: false };
   return { label: t("面板状态未上报", "Panel state not reported"), ready: false };
 }
 
@@ -315,7 +346,7 @@ function roleLabel(role: "management" | "compute" | "storage", t: (zh: string, e
 }
 
 function statusLabel(status: string, t: (zh: string, en: string) => string): string {
-  return t(({ ready: "就绪", pending_approval: "待审批", rejected: "已拒绝", cordoned: "已隔离", draining: "排空中" } as Record<string, string>)[status] ?? status, ({ ready: "Ready", pending_approval: "Pending approval", rejected: "Rejected", cordoned: "Cordoned", draining: "Draining" } as Record<string, string>)[status] ?? status);
+  return t(({ ready: "就绪", pending_approval: "待审批", rejected: "已拒绝", cordoned: "已隔离", draining: "排空中", unreachable: "无法连接", offline: "离线" } as Record<string, string>)[status] ?? status, ({ ready: "Ready", pending_approval: "Pending approval", rejected: "Rejected", cordoned: "Cordoned", draining: "Draining", unreachable: "Unreachable", offline: "Offline" } as Record<string, string>)[status] ?? status);
 }
 
 function shortID(value: string): string {

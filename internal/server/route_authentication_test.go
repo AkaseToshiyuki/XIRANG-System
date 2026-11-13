@@ -86,6 +86,7 @@ func TestCredentialOptionalRoutesAreTheExpectedSet(t *testing.T) {
 		{http.MethodGet, "/api/v1/capabilities"}:                     true,
 		{http.MethodGet, "/api/v1/enrollment/ca"}:                    true,
 		{http.MethodGet, "/api/v1/terminal/connect"}:                 true,
+		{http.MethodGet, "/api/v1/network-paths"}:                    true,
 		{http.MethodGet, "/artifacts/amd64/task"}:                    true,
 		{http.MethodPost, "/api/v1/enrollment/register"}:             true,
 		{http.MethodPost, "/api/v1/nodes/node-1/heartbeat"}:          true,

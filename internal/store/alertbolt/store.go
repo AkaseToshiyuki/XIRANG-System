@@ -253,6 +253,8 @@ func newDelivery(previous, alert domain.Alert, now time.Time) domain.AlertDelive
 		eventType = "alert.firing"
 	case alert.Status == domain.AlertStatusAcknowledged && previous.Status != domain.AlertStatusAcknowledged:
 		eventType = "alert.acknowledged"
+	case alert.Status == domain.AlertStatusIgnored && previous.Status != domain.AlertStatusIgnored:
+		eventType = "alert.ignored"
 	case alert.Status == domain.AlertStatusResolved && previous.Status != domain.AlertStatusResolved:
 		eventType = "alert.resolved"
 	}

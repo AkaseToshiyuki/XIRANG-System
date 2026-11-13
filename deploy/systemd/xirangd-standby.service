@@ -1,6 +1,6 @@
 [Unit]
 Description=XIRANG passive control plane
-After=network-online.target xirangd.service
+After=network-online.target time-sync.target xirangd.service
 Wants=network-online.target
 
 [Service]

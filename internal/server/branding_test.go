@@ -27,7 +27,7 @@ func TestClusterBrandingAuthorizationValidationAndRestart(t *testing.T) {
 	}
 	access := identity.NewAccessService(store, nil, nil)
 	actor := domain.Principal{Subject: "admin", Role: "admin", Permissions: []string{"*"}, AuthMethod: "api_token"}
-	viewer, err := access.CreateToken(context.Background(), "viewer", "viewer", time.Hour, actor)
+	viewer, err := createTestSession(t, access, context.Background(), "viewer", "viewer", time.Hour, actor)
 	if err != nil {
 		t.Fatal(err)
 	}

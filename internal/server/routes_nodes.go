@@ -191,6 +191,7 @@ func registerEnrollmentRoutes(mux *http.ServeMux, service *enrollment.Service, j
 			SSHUser           string            `json:"sshUser"`
 			Group             string            `json:"group"`
 			ComputePriority   int32             `json:"computePriority"`
+			ManagementRole    string            `json:"managementRole"`
 		}
 		if err := decodeJSON(writer, request, &payload); err != nil {
 			writeError(writer, err)
@@ -207,12 +208,15 @@ func registerEnrollmentRoutes(mux *http.ServeMux, service *enrollment.Service, j
 			managementEnabled = managementEnabled || role == domain.NodeRoleManagement
 		}
 		managementChanged := current.HasRole(domain.NodeRoleManagement) != managementEnabled
+		if payload.ManagementRole == "" {
+			payload.ManagementRole = current.ManagementRole
+		}
 		if managementChanged && commands == nil {
 			writeError(writer, enrollment.ErrUnavailable)
 			return
 		}
 		if !managementChanged {
-			node, err := service.SetNodeConfiguration(request.Context(), nodeID, payload.Roles, payload.ManagementAddress, payload.SSHUser, payload.Group, payload.ComputePriority)
+			node, err := service.SetNodeConfiguration(request.Context(), nodeID, payload.Roles, payload.ManagementAddress, payload.SSHUser, payload.Group, payload.ComputePriority, payload.ManagementRole)
 			if err != nil {
 				writeError(writer, err)
 				return
@@ -221,7 +225,7 @@ func registerEnrollmentRoutes(mux *http.ServeMux, service *enrollment.Service, j
 			return
 		}
 		commandID := "command_" + randomIdentifier()
-		node, err := service.RequestNodeConfiguration(request.Context(), nodeID, payload.Roles, payload.ManagementAddress, payload.SSHUser, payload.Group, payload.ComputePriority, commandID, managementEnabled)
+		node, err := service.RequestNodeConfiguration(request.Context(), nodeID, payload.Roles, payload.ManagementAddress, payload.SSHUser, payload.Group, payload.ComputePriority, commandID, managementEnabled, payload.ManagementRole)
 		if err != nil {
 			writeError(writer, err)
 			return

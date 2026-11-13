@@ -2,7 +2,7 @@ module github.com/xirang-grid/xirang
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/cilium/ebpf v0.22.0

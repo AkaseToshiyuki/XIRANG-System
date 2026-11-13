@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,7 +32,32 @@ func RunMountHelper(arguments []string) error {
 		return errors.New("usage: mount-helper <action> <id> [arguments]")
 	}
 	action, id := arguments[0], arguments[1]
+	if action == "stats" || action == "quota-set" || strings.HasPrefix(action, "file-") {
+		if err := requireExportedSharedRoot(id, arguments[2]); err != nil {
+			return err
+		}
+	}
+	if strings.HasPrefix(action, "file-") {
+		// ext4 exempts CAP_SYS_RESOURCE holders from hard limits. Keep file
+		// access privileges but remove this exemption on the executing thread.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		if err := dropFileQuotaBypass(); err != nil {
+			return err
+		}
+	}
 	switch action {
+	case "repath":
+		return repathSharedMount(arguments)
+	case "quota-set":
+		if len(arguments) != 4 {
+			return errors.New("quota-set requires id, source path, and capacity in bytes")
+		}
+		limit, err := strconv.ParseUint(arguments[3], 10, 64)
+		if err != nil {
+			return err
+		}
+		return applySharedQuota(id, arguments[2], limit)
 	case "policy-authorize":
 		if len(arguments) != 3 || !safeMountPath(arguments[2]) {
 			return errors.New("policy-authorize requires id and a safe absolute path")
@@ -45,8 +72,8 @@ func RunMountHelper(arguments []string) error {
 		if len(arguments) != 3 || !safeMountPath(arguments[2]) {
 			return errors.New("stats requires a safe absolute source path")
 		}
-		var statistics syscall.Statfs_t
-		if err := syscall.Statfs(arguments[2], &statistics); err != nil {
+		statistics, err := sharedFilesystemStatistics(arguments[2])
+		if err != nil {
 			return err
 		}
 		blockSize := uint64(statistics.Bsize)
@@ -56,11 +83,26 @@ func RunMountHelper(arguments []string) error {
 		if err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(os.Stdout, `{"usedBytes":%d,"availableBytes":%d,"totalBytes":%d}`+"\n", used, available, total)
-		return err
+		return json.NewEncoder(os.Stdout).Encode(struct {
+			UsedBytes      uint64 `json:"usedBytes"`
+			AvailableBytes uint64 `json:"availableBytes"`
+			TotalBytes     uint64 `json:"totalBytes"`
+			sharedQuotaObservation
+		}{used, available, total, inspectSharedQuota(id, arguments[2])})
 	case "prepare", "export":
 		if len(arguments) != 3 || !safeMountPath(arguments[2]) {
 			return errors.New("prepare/export requires a safe absolute source path")
+		}
+		mountRequired := false
+		if contents, err := readManagedSharedExport(id, arguments[2]); err == nil {
+			mountRequired = sharedExportRequiresMount(contents)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if mountRequired {
+			if err := requireSharedSourceMount(arguments[2]); err != nil {
+				return err
+			}
 		}
 		uid, gid, err := taskIdentityIDs()
 		if err != nil {
@@ -72,11 +114,24 @@ func RunMountHelper(arguments []string) error {
 		if action == "prepare" {
 			return nil
 		}
+		var filesystem unix.Statfs_t
+		if err := unix.Statfs(arguments[2], &filesystem); err != nil {
+			return err
+		}
+		nfsSource := filesystem.Type == unix.NFS_SUPER_MAGIC
+		if nfsSource {
+			// A missing NAS must never expose the empty local mountpoint.
+			// Require an exact mount rather than inferring a nested NFS path.
+			if err := requireSharedSourceMount(arguments[2]); err != nil {
+				return err
+			}
+			mountRequired = true
+		}
 		path := filepath.Join("/etc/exports.d", "xirang-"+id+".exports")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		exportLine := fmt.Sprintf("%s *(rw,sync,no_subtree_check,all_squash,anonuid=%d,anongid=%d)\n", arguments[2], uid, gid)
+		exportLine := sharedExportLine(id, arguments[2], uid, gid, mountRequired, nfsSource)
 		if err := writeMountConfiguration(path, []byte(exportLine)); err != nil {
 			return err
 		}
@@ -93,7 +148,7 @@ func RunMountHelper(arguments []string) error {
 		if len(arguments) != 5 || !safeMountHost(arguments[2]) || !safeMountPath(arguments[3]) || !safeMountPath(arguments[4]) {
 			return errors.New("mount requires id, source host, source path, and mount path")
 		}
-		source, target := arguments[2]+":"+arguments[3], arguments[4]
+		source, target := nfsSource(arguments[2], arguments[3]), arguments[4]
 		mounted, err := matchingSharedMount(target, source)
 		if err != nil {
 			return err
@@ -327,6 +382,21 @@ func RunMountHelper(arguments []string) error {
 	default:
 		return errors.New("unsupported mount-helper action")
 	}
+}
+
+func sharedExportLine(id, path string, uid, gid int, mountRequired, nfsSource bool) string {
+	options := ""
+	if mountRequired || nfsSource {
+		options += ",mountpoint"
+	}
+	if nfsSource {
+		// Linux requires an explicit, stable fsid when reexporting NFS.
+		// Bind it to the logical shared-space identity, not a transient device
+		// number or network address, and keep the all_squash access policy.
+		digest := sha256.Sum256([]byte("xirang-nfs-reexport:" + id))
+		options += fmt.Sprintf(",fsid=%x-%x-%x-%x-%x", digest[:4], digest[4:6], digest[6:8], digest[8:10], digest[10:16])
+	}
+	return fmt.Sprintf("%s *(rw,sync,no_subtree_check,all_squash,anonuid=%d,anongid=%d%s)\n", path, uid, gid, options)
 }
 
 const sharedPathPolicyDirectory = "/etc/xirang/shared-write-paths.d"
@@ -964,7 +1034,13 @@ func matchingSharedMount(target, source string) (bool, error) {
 }
 
 func runMountCommand(name string, arguments ...string) error {
-	output, err := exec.Command(name, arguments...).CombinedOutput()
+	path, err := fixedMountTool(name)
+	if err != nil {
+		return err
+	}
+	command := exec.Command(path, arguments...)
+	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C"}
+	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %s", name, strings.TrimSpace(string(output)))
 	}

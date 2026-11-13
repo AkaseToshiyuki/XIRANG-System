@@ -1,5 +1,5 @@
 import { FormEvent, ReactNode, useEffect, useState } from "react";
-import { getClusterBranding, getNodes, getPrincipal, getSetupStatus, getTelemetryInterval, getVersion, loginLocalUser, registerLocalUser, setupAdmin, updateTelemetryInterval } from "../api/client";
+import { exchangeAPIToken, getClusterBranding, getPrincipal, getSetupStatus, getTelemetryInterval, getVersion, loginLocalUser, registerLocalUser, setupAdmin, updateTelemetryInterval } from "../api/client";
 import type { ClusterBranding, AccessPrincipal, VersionInfo } from "../api/contracts";
 import { OverviewPage } from "../pages/OverviewPage";
 import { AlertsPage } from "../pages/AlertsPage";
@@ -142,10 +142,13 @@ export function App() {
     setAuthenticating(true);
     setAuthError("");
     try {
-      const [, authenticatedPrincipal] = await Promise.all([getNodes(tokenInput), getPrincipal(tokenInput)]);
-      setToken(tokenInput);
+      const credential = tokenInput.trim();
+      const session = credential.startsWith("xat.") ? await exchangeAPIToken(credential) : credential;
+      const authenticatedPrincipal = await getPrincipal(session);
+      setToken(session);
       setPrincipal(authenticatedPrincipal);
       setTokenInput("");
+      setAuthMode("login");
     } catch (cause) {
       setAuthError(cause instanceof Error ? cause.message : "Authentication failed");
     } finally {
@@ -167,7 +170,7 @@ export function App() {
       }
       const secret = await loginLocalUser(credentials.username, credentials.password, language);
       const authenticatedPrincipal = await getPrincipal(secret);
-      setToken(secret); setPrincipal(authenticatedPrincipal); setCredentials({ username: "", displayName: "", password: "" });
+      setToken(secret); setPrincipal(authenticatedPrincipal); setAuthMode("login"); setCredentials({ username: "", displayName: "", password: "" });
     } catch (cause) {
       setAuthError(cause instanceof Error ? cause.message : "Authentication failed");
     } finally { setAuthenticating(false); }
@@ -204,7 +207,7 @@ export function App() {
   const pageViews: Record<Page, () => ReactNode> = {
     Overview: () => <OverviewPage token={token} onNavigate={navigate} />,
     Topology: () => <TopologyPage token={token} />,
-    Alerts: () => <AlertsPage token={token} />,
+    Alerts: () => <AlertsPage token={token} canManage={Boolean(principal?.permissions.some((permission) => permission === "*" || permission === "nodes.manage"))} />,
     Nodes: () => <NodesPage token={token} isAdmin={isAdministrator} />,
     Enrollment: () => <EnrollmentPage token={token} />,
     Jobs: () => <JobsPage token={token} isAdmin={isAdministrator} />,
@@ -236,7 +239,7 @@ export function App() {
         <div className="sidebar-footer">
           <small>{principal?.displayName || principal?.subject}</small>
           <strong>{version?.version ?? "development"}</strong>
-          <button type="button" onClick={() => { setToken(""); setPrincipal(null); }}>{t("退出登录", "Sign out")}</button>
+          <button type="button" onClick={() => { setToken(""); setPrincipal(null); setAuthMode("login"); setTokenInput(""); setAuthError(""); setAuthNotice(""); }}>{t("退出登录", "Sign out")}</button>
         </div>
       </aside>
       <main className="main-content" id="main-content" tabIndex={-1}>

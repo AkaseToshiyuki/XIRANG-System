@@ -48,7 +48,17 @@ func (broker *Broker) Run(ctx context.Context, node domain.Node, operation *xira
 	if operation == nil {
 		return errors.New("shared mount operation is required")
 	}
+	if operation.Action == xirangv1.SharedMountOperation_ACTION_REPATH && !slices.Contains(node.Capabilities, PathCapability) {
+		return errors.New("target Agent has not enabled shared-path-selection-v1")
+	}
+	if operation.Action == xirangv1.SharedMountOperation_ACTION_QUOTA_SET && !slices.Contains(node.Capabilities, QuotaCapability) {
+		return errors.New("source Agent has not enabled shared-project-quota-v1; upgrade the source Agent")
+	}
 	operation = proto.Clone(operation).(*xirangv1.SharedMountOperation)
+	// The Agent and host helper validate expiry against their own clocks.
+	// Leave two seconds inside their 30-second ceiling for clock skew and
+	// the return trip. A shorter caller deadline still takes precedence.
+	issueLimit := time.Now().Add(Timeout - 2*time.Second)
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
@@ -60,6 +70,9 @@ func (broker *Broker) Run(ctx context.Context, node domain.Node, operation *xira
 	}
 	operation.OperationId = "mount_" + hex.EncodeToString(id)
 	deadline, _ := ctx.Deadline()
+	if issueLimit.Before(deadline) {
+		deadline = issueLimit
+	}
 	operation.ExpiresAt = timestamppb.New(deadline)
 	if _, err := Arguments(operation, time.Now()); err != nil {
 		return err

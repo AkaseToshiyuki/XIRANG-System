@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os/exec"
+	"reflect"
 	"strings"
 	"time"
 
@@ -20,7 +21,6 @@ import (
 	"github.com/xirang-grid/xirang/pkg/version"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -262,22 +262,50 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 	if err != nil {
 		return false, fmt.Errorf("prepare authenticated artifact client: %w", err)
 	}
+	defer artifactClient.CloseIdleConnections()
 	if err := executor.SetArtifactHTTPClient(state.ServerURL, artifactClient); err != nil {
 		return false, err
 	}
-	tlsConfig.ServerName, _, err = net.SplitHostPort(config.Address)
-	if err != nil {
-		return false, fmt.Errorf("invalid control address: %w", err)
-	}
-	connection, err := dialControlPlane(ctx, config.Address, controlDialTimeout,
-		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxControlMessage), grpc.MaxCallSendMsgSize(maxControlMessage)))
+	connection, activePath, err := dialSelectedControl(ctx, state, config, tlsConfig)
 	if err != nil {
 		return false, err
 	}
 	defer connection.Close()
 	streamContext, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
+	pathUpdates := make(chan string, 1)
+	pathRefresh := make(chan struct{}, 1)
+	pathWorkerDone := make(chan struct{})
+	pathNodeID, pathServerURL := state.NodeID, state.ServerURL
+	defer func() { cancelStream(); <-pathWorkerDone }()
+	go func() {
+		defer close(pathWorkerDone)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			refreshCtx, cancel := context.WithTimeout(streamContext, 15*time.Second)
+			currentState, err := LoadState(config.StateDirectory)
+			var path string
+			if err == nil && currentState.NodeID == pathNodeID && currentState.ServerURL == pathServerURL {
+				path, err = refreshControllerPaths(refreshCtx, currentState, config)
+			}
+			cancel()
+			if err == nil && path != "" && path != activePath {
+				select {
+				case pathUpdates <- path:
+				case <-streamContext.Done():
+					return
+				default:
+				}
+			}
+			select {
+			case <-streamContext.Done():
+				return
+			case <-ticker.C:
+			case <-pathRefresh:
+			}
+		}
+	}()
 	stream, err := xirangv1.NewAgentControlClient(connection).Connect(streamContext)
 	if err != nil {
 		return false, err
@@ -294,7 +322,7 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 		capabilities = append(capabilities, hosthealth.OutboxCapability)
 	}
 	if config.mountExecution != nil {
-		capabilities = append(capabilities, mountcontrol.Capability)
+		capabilities = append(capabilities, mountcontrol.Capability, mountcontrol.QuotaCapability, mountcontrol.PathCapability)
 	}
 	if healthCollector.identify {
 		capabilities = append(capabilities, hosthealth.IdentifyCapability)
@@ -428,6 +456,12 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 	probeResults := make(chan networkProbeResult, 1)
 	probeRunning := false
 	var probeGeneration uint64 = 1
+	var stopProbes context.CancelFunc
+	defer func() {
+		if stopProbes != nil {
+			stopProbes()
+		}
+	}()
 	startNetworkProbes := func() {
 		if probeRunning || len(inventory.NetworkInterfaces) == 0 || len(probeTargets) == 0 {
 			return
@@ -436,13 +470,47 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 		localInterfaces := append([]NetworkInterfaceInventory(nil), inventory.NetworkInterfaces...)
 		targets := append([]NetworkProbeTarget(nil), probeTargets...)
 		generation := probeGeneration
+		probeContext, cancel := context.WithCancel(streamContext)
+		stopProbes = cancel
 		go func() {
-			probes := CollectNetworkPathProbes(streamContext, localInterfaces, targets)
+			probes := CollectNetworkPathProbes(probeContext, localInterfaces, targets)
 			select {
 			case probeResults <- networkProbeResult{generation: generation, probes: probes}:
 			case <-streamContext.Done():
 			}
 		}()
+	}
+	networkEvents := networkChanges(streamContext)
+	networkPoll := time.NewTicker(5 * time.Second)
+	defer networkPoll.Stop()
+	refreshInterfaces := func(force bool) error {
+		interfaces, collectErr := collectNetworkInterfaces("/sys/class/net")
+		if collectErr != nil {
+			return collectErr
+		}
+		changed := !reflect.DeepEqual(inventory.NetworkInterfaces, interfaces)
+		if changed {
+			inventory.NetworkInterfaces = interfaces
+			if err := stream.Send(&xirangv1.AgentMessage{MessageId: agentMessageID(), SentAt: timestamppb.Now(),
+				Payload: &xirangv1.AgentMessage_Inventory{Inventory: inventorySnapshot(inventory)}}); err != nil {
+				return err
+			}
+		}
+		if changed || force {
+			probeGeneration++
+			if stopProbes != nil {
+				stopProbes()
+			}
+			if err := sendTopology(true, nil); err != nil {
+				return err
+			}
+			startNetworkProbes()
+			select {
+			case pathRefresh <- struct{}{}:
+			default:
+			}
+		}
+		return nil
 	}
 	var topologyTicks <-chan time.Time
 	var topologyTicker *time.Ticker
@@ -542,6 +610,7 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 			return true, errors.New("shared mount capability was not enabled locally")
 		}
 		mounts = newSharedMountManager(streamContext, config.mountExecution)
+		mounts.workCheck = verifySharedMountsForWork
 		mountResults = mounts.results
 	}
 	var terminalManager *TerminalManager
@@ -663,12 +732,33 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 			}
 			probeTargets = updated
 			probeGeneration++
+			if stopProbes != nil {
+				stopProbes()
+			}
 			haveTopologyDigest = false
 			startNetworkProbes()
 			emitControlEvent(config, fmt.Sprintf("network probe target set updated targets=%d", len(updated)))
 			return true, ""
 		},
 		setManagementPanel: managementPanel.SetEnabled,
+	}
+	var pathCommands pathCommandQueue
+	acknowledgeCommand := func(message *xirangv1.ControlMessage) error {
+		var ack *xirangv1.CommandAcknowledgement
+		var commandErr error
+		commands, ack, commandErr = applyControlCommandWithHandlers(ctx, config.StateDirectory, commands, message, handlers)
+		if commandErr != nil {
+			return commandErr
+		}
+		if err := stream.Send(&xirangv1.AgentMessage{MessageId: agentMessageID(), SentAt: timestamppb.Now(), Payload: &xirangv1.AgentMessage_Acknowledgement{Acknowledgement: ack}}); err != nil {
+			return err
+		}
+		event := fmt.Sprintf("control command acknowledged id=%s accepted=%t", ack.CommandMessageId, ack.Accepted)
+		if !ack.Accepted && message.GetSharedMountOperation() != nil {
+			event += fmt.Sprintf(" reason=%q", ack.Reason)
+		}
+		emitControlEvent(config, event)
+		return nil
 	}
 	for {
 		select {
@@ -699,18 +789,9 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 				}
 				continue
 			}
-			var acknowledgement *xirangv1.CommandAcknowledgement
-			commands, acknowledgement, err = applyControlCommandWithHandlers(ctx, config.StateDirectory, commands, message, handlers)
-			if err != nil {
+			if err := pathCommands.dispatch(message, mounts.changingPath(), acknowledgeCommand); err != nil {
 				return true, err
 			}
-			if err := stream.Send(&xirangv1.AgentMessage{
-				MessageId: agentMessageID(), SentAt: timestamppb.Now(),
-				Payload: &xirangv1.AgentMessage_Acknowledgement{Acknowledgement: acknowledgement},
-			}); err != nil {
-				return true, err
-			}
-			emitControlEvent(config, fmt.Sprintf("control command acknowledged id=%s accepted=%t", acknowledgement.CommandMessageId, acknowledgement.Accepted))
 		case update := <-assignmentUpdates:
 			if err := sendAssignmentUpdate(update); err != nil {
 				return true, err
@@ -759,6 +840,9 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 			if err := stream.Send(&xirangv1.AgentMessage{MessageId: agentMessageID(), SentAt: timestamppb.Now(), Payload: &xirangv1.AgentMessage_SharedMountResult{SharedMountResult: result}}); err != nil {
 				return true, err
 			}
+			if err := pathCommands.drain(mounts.changingPath, acknowledgeCommand); err != nil {
+				return true, err
+			}
 		case update := <-buildManagerEvents(buildManager):
 			if err := stream.Send(&xirangv1.AgentMessage{
 				MessageId: agentMessageID(), SentAt: timestamppb.Now(),
@@ -788,9 +872,27 @@ func runControlSession(ctx context.Context, state State, config ControlLoopConfi
 				startNetworkProbes()
 				continue
 			}
-			if err := sendTopology(false, result.probes); err != nil {
+			if err := sendTopology(true, result.probes); err != nil {
 				return true, err
 			}
+			select {
+			case pathRefresh <- struct{}{}:
+			default:
+			}
+		case <-networkEvents:
+			if err := refreshInterfaces(true); err != nil {
+				emitControlEvent(config, fmt.Sprintf("network refresh failed: %v", err))
+			}
+		case <-networkPoll.C:
+			if err := refreshInterfaces(false); err != nil {
+				emitControlEvent(config, fmt.Sprintf("network inventory refresh failed: %v", err))
+			}
+		case path := <-pathUpdates:
+			artifactClient.CloseIdleConnections()
+			if terminalManager.runningCount() > 0 || mounts.changingPath() {
+				continue
+			}
+			return true, fmt.Errorf("preferred network path changed to %s", path)
 		case <-flowTicks:
 			sample, err := flowCollector.Sample()
 			if err != nil {

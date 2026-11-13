@@ -22,12 +22,56 @@ import (
 )
 
 type Service struct {
-	repository Repository
-	now        func() time.Time
-	random     io.Reader
-	issuer     *pki.Authority
-	observerMu sync.RWMutex
-	observer   func(domain.Node)
+	repository         Repository
+	now                func() time.Time
+	random             io.Reader
+	issuer             *pki.Authority
+	observerMu         sync.RWMutex
+	observer           func(domain.Node)
+	controllerMembers  map[string]string
+	activeController   string
+	controllerMu       sync.RWMutex
+	controllerResolver func(context.Context) (map[string]string, error)
+}
+
+// SetControllerMembers binds UI state to the controller that actually owns the
+// shared-state lock. Agent panel reports cannot grant leadership.
+func (service *Service) SetControllerMembers(members map[string]string, active string) {
+	service.controllerMu.Lock()
+	defer service.controllerMu.Unlock()
+	service.controllerMembers = members
+	service.activeController = active
+}
+
+func (service *Service) SetControllerResolver(resolve func(context.Context) (map[string]string, error)) {
+	service.controllerResolver = resolve
+}
+
+func (service *Service) RefreshControllerMembers(ctx context.Context) error {
+	if service.controllerResolver == nil {
+		return nil
+	}
+	members, err := service.controllerResolver(ctx)
+	if err != nil {
+		return err
+	}
+	service.controllerMu.Lock()
+	service.controllerMembers = members
+	service.controllerMu.Unlock()
+	return nil
+}
+
+func (service *Service) controllerState(node domain.Node) domain.Node {
+	service.controllerMu.RLock()
+	defer service.controllerMu.RUnlock()
+	if role := service.controllerMembers[node.ID]; role != "" {
+		node.ManagementRole = role
+		node.ControllerConfigured = true
+		node.ControllerActive = node.ID == service.activeController
+	} else if service.activeController == "" {
+		node.ControllerActive = node.HasRole(domain.NodeRoleManagement) && node.ManagementRole == "primary" && node.ManagementPanelEnabled && node.ManagementPanelStatus == "controller"
+	}
+	return node
 }
 
 type TokenOptions struct {
@@ -200,14 +244,15 @@ func (service *Service) ListNodes(ctx context.Context) ([]domain.Node, error) {
 	active := make([]domain.Node, 0, len(nodes))
 	for _, node := range nodes {
 		if node.RemovedAt == nil {
-			active = append(active, node)
+			active = append(active, service.controllerState(node))
 		}
 	}
 	return active, nil
 }
 
 func (service *Service) GetNode(ctx context.Context, id string) (domain.Node, error) {
-	return service.repository.GetNode(ctx, id)
+	node, err := service.repository.GetNode(ctx, id)
+	return service.controllerState(node), err
 }
 
 func (service *Service) Approve(ctx context.Context, id string) (domain.Node, error) {
@@ -270,7 +315,13 @@ func (service *Service) SetNodeTaints(ctx context.Context, id string, taints []d
 	}, audit)
 }
 
-func (service *Service) SetNodeConfiguration(ctx context.Context, id string, roles []domain.NodeRole, managementAddress, sshUser, group string, computePriority int32) (domain.Node, error) {
+func (service *Service) SetNodeConfiguration(ctx context.Context, id string, roles []domain.NodeRole, managementAddress, sshUser, group string, computePriority int32, managementRole ...string) (domain.Node, error) {
+	if err := service.RefreshControllerMembers(ctx); err != nil {
+		return domain.Node{}, err
+	}
+	service.controllerMu.RLock()
+	configuredRole := service.controllerMembers[id]
+	service.controllerMu.RUnlock()
 	managementAddress, sshUser, group, err := validateNodeConfiguration(roles, managementAddress, sshUser, group, computePriority)
 	if err != nil {
 		return domain.Node{}, err
@@ -288,6 +339,12 @@ func (service *Service) SetNodeConfiguration(ctx context.Context, id string, rol
 			return ErrInvalidState
 		}
 		applyNodeConfiguration(node, roles, managementAddress, sshUser, group, computePriority, now)
+		if len(managementRole) > 0 {
+			node.ManagementRole = managementRole[0]
+		}
+		if role := configuredRole; role != "" && (!node.HasRole(domain.NodeRoleManagement) || node.ManagementRole != role) {
+			return ErrInvalidState
+		}
 		return nil
 	}, audit)
 }
@@ -323,7 +380,13 @@ func applyNodeConfiguration(node *domain.Node, roles []domain.NodeRole, manageme
 	node.UpdatedAt = now
 }
 
-func (service *Service) RequestNodeConfiguration(ctx context.Context, id string, roles []domain.NodeRole, managementAddress, sshUser, group string, computePriority int32, commandID string, managementEnabled bool) (domain.Node, error) {
+func (service *Service) RequestNodeConfiguration(ctx context.Context, id string, roles []domain.NodeRole, managementAddress, sshUser, group string, computePriority int32, commandID string, managementEnabled bool, managementRole ...string) (domain.Node, error) {
+	if err := service.RefreshControllerMembers(ctx); err != nil {
+		return domain.Node{}, err
+	}
+	service.controllerMu.RLock()
+	configuredRole := service.controllerMembers[id]
+	service.controllerMu.RUnlock()
 	if commandID == "" {
 		return domain.Node{}, ErrInvalidRequest
 	}
@@ -345,6 +408,12 @@ func (service *Service) RequestNodeConfiguration(ctx context.Context, id string,
 			return ErrInvalidState
 		}
 		applyNodeConfiguration(node, roles, managementAddress, sshUser, group, computePriority, now)
+		if len(managementRole) > 0 {
+			node.ManagementRole = managementRole[0]
+		}
+		if role := configuredRole; role != "" && (!node.HasRole(domain.NodeRoleManagement) || node.ManagementRole != role) {
+			return ErrInvalidState
+		}
 		desired := managementEnabled
 		node.DesiredManagementPanel = &desired
 		node.PendingManagementCommandID = commandID
@@ -380,7 +449,8 @@ func (service *Service) ConfirmManagementPanel(ctx context.Context, id, commandI
 		if accepted {
 			node.ManagementPanelEnabled = desired
 			if desired {
-				node.ManagementPanelStatus = "ready"
+				node.ManagementPanelStatus = "installed"
+				node.ManagementPanelEnabled = false
 			} else {
 				node.ManagementPanelStatus = "disabled"
 			}
@@ -411,6 +481,9 @@ func (service *Service) ReportManagementPanel(ctx context.Context, id string, en
 	return service.updateNode(ctx, id, func(node *domain.Node) error {
 		node.ManagementPanelEnabled = enabled
 		node.ManagementPanelStatus = status
+		if status == "controller" && node.ManagementRole == "" && node.HasRole(domain.NodeRoleManagement) && service.activeController == "" {
+			node.ManagementRole = "primary"
+		}
 		node.UpdatedAt = now
 		return nil
 	}, nil)
@@ -954,7 +1027,7 @@ func (service *Service) updateNode(ctx context.Context, id string, update func(*
 	if err == nil {
 		service.publishNode(node)
 	}
-	return node, err
+	return service.controllerState(node), err
 }
 
 func (service *Service) publishNode(node domain.Node) {
@@ -962,7 +1035,7 @@ func (service *Service) publishNode(node domain.Node) {
 	observer := service.observer
 	service.observerMu.RUnlock()
 	if observer != nil {
-		observer(node)
+		observer(service.controllerState(node))
 	}
 }
 

@@ -331,3 +331,28 @@ func TestSharedACLUnsupportedFilesystemFailsWithoutChmod(t *testing.T) {
 		t.Fatal("failed ACL operation changed permissions")
 	}
 }
+
+func TestSharedModeAccessRequiresBothTaskAndGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mode     uint32
+		uid, gid uint32
+		allowed  bool
+	}{
+		{"existing_public_access", 0777, 0, 0, true},
+		{"task_owned", 0770, 1001, 1002, true},
+		{"task_group", 0770, 0, 1002, true},
+		{"read_only_host_group", 0757, 0, 1002, false},
+		{"owner_denial_precedes_group", 0077, 1001, 1002, false},
+		{"owner_alone_insufficient", 0700, 1001, 0, false},
+		{"host_read_only", 0755, 0, 0, false},
+		{"unrelated_private_group", 0770, 0, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stat := unix.Stat_t{Mode: unix.S_IFDIR | tc.mode, Uid: tc.uid, Gid: tc.gid}
+			if got := sharedModeAllowsAccess(stat, 1001, 1002); got != tc.allowed {
+				t.Fatalf("access=%v, want %v", got, tc.allowed)
+			}
+		})
+	}
+}

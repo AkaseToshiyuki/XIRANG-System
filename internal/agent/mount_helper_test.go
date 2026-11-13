@@ -6,10 +6,31 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestSharedNFSExportHasStableIdentityAndMountGuard(t *testing.T) {
+	line := sharedExportLine("share_default", "/shared-volume", 998, 998, false, true)
+	want := "/shared-volume *(rw,sync,no_subtree_check,all_squash,anonuid=998,anongid=998,mountpoint,fsid=e3a3c3c3-3cce-53c4-c57e-ad292c36115b)\n"
+	if line != want {
+		t.Fatalf("NFS export differs from independently computed identity: %q", line)
+	}
+	if err := validateSharedExport(line, "/shared-volume"); err != nil || !sharedExportRequiresMount(line) {
+		t.Fatalf("NFS export lost file-helper validation or mount guard: %v", err)
+	}
+	if strings.Contains(sharedExportLine("share_other", "/shared-volume", 998, 998, false, true), "fsid=e3a3c3c3-3cce-53c4-c57e-ad292c36115b") {
+		t.Fatal("different spaces share an export identity")
+	}
+	for _, guarded := range []bool{false, true} {
+		local := sharedExportLine("share_default", "/srv/share", 998, 998, guarded, false)
+		if strings.Contains(local, "fsid=") || sharedExportRequiresMount(local) != guarded {
+			t.Fatalf("local export behavior changed: %q", local)
+		}
+	}
+}
 
 func TestMountHelperInputValidation(t *testing.T) {
 	if !safeMountID("share_123") || safeMountID("../bad") {

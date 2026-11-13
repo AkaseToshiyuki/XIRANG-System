@@ -89,6 +89,21 @@ func applyControlCommandWithHandlers(ctx context.Context, directory string, stat
 	if message == nil || message.MessageId == "" {
 		return state, nil, errors.New("control command message ID is required")
 	}
+	if !terminalCommand(message) && message.GetSharedMountOperation() == nil {
+		for _, recorded := range state.Acknowledgements {
+			if recorded.MessageID == message.MessageId {
+				return state, &xirangv1.CommandAcknowledgement{CommandMessageId: recorded.MessageID, Accepted: recorded.Accepted, Reason: recorded.Reason}, nil
+			}
+		}
+	}
+	if handlers.mounts.changingPath() && (message.GetRunAssignment() != nil || message.GetRunNativeBuild() != nil || message.GetOpenTerminal() != nil) {
+		return state, &xirangv1.CommandAcknowledgement{CommandMessageId: message.MessageId, Reason: "shared network path is changing; retry after reconciliation"}, nil
+	}
+	if startsWork(message) {
+		if err := handlers.mounts.workReady(); err != nil {
+			return state, &xirangv1.CommandAcknowledgement{CommandMessageId: message.MessageId, Reason: err.Error()}, nil
+		}
+	}
 	if terminalCommand(message) {
 		accepted, reason := applyTerminalCommand(message, handlers.terminal)
 		return state, &xirangv1.CommandAcknowledgement{CommandMessageId: message.MessageId, Accepted: accepted, Reason: reason}, nil
@@ -97,17 +112,13 @@ func applyControlCommandWithHandlers(ctx context.Context, directory string, stat
 		if operation.OperationId != message.MessageId {
 			return state, &xirangv1.CommandAcknowledgement{CommandMessageId: message.MessageId, Reason: "mount operation ID must match command ID"}, nil
 		}
+		if operation.Action == xirangv1.SharedMountOperation_ACTION_REPATH &&
+			(handlers.executor != nil && handlers.executor.RunningCount() > 0 || handlers.nativeBuild.runningCount() > 0 || handlers.terminal.runningCount() > 0) {
+			return state, &xirangv1.CommandAcknowledgement{CommandMessageId: message.MessageId, Reason: "shared path change deferred until tasks, builds and terminals are idle"}, nil
+		}
 		accepted, reason := handlers.mounts.Start(operation)
 		return state, &xirangv1.CommandAcknowledgement{CommandMessageId: message.MessageId, Accepted: accepted, Reason: reason}, nil
 	}
-	for _, recorded := range state.Acknowledgements {
-		if recorded.MessageID == message.MessageId {
-			return state, &xirangv1.CommandAcknowledgement{
-				CommandMessageId: recorded.MessageID, Accepted: recorded.Accepted, Reason: recorded.Reason,
-			}, nil
-		}
-	}
-
 	acknowledgement := commandAcknowledgment{MessageID: message.MessageId}
 	updated := state
 	var managementPanelRollback *bool

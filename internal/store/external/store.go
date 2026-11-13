@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -25,25 +26,39 @@ import (
 )
 
 type Config struct {
-	DSN       string
-	Namespace string
-	CachePath string
-	Standby   bool
-	driver    string
+	DSN              string
+	Namespace        string
+	CachePath        string
+	Standby          bool
+	ControllerRole   string
+	ControllerNodeID string
+	TrustDigest      string
+	FailbackDelay    time.Duration
+	driver           string
+	bootstrapImage   []byte
 }
 
 type Store struct {
 	*boltstore.Store
-	database  *sql.DB
-	lockConn  *sql.Conn
-	namespace string
-	lockKey   int64
-	leaderPID int64
-	cachePath string
-	syncMu    sync.Mutex
+	database      *sql.DB
+	lockConn      *sql.Conn
+	namespace     string
+	lockKey       int64
+	leaderPID     int64
+	cachePath     string
+	syncMu        sync.Mutex
+	role          string
+	roleKey       int64
+	primaryKey    int64
+	primarySince  time.Time
+	failbackDelay time.Duration
+	fenced        atomic.Bool
 }
 
 func Open(ctx context.Context, config Config, onStandby func()) (*Store, error) {
+	if err := validateControllerConfig(config); err != nil {
+		return nil, err
+	}
 	if config.DSN == "" || config.Namespace == "" || config.CachePath == "" || !filepath.IsAbs(config.CachePath) {
 		return nil, errors.New("external state requires DSN, namespace, and absolute cache path")
 	}
@@ -83,12 +98,33 @@ func Open(ctx context.Context, config Config, onStandby func()) (*Store, error) 
 		_ = database.Close()
 		return nil, err
 	}
+	// PostgreSQL expires a stalled or partitioned controller session even if
+	// TCP has not noticed the peer's disappearance. Healthy controllers renew
+	// activity every second; resumed processes must reload after session loss.
+	if _, err := lockConn.ExecContext(ctx, `SET idle_session_timeout='8s'; SET statement_timeout='5s'`); err != nil {
+		_ = lockConn.Close()
+		_ = database.Close()
+		return nil, err
+	}
 	hasher := fnv.New64a()
 	_, _ = hasher.Write([]byte("xirang:" + config.Namespace))
 	lockKey := int64(hasher.Sum64())
+	roleKey, primaryKey, err := prepareController(ctx, lockConn, config)
+	if err != nil {
+		_ = lockConn.Close()
+		_ = database.Close()
+		return nil, err
+	}
 	for {
 		var acquired bool
-		if err := lockConn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, lockKey).Scan(&acquired); err != nil {
+		primaryWaiting := false
+		if config.ControllerRole == "backup" {
+			primaryWaiting, err = rolePresent(ctx, lockConn, primaryKey)
+		}
+		if err == nil && !primaryWaiting {
+			err = lockConn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, lockKey).Scan(&acquired)
+		}
+		if err != nil {
 			_ = lockConn.Close()
 			_ = database.Close()
 			return nil, err
@@ -96,7 +132,7 @@ func Open(ctx context.Context, config Config, onStandby func()) (*Store, error) 
 		if acquired {
 			break
 		}
-		if !config.Standby {
+		if !config.Standby && config.ControllerRole == "" {
 			_ = lockConn.Close()
 			_ = database.Close()
 			return nil, errors.New("another XIRANG controller holds the external-state leadership lock")
@@ -109,7 +145,7 @@ func Open(ctx context.Context, config Config, onStandby func()) (*Store, error) 
 			_ = lockConn.Close()
 			_ = database.Close()
 			return nil, ctx.Err()
-		case <-time.After(5 * time.Second):
+		case <-time.After(time.Second):
 		}
 	}
 	var leaderPID int64
@@ -131,6 +167,11 @@ func Open(ctx context.Context, config Config, onStandby func()) (*Store, error) 
 	err = database.QueryRowContext(ctx, `SELECT schema_version,image,image_sha256 FROM xirang_control_state WHERE namespace=$1`, config.Namespace).Scan(&schemaVersion, &image, &expectedDigest)
 	switch {
 	case err == nil:
+		if len(config.bootstrapImage) != 0 {
+			_ = lockConn.Close()
+			_ = database.Close()
+			return nil, errors.New("external namespace already contains control state; import refuses overwrite")
+		}
 		if schemaVersion != 1 {
 			_ = lockConn.Close()
 			_ = database.Close()
@@ -154,7 +195,15 @@ func Open(ctx context.Context, config Config, onStandby func()) (*Store, error) 
 			return nil, err
 		}
 	case errors.Is(err, sql.ErrNoRows):
-		_ = os.Remove(config.CachePath)
+		if len(config.bootstrapImage) > 0 {
+			if err := os.WriteFile(config.CachePath, config.bootstrapImage, 0o600); err != nil {
+				_ = lockConn.Close()
+				_ = database.Close()
+				return nil, err
+			}
+		} else {
+			_ = os.Remove(config.CachePath)
+		}
 	default:
 		_ = lockConn.Close()
 		_ = database.Close()
@@ -169,6 +218,10 @@ func Open(ctx context.Context, config Config, onStandby func()) (*Store, error) 
 	store := &Store{
 		Store: local, database: database, lockConn: lockConn, namespace: config.Namespace,
 		lockKey: lockKey, leaderPID: leaderPID, cachePath: config.CachePath,
+		role: config.ControllerRole, roleKey: roleKey, primaryKey: primaryKey, failbackDelay: config.FailbackDelay,
+	}
+	if store.failbackDelay == 0 {
+		store.failbackDelay = 15 * time.Second
 	}
 	if len(image) == 0 {
 		if err := store.sync(ctx); err != nil {
@@ -187,9 +240,19 @@ func isLoopbackHost(host string) bool {
 	return address != nil && address.IsLoopback()
 }
 
-func (store *Store) sync(ctx context.Context) error {
+func (store *Store) sync(ctx context.Context) (result error) {
 	store.syncMu.Lock()
 	defer store.syncMu.Unlock()
+	// Fence before releasing syncMu: a queued request must not observe a
+	// healthy session after a failed write has left uncommitted local state.
+	defer func() {
+		if result != nil {
+			store.fenced.Store(true)
+		}
+	}()
+	if store.fenced.Load() {
+		return ErrLeadershipLost
+	}
 	var backendPID int64
 	if err := store.lockConn.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&backendPID); err != nil {
 		return fmt.Errorf("external-state leadership session is unavailable: %w", err)
@@ -202,7 +265,7 @@ func (store *Store) sync(ctx context.Context) error {
 		return err
 	}
 	digest := sha256.Sum256(image.Bytes())
-	_, err := store.database.ExecContext(ctx, `INSERT INTO xirang_control_state(namespace,schema_version,image,image_sha256,updated_at)
+	_, err := store.lockConn.ExecContext(ctx, `INSERT INTO xirang_control_state(namespace,schema_version,image,image_sha256,updated_at)
 		VALUES($1,1,$2,$3,NOW())
 		ON CONFLICT(namespace) DO UPDATE SET schema_version=EXCLUDED.schema_version,image=EXCLUDED.image,image_sha256=EXCLUDED.image_sha256,updated_at=EXCLUDED.updated_at`,
 		store.namespace, image.Bytes(), digest[:])
@@ -229,7 +292,15 @@ func afterBoolCall[T any](call func() (T, bool, error), sync func() error) (T, b
 	}
 	return value, flag, nil
 }
-func (store *Store) persist(ctx context.Context) error { return store.sync(context.WithoutCancel(ctx)) }
+func (store *Store) persist(ctx context.Context) error {
+	bounded, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	err := store.sync(bounded)
+	if err != nil {
+		store.fenced.Store(true)
+	}
+	return err
+}
 
 func (store *Store) CreateEnrollmentToken(ctx context.Context, token domain.EnrollmentToken) error {
 	if err := store.Store.CreateEnrollmentToken(ctx, token); err != nil {
@@ -502,13 +573,20 @@ func (store *Store) UpdateQueuedJobBlock(ctx context.Context, jobID string, bloc
 }
 
 func (store *Store) Close() error {
-	syncErr := store.sync(context.Background())
+	store.fenced.Store(true)
+	store.syncMu.Lock()
+	defer store.syncMu.Unlock()
 	localErr := store.Store.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 	var unlocked bool
-	unlockErr := store.lockConn.QueryRowContext(context.Background(), `SELECT pg_advisory_unlock($1)`, store.lockKey).Scan(&unlocked)
+	unlockErr := store.lockConn.QueryRowContext(ctx, `SELECT pg_advisory_unlock($1)`, store.lockKey).Scan(&unlocked)
+	if store.role != "" {
+		_ = store.lockConn.QueryRowContext(ctx, `SELECT pg_advisory_unlock($1)`, store.roleKey).Scan(&unlocked)
+	}
 	connErr := store.lockConn.Close()
 	dbErr := store.database.Close()
-	return errors.Join(syncErr, localErr, unlockErr, connErr, dbErr)
+	return errors.Join(localErr, unlockErr, connErr, dbErr)
 }
 
 func (store *Store) PutClusterBranding(ctx context.Context, expected uint64, value domain.ClusterBranding, audit domain.AuditEvent) error {

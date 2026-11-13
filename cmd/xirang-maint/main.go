@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/xirang-grid/xirang/internal/backup"
+	externalstore "github.com/xirang-grid/xirang/internal/store/external"
 	"github.com/xirang-grid/xirang/pkg/version"
 	"go.etcd.io/bbolt"
 )
@@ -29,8 +33,8 @@ func main() {
 		fmt.Printf("%s maintenance %s\n", version.Name, version.Version)
 		return
 	}
-	if len(os.Args) < 3 || (os.Args[1] != "verify" && os.Args[1] != "restore") {
-		fmt.Fprintln(os.Stderr, "usage: xirang-maint verify <backup-directory> | restore <backup-directory> <data-directory> | version")
+	if len(os.Args) < 3 || (os.Args[1] != "verify" && os.Args[1] != "restore" && os.Args[1] != "import-postgresql") {
+		fmt.Fprintln(os.Stderr, "usage: xirang-maint verify <backup-directory> | restore <backup-directory> <data-directory> | import-postgresql <backup-directory> <dsn-file> <namespace> | version")
 		os.Exit(2)
 	}
 	backupPath, err := filepath.Abs(os.Args[2])
@@ -64,6 +68,49 @@ func main() {
 		fmt.Printf("%s verified: %d databases, schema %d\n", verified.ID, len(verified.Files), verified.SchemaVersion)
 		return
 	}
+	if os.Args[1] == "import-postgresql" {
+		if len(os.Args) != 5 {
+			fail(errors.New("import-postgresql requires backup directory, protected DSN file and namespace"))
+		}
+		file, err := os.Open(os.Args[3])
+		if err != nil {
+			fail(err)
+		}
+		info, err := file.Stat()
+		if err != nil {
+			fail(err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > 65536 {
+			fail(errors.New("DSN file must be an owner-only regular file of at most 64 KiB"))
+		}
+		dsn, err := io.ReadAll(io.LimitReader(file, 65537))
+		_ = file.Close()
+		if err != nil {
+			fail(err)
+		}
+		image, err := os.ReadFile(filepath.Join(backupPath, "xirang.db"))
+		if err != nil {
+			fail(err)
+		}
+		digest := sha256.Sum256(image)
+		matched := false
+		for _, record := range verified.Files {
+			if record.Name == "xirang.db" && record.SHA256 == hex.EncodeToString(digest[:]) {
+				matched = true
+			}
+		}
+		if !matched {
+			fail(errors.New("control image changed after verification"))
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := externalstore.Initialize(ctx, strings.TrimSpace(string(dsn)), os.Args[4], image); err != nil {
+			fail(err)
+		}
+		fmt.Println("verified control state imported into empty PostgreSQL namespace")
+		return
+	}
+
 	if len(os.Args) != 4 {
 		fail(errors.New("restore requires a destination data directory"))
 	}

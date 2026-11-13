@@ -27,6 +27,7 @@ import (
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
 	"github.com/xirang-grid/xirang/internal/runtimecompat"
+	"github.com/xirang-grid/xirang/internal/runtimeguard"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -1539,8 +1540,8 @@ func RunExecutorLauncher(arguments []string) error {
 	if count, err := gate.Read(buffer); err != nil || count != 1 || buffer[0] != 1 {
 		return errors.New("isolated executor was not admitted to its cgroup")
 	}
-	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
-		return fmt.Errorf("disable task privilege gains: %w", err)
+	if err := runtimeguard.ProtectQuotaMetadata(); err != nil {
+		return fmt.Errorf("protect task privileges and quota metadata: %w", err)
 	}
 	syscall.Umask(0o077)
 	return syscall.Exec(arguments[0], append([]string{arguments[0]}, arguments[1:]...), os.Environ())

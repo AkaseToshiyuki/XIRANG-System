@@ -147,6 +147,13 @@ export async function loginLocalUser(username: string, password: string, languag
   return ((await response.json()) as { secret: string }).secret;
 }
 
+export async function exchangeAPIToken(token: string): Promise<string> {
+  const session = await requestJSON<{ secret: string }>("/api/v1/auth/token", {
+    method: "POST", json: { token }, label: "Token sign-in",
+  });
+  return session.secret;
+}
+
 export function getVersion(signal?: AbortSignal): Promise<VersionInfo> {
   return requestJSON<VersionInfo>("/api/v1/version", { label: "Control plane", signal });
 }
@@ -187,7 +194,7 @@ export function getNodes(token: string, signal?: AbortSignal): Promise<ClusterNo
   return requestItems<ClusterNode>("/api/v1/nodes", { token, label: "Node API", signal });
 }
 
-export function updateNodeConfiguration(id: string, payload: Pick<ClusterNode, "roles" | "managementAddress" | "sshUser" | "group" | "computePriority">, token: string): Promise<ClusterNode> {
+export function updateNodeConfiguration(id: string, payload: Pick<ClusterNode, "roles" | "managementAddress" | "sshUser" | "group" | "computePriority" | "managementRole">, token: string): Promise<ClusterNode> {
   return requestJSON<ClusterNode>(`/api/v1/nodes/${encodeURIComponent(id)}/configuration`, {
     token, method: "PUT", json: payload, label: "Node configuration",
   });
@@ -278,6 +285,12 @@ export function getLatestFlows(token: string, signal?: AbortSignal): Promise<Nod
 
 export function getSharedSpaces(token: string, signal?: AbortSignal): Promise<SharedSpace[]> {
   return requestItems<SharedSpace>("/api/v1/shared-spaces", { token, label: "Shared space API", signal });
+}
+
+export function updateSharedSpaceQuota(id: string, quotaBytes: number, token: string): Promise<SharedSpace> {
+  return requestJSON<SharedSpace>(`/api/v1/shared-spaces/${encodeURIComponent(id)}/quota`, {
+    method: "PUT", token, label: "Shared capacity limit API", body: JSON.stringify({ quotaBytes }),
+  });
 }
 
 export function applySharedSpace(payload: Partial<SharedSpace>, token: string): Promise<SharedSpace> {
@@ -554,6 +567,12 @@ export function getAlerts(token: string, includeResolved = false, signal?: Abort
 export function acknowledgeAlert(id: string, token: string): Promise<Alert> {
   return requestJSON<Alert>(`/api/v1/alerts/${encodeURIComponent(id)}/acknowledge`, {
     token, method: "POST", label: "Alert acknowledgement",
+  });
+}
+
+export function ignoreAlert(id: string, revision: number, token: string): Promise<Alert> {
+  return requestJSON<Alert>(`/api/v1/alerts/${encodeURIComponent(id)}/ignore`, {
+    token, method: "POST", json: { revision }, label: "Ignore alert",
   });
 }
 

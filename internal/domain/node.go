@@ -49,6 +49,9 @@ type Node struct {
 	DesiredManagementPanel       *bool                       `json:"desiredManagementPanel,omitempty"`
 	ManagementPanelEnabled       bool                        `json:"managementPanelEnabled,omitempty"`
 	ManagementPanelStatus        string                      `json:"managementPanelStatus,omitempty"`
+	ManagementRole               string                      `json:"managementRole,omitempty"`
+	ControllerActive             bool                        `json:"controllerActive,omitempty"`
+	ControllerConfigured         bool                        `json:"controllerConfigured,omitempty"`
 	OS                           string                      `json:"os"`
 	Architecture                 string                      `json:"architecture"`
 	Distribution                 string                      `json:"distribution,omitempty"`

@@ -87,7 +87,23 @@ func grantSharedDirectoryAccess(fd int, uid, gid int) error {
 	}
 	original, err := readSharedACL(fd)
 	if err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) && sharedModeAllowsAccess(stat, uid, gid) {
+			return nil
+		}
 		return fmt.Errorf("shared-space permissions require POSIX ACL support: %w", err)
+	}
+	var filesystem unix.Statfs_t
+	if err := unix.Fstatfs(fd, &filesystem); err != nil {
+		return err
+	}
+	if filesystem.Type == unix.NFS_SUPER_MAGIC && len(original) == 0 {
+		// Do not probe NAS ACL write support by changing an existing directory.
+		// Servers without the POSIX ACL protocol need preconfigured Unix
+		// permissions; an unnecessary remote SETACL is not a safe capability probe.
+		if sharedModeAllowsAccess(stat, uid, gid) {
+			return nil
+		}
+		return fmt.Errorf("NFS directory without a POSIX ACL requires preconfigured task and group access: %w", unix.EOPNOTSUPP)
 	}
 	entries := []sharedACLEntry{
 		{aclUserObject, uint16(stat.Mode>>6) & 7, aclNoID},
@@ -137,9 +153,29 @@ func grantSharedDirectoryAccess(fd int, uid, gid int) error {
 		return nil
 	}
 	if err := unix.Fsetxattr(fd, sharedAccessACL, encoded, 0); err != nil {
+		// Some NAS NFS servers implement Unix ownership and mode bits but no
+		// POSIX ACL protocol. Accept already sufficient access without chmod,
+		// chown, or ignoring an existing ACL's more restrictive permissions.
+		if errors.Is(err, unix.EOPNOTSUPP) && len(original) == 0 && sharedModeAllowsAccess(stat, uid, gid) {
+			return nil
+		}
 		return fmt.Errorf("cannot grant cluster access without changing host permissions (POSIX ACL required): %w", err)
 	}
 	return nil
+}
+
+// sharedModeAllowsAccess requires rwx for both the task identity and other
+// members of its group. Unix DAC selects owner before group before other;
+// permissions in a later class cannot override an earlier class's denial.
+func sharedModeAllowsAccess(stat unix.Stat_t, uid, gid int) bool {
+	user, group := stat.Mode&7, stat.Mode&7
+	if stat.Gid == uint32(gid) {
+		user, group = (stat.Mode>>3)&7, (stat.Mode>>3)&7
+	}
+	if stat.Uid == uint32(uid) {
+		user = (stat.Mode >> 6) & 7
+	}
+	return user == 7 && group == 7
 }
 
 // openOrCreateSharedDirectory never chmods existing ancestors and rejects
@@ -209,9 +245,34 @@ func createSharedSubdirectory(parent int, name string, uid, gid int, allowExisti
 	}
 	// A restrictive service umask must not remove task-group access. The ACL
 	// merge also preserves effective permissions inherited from a default ACL.
-	if err := grantSharedDirectoryAccess(fd, uid, gid); err != nil {
+	if err := grantNewSharedDirectoryAccess(fd, uid, gid); err != nil {
 		unix.Close(fd)
 		return -1, err
 	}
 	return fd, nil
+}
+
+// Only a directory created by this operation may have umask-stripped owner
+// and task-group bits restored when its filesystem cannot store POSIX ACLs.
+// Existing host directories always use grantSharedDirectoryAccess directly.
+func grantNewSharedDirectoryAccess(fd, uid, gid int) error {
+	err := grantSharedDirectoryAccess(fd, uid, gid)
+	if err == nil || !errors.Is(err, unix.EOPNOTSUPP) {
+		return err
+	}
+	acl, readErr := readSharedACL(fd)
+	if len(acl) != 0 || readErr != nil && !errors.Is(readErr, unix.EOPNOTSUPP) {
+		return err
+	}
+	var stat unix.Stat_t
+	if statErr := unix.Fstat(fd, &stat); statErr != nil {
+		return statErr
+	}
+	if stat.Uid != uint32(uid) || stat.Gid != uint32(gid) {
+		return errors.New("new shared directory does not retain the requested task ownership")
+	}
+	if chmodErr := unix.Fchmod(fd, stat.Mode&0o7777|0o770); chmodErr != nil {
+		return chmodErr
+	}
+	return grantSharedDirectoryAccess(fd, uid, gid)
 }

@@ -2,15 +2,28 @@
 
 [English](USAGE.md) | [简体中文](USAGE.zh-CN.md)
 
-Applies to XIRANG **1.3.0**.
+Applies to XIRANG **1.4.1**.
+
+## Sign-in and alert handling
+
+Account login is the default. Creating an API token leaves the current account
+session unchanged. Save the secret when it is shown; it is invalid after one
+successful authentication. Token sign-in exchanges it for an independent bounded
+session. The API token list shows used, expired and revoked credentials separately.
+
+In the alert center, select **Ignore** and confirm the reviewed incident. It moves
+to **Ignored** and stops contributing to the node lamp; remaining faults can keep
+the lamp red or yellow. This does not declare a repair. Recovery and later recurrence,
+or a severity escalation, can trigger a new active condition.
 
 ## Quick start
 
 1. Open `https://CONTROLLER_IP:8899` and create the first administrator.
 2. Create or review user groups, quotas, maximum runtime, and the default group.
 3. Enroll Agents from **Node access**, then assign management, compute, or storage
-   roles under **Node status**. Roles may overlap. A management role enables that
-   node's panel on port `8899`; a node without it exposes no Web service.
+   roles under **Node status**. Roles may overlap. Assign at most one primary and
+   one backup manager. Only the active controller serves the panel on `8899`;
+   the backup displays “Control panel installed”. See [Operations](OPERATIONS.md).
 4. Confirm the default shared space, its target nodes, filesystem capacity, and
    permissions under **Shared storage**.
 5. Load an administrator-published template or write a `XIRANG 1` script, validate
@@ -153,6 +166,28 @@ An administrator can enroll a waiting Agent from the Nodes page:
 A node can also join directly during installation with the controller IP and a
 cluster join token.
 
+## Network path selection
+
+XIRANG uses fresh reciprocal probes to select inter-node paths: usable healthy
+links first, higher negotiated capacity next, then lower measured latency.
+Interface, address and route changes trigger new probes; periodic probes also
+refresh latency. Interface line rates are capacity bounds, not throughput tests.
+
+Agent control, controller HTTP transfers and SSH file operations select transport
+addresses without changing the enrolled TLS authority or SSH host identity. The
+controller's mTLS listener must be reachable on the candidate addresses; new
+interactive installations listen on all interfaces. Shared NFS mounts use the same
+ranking after both ends support shared path selection. Busy tasks, builds or
+terminals defer remounting; failed changes preserve or attempt to restore the
+previous source. No forced or lazy unmount is used. Older Agents retain their
+confirmed mount during a rolling upgrade.
+
+New MPI allocations use the selected interfaces. Existing application sockets and
+active file transfers finish on their established connections; XIRANG does not
+rewrite host routes or promise transparent migration of running MPI applications.
+Administrators can inspect directed candidates with GET /api/v1/network-paths
+and the selected shared-mount endpoints in node results.
+
 ## Configure shared storage
 
 On the Storage page, choose a source path on a storage node and the common mount
@@ -161,11 +196,12 @@ set of nodes. An all-node or group assignment is reconciled when membership chan
 Verify permissions and the displayed directory usage and source-filesystem capacity
 before scheduling jobs that use the path.
 
-Shared-space export and mount mutations use the Agent mTLS channel. Upgrade both
-endpoints and explicitly append `-shared-mount-control` to the participating
-systemd Agents' `XIRANG_AGENT_ARGS`; it is disabled by default and requires a
-root-owned installed Agent running as root. Preserve existing flags. Restart only
-after draining jobs. The source still needs a management address for NFS. A node
+Shared-space export, mount and capacity-limit changes use the Agent mTLS channel.
+New systemd installations enable `-shared-mount-control`; existing installations
+must add it explicitly, preserving other flags. Both endpoints need upgraded
+Agents, a running systemd host, root-owned programs and parent directories, and
+NFS client tools. Run `xirang-agent mount-check` from the installed protected path
+before restarting a drained node. The source still needs a management address for NFS. A node
 without the capability fails explicitly; mutations never fall back to SSH. OpenRC
 hosts do not support this capability yet.
 
@@ -176,6 +212,27 @@ verified host keys. Existing broad helper rules must be migrated separately.
 This SSH account remains a trusted administrator. Web ownership checks isolate API
 users, but do not establish per-user authentication for direct all-squash NFS or
 privileged SSH access.
+
+Administrators can set a shared folder's capacity limit in GiB. The default is
+zero (unlimited). A positive limit cannot exceed the disk's currently available
+space or fall below the directory's allocated space; the host checks both when
+applying it. Limits use ext4 or XFS project quotas and cover ordinary task writes,
+NFS writes and Web uploads. The page distinguishes configured values from kernel
+enforcement. Unsupported filesystems reject finite limits; XIRANG does not alter
+filesystem-wide features or mount options automatically. All participating Agents
+must be upgraded before relying on managed-workload quota protection. Trusted host
+administrators and processes outside XIRANG retain their host privileges.
+
+For a file-backed ext4 volume, available capacity is also bounded by the backing
+disk's free space. Managed exports with the `mountpoint` option require the source
+mount before exports or file operations can proceed. Creating or migrating such a
+volume is a separate administrator operation; the capacity control does not do it.
+
+Node enrollment establishes certificate-based Agent access; it does not install
+an SSH key or create a general sudo account. Only a storage source using the file
+helper needs the separately configured restricted SSH access described above.
+The configured source address remains a bootstrap and identity reference. Fresh
+path selection determines operational endpoints as described above.
 
 A command acceptance is not completion. A lost result or timeout reports an unknown
 outcome; inspect node results and the audit log before retrying. Existing mounts

@@ -209,7 +209,22 @@ func registerAlertRoutes(mux *http.ServeMux, alerts AlertManager, adminToken str
 		writeJSON(writer, http.StatusOK, map[string]any{"items": items})
 	}))
 	mux.HandleFunc("POST /api/v1/alerts/{id}/acknowledge", requireAuthenticated(adminToken, func(writer http.ResponseWriter, request *http.Request) {
-		alert, err := alerts.Acknowledge(request.Context(), request.PathValue("id"), "bootstrap-admin")
+		alert, err := alerts.Acknowledge(request.Context(), request.PathValue("id"), requestPrincipal(request).Subject)
+		if err != nil {
+			writeError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, alert)
+	}))
+	mux.HandleFunc("POST /api/v1/alerts/{id}/ignore", requireAuthenticated(adminToken, func(writer http.ResponseWriter, request *http.Request) {
+		var input struct {
+			Revision uint64 `json:"revision"`
+		}
+		if err := decodeJSON(writer, request, &input); err != nil {
+			writeError(writer, err)
+			return
+		}
+		alert, err := alerts.Ignore(request.Context(), request.PathValue("id"), requestPrincipal(request).Subject, input.Revision)
 		if err != nil {
 			writeError(writer, err)
 			return

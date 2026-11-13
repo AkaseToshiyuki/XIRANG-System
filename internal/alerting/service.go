@@ -110,7 +110,7 @@ func (service *Service) Evaluate(ctx context.Context, snapshot domain.TopologySn
 				delete(current, signal.fingerprint)
 			}
 			alert.Revision++
-			if err := service.persist(ctx, alert, publish); err != nil {
+			if err := service.persist(ctx, &alert, publish); err != nil {
 				return nil, err
 			}
 			if publish {
@@ -128,15 +128,18 @@ func (service *Service) Evaluate(ctx context.Context, snapshot domain.TopologySn
 			alert.LastObservedAt = now
 			alert.HealthySince = nil
 			applySignal(&alert, signal)
+			if alert.Status == domain.AlertStatusIgnored && severityPriority(alert.Severity) > severityPriority(previousSeverity) {
+				reopenAlert(&alert, now)
+			}
 			alert.Revision++
-			publish = alert.Status != domain.AlertStatusPending && (alert.Severity != previousSeverity || alert.ObservedHealth != previousHealth)
+			publish = alert.Status != domain.AlertStatusPending && alert.Status != domain.AlertStatusIgnored && (alert.Severity != previousSeverity || alert.ObservedHealth != previousHealth)
 		}
 		if alert.Status == domain.AlertStatusPending && now.Sub(alert.FirstObservedAt) >= triggerAfter {
 			alert.Status = domain.AlertStatusFiring
 			alert.FiringAt = timePointer(now)
 			publish = true
 		}
-		if err := service.persist(ctx, alert, publish); err != nil {
+		if err := service.persist(ctx, &alert, publish); err != nil {
 			return nil, err
 		}
 		current[signal.fingerprint] = alert
@@ -201,12 +204,20 @@ func (service *Service) ReportCondition(ctx context.Context, fingerprint, kind, 
 	} else {
 		transition = alert.Kind != kind || alert.SourceNodeID != nodeID ||
 			alert.Severity != severity || alert.Summary != summary
+		if alert.Status == domain.AlertStatusIgnored {
+			// Changing counters in a summary is still the same ignored incident.
+			// A more severe condition, or a different source, requires action.
+			transition = alert.Kind != kind || alert.SourceNodeID != nodeID || severityPriority(severity) > severityPriority(alert.Severity)
+			if transition {
+				reopenAlert(&alert, now)
+			}
+		}
 		alert.Revision++
 	}
 	alert.LastObservedAt, alert.ObservedHealth = now, "unhealthy"
 	alert.Kind, alert.SourceNodeID = kind, nodeID
 	alert.Severity, alert.Summary = severity, summary
-	if err := service.persist(ctx, alert, transition); err != nil {
+	if err := service.persist(ctx, &alert, transition); err != nil {
 		return domain.Alert{}, err
 	}
 	if transition {
@@ -233,7 +244,7 @@ func (service *Service) ResolveCondition(ctx context.Context, fingerprint, summa
 			alert.Summary = strings.TrimSpace(summary)
 		}
 		alert.Revision++
-		if err := service.persist(ctx, alert, true); err != nil {
+		if err := service.persist(ctx, &alert, true); err != nil {
 			return domain.Alert{}, err
 		}
 		service.publish(alert)
@@ -268,7 +279,7 @@ func (service *Service) visibleAlerts(ctx context.Context, includeResolved bool)
 	}
 	visible := alerts[:0]
 	for _, alert := range alerts {
-		if alert.Status == domain.AlertStatusPending || (!includeResolved && alert.Status == domain.AlertStatusResolved) {
+		if alert.Status == domain.AlertStatusPending || (!includeResolved && (alert.Status == domain.AlertStatusResolved || alert.Status == domain.AlertStatusIgnored)) {
 			continue
 		}
 		visible = append(visible, alert)
@@ -294,11 +305,62 @@ func (service *Service) Acknowledge(ctx context.Context, id, actor string) (doma
 	alert.AcknowledgedAt = timePointer(service.now().UTC())
 	alert.AcknowledgedBy = actor
 	alert.Revision++
-	if err := service.persist(ctx, alert, true); err != nil {
+	if err := service.persist(ctx, &alert, true); err != nil {
 		return domain.Alert{}, err
 	}
 	service.publish(alert)
 	return alert, nil
+}
+
+// Ignore records an operator's decision for the current incident. Observations
+// and automatic recovery continue; it does not claim the condition was repaired.
+func (service *Service) Ignore(ctx context.Context, id, actor string, expectedRevision uint64) (domain.Alert, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if strings.TrimSpace(actor) == "" || expectedRevision == 0 {
+		return domain.Alert{}, ErrInvalidState
+	}
+	alert, err := service.repository.Get(ctx, id)
+	if err != nil {
+		return domain.Alert{}, err
+	}
+	if alert.Status == domain.AlertStatusIgnored {
+		return alert, nil
+	}
+	if expectedRevision > alert.Revision || expectedRevision < alert.StateRevision {
+		return domain.Alert{}, ErrInvalidState
+	}
+	if alert.Status != domain.AlertStatusFiring && alert.Status != domain.AlertStatusAcknowledged {
+		return domain.Alert{}, ErrInvalidState
+	}
+	now := service.now().UTC()
+	if alert.AcknowledgedAt == nil {
+		alert.AcknowledgedAt, alert.AcknowledgedBy = timePointer(now), actor
+	}
+	alert.Status, alert.IgnoredAt, alert.IgnoredBy = domain.AlertStatusIgnored, timePointer(now), actor
+	alert.Revision++
+	if err := service.persist(ctx, &alert, true); err != nil {
+		return domain.Alert{}, err
+	}
+	service.publish(alert)
+	return alert, nil
+}
+
+func severityPriority(severity domain.AlertSeverity) int {
+	switch severity {
+	case domain.AlertSeverityCritical:
+		return 2
+	case domain.AlertSeverityWarning:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func reopenAlert(alert *domain.Alert, now time.Time) {
+	alert.Status, alert.FiringAt = domain.AlertStatusFiring, timePointer(now)
+	alert.IgnoredAt, alert.IgnoredBy = nil, ""
+	alert.AcknowledgedAt, alert.AcknowledgedBy = nil, ""
 }
 
 func (service *Service) Subscribe(ctx context.Context) <-chan domain.Alert {
@@ -337,11 +399,14 @@ func (service *Service) publish(alert domain.Alert) {
 	}
 }
 
-func (service *Service) persist(ctx context.Context, alert domain.Alert, transition bool) error {
-	if transition && service.config.RecordTransitions {
-		return service.repository.PutTransition(ctx, alert)
+func (service *Service) persist(ctx context.Context, alert *domain.Alert, transition bool) error {
+	if transition {
+		alert.StateRevision = alert.Revision
 	}
-	return service.repository.Put(ctx, alert)
+	if transition && service.config.RecordTransitions {
+		return service.repository.PutTransition(ctx, *alert)
+	}
+	return service.repository.Put(ctx, *alert)
 }
 
 type interfaceSignal struct {

@@ -31,7 +31,7 @@ func TestHostHealthRoutesAreAdminOnlyAndLocatorHasAcknowledgement(t *testing.T) 
 	defer store.Close()
 	service := hosthealth.New(store)
 	access := identity.NewAccessService(store, nil, nil)
-	viewer, err := access.CreateToken(context.Background(), "read", "viewer", time.Hour, domain.Principal{Role: "admin", Subject: "admin"})
+	viewer, err := createTestSession(t, access, context.Background(), "read", "viewer", time.Hour, domain.Principal{Role: "admin", Subject: "admin"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,7 +4,7 @@ import type { ClusterNode, NodeResourceObservation, TopologySnapshot } from "../
 import { MetricCard } from "../components/MetricCard";
 import { formatBitRate, formatBytes, percentage, relativeTime } from "../lib/format";
 import { usePreferences } from "../app/preferences";
-import { aggregateBidirectionalRate, buildObservedLinks, nodeRate, type NodeRate } from "./TopologyPage";
+import { aggregateBidirectionalRate, buildObservedLinks, nodeRate, NodeTopologyGraph, type NodeRate } from "./TopologyPage";
 
 interface NodeSample {
   node: ClusterNode;
@@ -133,13 +133,10 @@ export function OverviewPage({ token, onNavigate }: OverviewPageProps) {
           <div><h2>{t("节点连接", "Node links")}</h2></div>
           <button className="text-button" type="button" onClick={() => onNavigate("Topology")}>{t("查看完整拓扑", "View full topology")} <span aria-hidden="true">→</span></button>
         </div>
-        <div className="overview-links">
-          {summary.links.slice(0, 5).map((link) => <div className="overview-link" key={link.id}>
-            <div><strong>{link.source.name} <span aria-hidden="true">↔</span> {link.target.name}</strong><small>{link.primaryInterface || t("接口不可用", "Interface unavailable")}</small></div>
-            <span>{link.forwardBits !== undefined && link.reverseBits !== undefined ? formatBitRate(link.forwardBits + link.reverseBits) : "—"}</span>
-          </div>)}
-          {!summary.links.length && <div className="compact-empty">{loading ? t("正在读取连接…", "Loading links…") : t("暂无节点连接数据", "No node links available")}</div>}
+        <div className="overview-graph">
+          {nodes.length > 0 ? <NodeTopologyGraph nodes={nodes} links={summary.links} compact onSelect={(selection) => onNavigate(selection.kind === "node" ? "Nodes" : "Topology")} /> : <div className="compact-empty">{loading ? t("正在读取节点…", "Loading nodes…") : t("尚无已加入节点", "No enrolled nodes")}</div>}
         </div>
+        {nodes.length > 0 && <div className="graph-footnote"><span>{t(`${nodes.length} 个节点 · ${summary.links.length} 条连接`, `${nodes.length} nodes · ${summary.links.length} links`)}</span>{!summary.links.length && <span>{t("暂无节点连接数据", "No node links available")}</span>}</div>}
       </article>
 
       <article className="panel load-panel">

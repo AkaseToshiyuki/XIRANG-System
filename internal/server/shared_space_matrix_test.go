@@ -63,7 +63,7 @@ func TestSharedSpaceHTTPMultiTenantAccessMatrix(t *testing.T) {
 	access := identity.NewAccessService(store, nil, nil)
 	tokens := map[string]string{"admin": "admin", "anonymous": ""}
 	for _, item := range []struct{ name, subject, role string }{{"alice", "alice", "user"}, {"bob", "bob", "user"}, {"viewer", "alice", "viewer"}, {"builder", "alice", "builder"}} {
-		token, err := access.CreateToken(ctx, item.name, item.role, time.Hour, domain.Principal{Subject: item.subject, Role: "admin", Permissions: []string{"*"}, AuthMethod: "bootstrap"})
+		token, err := createTestSession(t, access, ctx, item.name, item.role, time.Hour, domain.Principal{Subject: item.subject, Role: "admin", Permissions: []string{"*"}, AuthMethod: "bootstrap"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -105,6 +105,11 @@ func TestSharedSpaceHTTPMultiTenantAccessMatrix(t *testing.T) {
 		{"builder_export", "builder", "POST", "/api/v1/shared-spaces", `{}`, 403, true},
 		{"viewer_unshare", "viewer", "POST", "/api/v1/shared-spaces/share/unshare", `{}`, 403, true},
 		{"user_unshare", "alice", "DELETE", "/api/v1/shared-spaces/share", "", 403, true},
+		{"viewer_quota", "viewer", "PUT", "/api/v1/shared-spaces/share/quota", `{"quotaBytes":1024}`, 403, true},
+		{"user_quota", "alice", "PUT", "/api/v1/shared-spaces/share/quota", `{"quotaBytes":1024}`, 403, true},
+		{"builder_quota", "builder", "PUT", "/api/v1/shared-spaces/share/quota", `{"quotaBytes":1024}`, 403, true},
+		{"admin_quota_missing_value", "admin", "PUT", "/api/v1/shared-spaces/share/quota", `{}`, 400, true},
+		{"admin_quota_negative", "admin", "PUT", "/api/v1/shared-spaces/share/quota", `{"quotaBytes":-1}`, 400, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			seed()

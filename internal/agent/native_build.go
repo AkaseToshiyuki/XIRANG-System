@@ -54,6 +54,15 @@ type NativeBuildManager struct {
 	cancel             map[string]context.CancelFunc
 }
 
+func (manager *NativeBuildManager) runningCount() int {
+	if manager == nil {
+		return 0
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	return len(manager.running)
+}
+
 func OpenNativeBuildManager(config NativeBuildConfig) (*NativeBuildManager, error) {
 	if !config.Enabled {
 		return nil, nil

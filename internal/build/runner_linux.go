@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/xirang-grid/xirang/internal/domain"
+	"github.com/xirang-grid/xirang/internal/runtimeguard"
 	"github.com/xirang-grid/xirang/internal/safefile"
 	"golang.org/x/sys/unix"
 )
@@ -385,6 +386,9 @@ func RunExecutorLauncher(arguments []string) error {
 		return err
 	}
 	if err := os.Setenv("TMPDIR", filepath.Join(workspace, ".tmp")); err != nil {
+		return err
+	}
+	if err := runtimeguard.ProtectQuotaMetadata(); err != nil {
 		return err
 	}
 	return syscall.Exec(arguments[0], append([]string{arguments[0]}, arguments[1:]...), os.Environ())

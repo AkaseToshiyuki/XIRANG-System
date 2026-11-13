@@ -11,9 +11,12 @@ const (
 )
 
 type SharedSpaceNodeResult struct {
-	NodeID  string `json:"nodeId"`
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
+	NodeID           string `json:"nodeId"`
+	Status           string `json:"status"`
+	Message          string `json:"message,omitempty"`
+	SourceAddress    string `json:"sourceAddress,omitempty"`
+	ClientAddress    string `json:"clientAddress,omitempty"`
+	NetworkInterface string `json:"networkInterface,omitempty"`
 }
 
 type SharedFileOwner struct {
@@ -34,22 +37,27 @@ type SharedFile struct {
 }
 
 type SharedSpace struct {
-	ID                 string                     `json:"id"`
-	Name               string                     `json:"name"`
-	SourceNodeID       string                     `json:"sourceNodeId"`
-	SourcePath         string                     `json:"sourcePath"`
-	MountPath          string                     `json:"mountPath"`
-	Target             SharedSpaceTarget          `json:"target"`
-	TargetGroup        string                     `json:"targetGroup,omitempty"`
-	TargetNodeIDs      []string                   `json:"targetNodeIds,omitempty"`
-	Status             string                     `json:"status"`
-	Results            []SharedSpaceNodeResult    `json:"results,omitempty"`
-	UsedBytes          uint64                     `json:"usedBytes"`
-	AvailableBytes     uint64                     `json:"availableBytes,omitempty"`
-	TotalBytes         uint64                     `json:"totalBytes,omitempty"`
-	CapacityObservedAt *time.Time                 `json:"capacityObservedAt,omitempty"`
-	CapacityError      string                     `json:"capacityError,omitempty"`
-	FileOwners         map[string]SharedFileOwner `json:"fileOwners,omitempty"`
-	CreatedAt          time.Time                  `json:"createdAt"`
-	UpdatedAt          time.Time                  `json:"updatedAt"`
+	ID                  string                     `json:"id"`
+	Name                string                     `json:"name"`
+	SourceNodeID        string                     `json:"sourceNodeId"`
+	SourcePath          string                     `json:"sourcePath"`
+	MountPath           string                     `json:"mountPath"`
+	Target              SharedSpaceTarget          `json:"target"`
+	TargetGroup         string                     `json:"targetGroup,omitempty"`
+	TargetNodeIDs       []string                   `json:"targetNodeIds,omitempty"`
+	Status              string                     `json:"status"`
+	Results             []SharedSpaceNodeResult    `json:"results,omitempty"`
+	UsedBytes           uint64                     `json:"usedBytes"`
+	AvailableBytes      uint64                     `json:"availableBytes,omitempty"`
+	TotalBytes          uint64                     `json:"totalBytes,omitempty"`
+	CapacityObservedAt  *time.Time                 `json:"capacityObservedAt,omitempty"`
+	CapacityError       string                     `json:"capacityError,omitempty"`
+	QuotaBytes          uint64                     `json:"quotaBytes"`
+	QuotaStatus         string                     `json:"quotaStatus,omitempty"`
+	QuotaEnforcedBytes  uint64                     `json:"quotaEnforcedBytes"`
+	QuotaAllocatedBytes uint64                     `json:"quotaAllocatedBytes"`
+	QuotaError          string                     `json:"quotaError,omitempty"`
+	FileOwners          map[string]SharedFileOwner `json:"fileOwners,omitempty"`
+	CreatedAt           time.Time                  `json:"createdAt"`
+	UpdatedAt           time.Time                  `json:"updatedAt"`
 }

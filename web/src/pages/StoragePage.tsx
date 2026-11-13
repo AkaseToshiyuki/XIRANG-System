@@ -2,7 +2,7 @@ import { ChangeEvent, Dispatch, FormEvent, SetStateAction, useCallback, useEffec
 import {
   applySharedSpace, createSharedDirectory, deleteSharedFile, downloadSharedFile,
   getNodes, getSharedFiles, getSharedSpaces, renameSharedFile, uploadSharedFile,
-  unshareSharedSpace,
+  unshareSharedSpace, updateSharedSpaceQuota,
 } from "../api/client";
 import type { ClusterNode, SharedFile, SharedSpace } from "../api/contracts";
 import { formatBytes, relativeTime } from "../lib/format";
@@ -112,6 +112,7 @@ export function StoragePage({ token, isAdmin }: { token: string; isAdmin: boolea
           <span><small>{t("磁盘总容量", "Filesystem total")}</small><strong>{space.totalBytes === undefined ? "—" : formatBytes(space.totalBytes)}</strong></span>
           {space.capacityError && <em title={space.capacityError}>{t("容量探测暂不可用", "Capacity probe unavailable")}</em>}
         </div>
+        <SharedQuotaEditor space={space} token={token} isAdmin={isAdmin} onUpdate={(updated) => setSpaces((current) => current.map((item) => item.id === updated.id ? updated : item))} />
         {isAdmin && <div className="storage-target-actions">
           {space.id === "share_default" ? <span className="storage-system-badge">{t("系统默认 · 自动挂载全部节点", "System default · all nodes")}</span> : <>
             <button className="secondary-button" type="button" onClick={() => beginTargetEdit(space)}>{t("编辑挂载范围", "Edit mount targets")}</button>
@@ -122,11 +123,60 @@ export function StoragePage({ token, isAdmin }: { token: string; isAdmin: boolea
           <TargetFields draft={targetDraft} setDraft={setTargetDraft} nodes={nodes} groups={groups} />
           <footer><button type="button" className="secondary-button" onClick={() => setEditing(null)}>{t("取消", "Cancel")}</button><button type="button" className="primary-button" disabled={busy} onClick={() => void saveTarget(space)}>{t("保存并同步", "Save and reconcile")}<span aria-hidden="true">→</span></button></footer>
         </div>}
-        {isAdmin && <div className="storage-results">{space.results?.map((result) => <span key={`${result.nodeId}-${result.status}`} title={result.message}>{nodeName(nodes, result.nodeId)}：{result.status}</span>)}</div>}
+        {isAdmin && <div className="storage-results">{space.results?.map((result) => <span key={`${result.nodeId}-${result.status}`}>{nodeName(nodes, result.nodeId)}：{result.status}{result.message && <small>{result.message}</small>}</span>)}</div>}
         <SharedFileBrowser space={space} token={token} isAdmin={isAdmin} reportError={setError} />
       </article>)}
       {spaces.length === 0 && <div className="table-empty"><strong>{t("尚未配置共享空间", "No shared storage configured")}</strong><span>{isAdmin ? t("创建后可作为任务工作目录使用。", "Create one to use it as a task workspace.") : t("请联系管理员创建共享空间。", "Ask an administrator to create shared storage.")}</span></div>}
     </div>
+  </section>;
+}
+
+function SharedQuotaEditor({ space, token, isAdmin, onUpdate }: { space: SharedSpace; token: string; isAdmin: boolean; onUpdate: (space: SharedSpace) => void }) {
+  const { t } = usePreferences();
+  const [draft, setDraft] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+  const confirmed = space.quotaStatus === "enforced";
+  const configured = (space.quotaBytes ?? 0) > 0;
+  const observedUnlimited = space.quotaStatus === "available" || space.quotaStatus === "unlimited" || space.quotaStatus === "unsupported" && !configured;
+  const quotaLabel = confirmed ? formatBytes(space.quotaEnforcedBytes ?? 0) : observedUnlimited ? t("不限", "Unlimited") : t("状态待确认", "Status unavailable");
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setError(""); setSaved(false);
+    const value = Number(draft);
+    const bytes = Math.floor(value * 2 ** 30 / 1024) * 1024;
+    if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(bytes) || value > 0 && bytes === 0) {
+      setError(t("请输入有效容量，0 表示不限。", "Enter a valid capacity; zero means unlimited.")); return;
+    }
+    if (bytes > 0 && space.availableBytes !== undefined && bytes > space.availableBytes) {
+      setError(t("限额不能超过所在磁盘的剩余空间。", "The limit cannot exceed the filesystem's available space.")); return;
+    }
+    setBusy(true);
+    try {
+      const updated = await updateSharedSpaceQuota(space.id, bytes, token);
+      onUpdate(updated); setEditing(false); setSaved(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t("容量限额更新失败", "Unable to update capacity limit"));
+    } finally { setBusy(false); }
+  }
+
+  return <section className="shared-quota" aria-label={t(`${space.name} 容量限额`, `${space.name} capacity limit`)}>
+    <div className="shared-quota-summary"><span>{t("容量限额", "Capacity limit")} <strong>{quotaLabel}</strong></span>
+      {confirmed && <span>{t("已生效", "Enforced")}</span>}
+      {space.quotaStatus === "unsupported" && <span>{t("此文件系统未启用项目配额", "Project quotas are not enabled on this filesystem")}</span>}
+      {isAdmin && !editing && <button type="button" className="secondary-button" onClick={() => { setDraft(String((space.quotaEnforcedBytes || space.quotaBytes || 0) / 2 ** 30)); setEditing(true); setSaved(false); setError(""); }}>{t("设置限额", "Set limit")}</button>}
+    </div>
+    {editing && <form className="shared-quota-form" onSubmit={(event) => void save(event)}>
+      <label><span>{t("容量 (GiB，0 为不限)", "Capacity (GiB, 0 for unlimited)")}</span><input type="number" min="0" step="any" required disabled={busy} value={draft} onChange={(event) => setDraft(event.target.value)} /></label>
+      <button className="primary-button" disabled={busy}>{busy ? t("正在应用…", "Applying…") : t("保存限额", "Save limit")}</button>
+      <button type="button" className="secondary-button" disabled={busy} onClick={() => setEditing(false)}>{t("取消", "Cancel")}</button>
+    </form>}
+    {error && <p role="alert" className="error-banner">{error}</p>}
+    {saved && <p role="status">{t("容量限额已更新", "Capacity limit updated")}</p>}
+    {space.quotaStatus === "unknown" && space.quotaError && <p className="form-notice">{space.quotaError}</p>}
   </section>;
 }
 

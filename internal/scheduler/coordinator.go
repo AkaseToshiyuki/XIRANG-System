@@ -2001,7 +2001,7 @@ func buildTopologyPairIndex(snapshot *domain.TopologySnapshot) topologyPairIndex
 		index[key] = candidate
 	}
 	for _, edge := range snapshot.Edges {
-		if edge.Health == "critical" {
+		if edge.Health == "critical" || edge.Health == "stale" {
 			continue
 		}
 		key := topologyPairKey(edge.SourceID, edge.TargetID)

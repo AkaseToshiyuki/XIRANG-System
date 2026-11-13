@@ -10,7 +10,7 @@ test("alert policy saves, reloads, rejects stale edits and fits narrow screens",
   await loginAsAdmin(page);
   await page.getByRole("button", { name: "Cluster settings", exact: true }).click();
   const form = page.getByRole("form", { name: "Alert policy", exact: true });
-  await expect(form.getByText(/No notification destination is configured/)).toBeVisible();
+  await expect(form.getByText("No notification destination configured.", { exact: true })).toBeVisible();
   await form.getByLabel("Trigger duration (seconds)").fill("12.5");
   await form.getByLabel("Recovery duration (seconds)").fill("45");
   await form.getByLabel("Minimum notification severity").selectOption("critical");
@@ -54,7 +54,7 @@ test("alert delivery objectives distinguish exclusions and support keyboard navi
   await expect(summary).toContainText("33%");
   await expect(summary).toContainText("1/3");
   await expect(summary).toContainText("2 late or failed, 1 suppressed");
-  await expect(summary).toContainText("1 not yet due and 1 without a recorded objective");
+  await expect(summary).toContainText("1 pending · 1 without objective");
   const active = page.getByRole("tab", { name: /^Active/ });
   await active.focus();
   await page.keyboard.press("ArrowRight");
@@ -348,7 +348,12 @@ test("overview uses the topology bidirectional rate and the product title", asyn
   const overviewNetwork = page.locator(".metric-card").filter({ hasText: "Network activity" });
   await expect(overviewNetwork.locator("strong")).toHaveText("18 Kbit/s");
   await expect(overviewNetwork).toContainText("1 link · bidirectional");
-  await page.getByRole("button", { name: "Network topology" }).click();
+  const overviewGraph = page.locator(".overview-topology").getByRole("group", { name: "XIRANG node network topology" });
+  await expect(overviewGraph.locator(".graph-vertex")).toHaveCount(2);
+  await expect(overviewGraph.locator(".graph-edge-group")).toHaveCount(1);
+  await expect(page.locator(".overview-links")).toHaveCount(0);
+  await overviewGraph.getByRole("button", { name: /^Link: node-a ↔ node-b / }).focus();
+  await page.keyboard.press("Enter");
   const topologyRate = page.locator(".topology-metrics > div").filter({ hasText: "Aggregate bidirectional rate" });
   await expect(topologyRate.locator("strong")).toHaveText("18 Kbit/s");
   const graph = page.getByRole("group", { name: "XIRANG node network topology" });
@@ -372,6 +377,46 @@ test("overview uses the topology bidirectional rate and the product title", asyn
   await expect(page.locator(".topology-inspector h2")).toHaveText("node-b");
   await expect(chineseNode).toHaveAttribute("aria-pressed", "true");
   await expectAccessible(page);
+});
+
+test("shared capacity limits distinguish enforcement, validate free space and retain failures", async ({ page }) => {
+  await loginAsAdmin(page);
+  let space = { id: "share_test", name: "Research", sourceNodeId: "storage", sourcePath: "/srv/share", mountPath: "/shared", target: "all", status: "active", createdAt: "2026-08-02T00:00:00Z", updatedAt: "2026-08-02T00:00:00Z", usedBytes: 4096, availableBytes: 2 * 2 ** 30, totalBytes: 8 * 2 ** 30, capacityObservedAt: new Date().toISOString(), quotaBytes: 0, quotaStatus: "available", quotaEnforcedBytes: 0 };
+  await page.route("**/api/v1/shared-spaces", (route) => route.fulfill({ json: { items: [space] } }));
+  let updates = 0;
+  await page.route("**/api/v1/shared-spaces/share_test/quota", (route) => {
+    updates++;
+    const value = route.request().postDataJSON().quotaBytes;
+    space = { ...space, quotaBytes: value, quotaEnforcedBytes: value, quotaStatus: value ? "enforced" : "unlimited" };
+    return route.fulfill({ json: space });
+  });
+  await page.getByRole("button", { name: "Shared storage", exact: true }).click();
+  const quota = page.getByRole("region", { name: "Research capacity limit" });
+  await expect(quota).toContainText("Unlimited");
+  await quota.getByRole("button", { name: "Set limit", exact: true }).click();
+  await quota.getByLabel("Capacity (GiB, 0 for unlimited)").fill("3");
+  await quota.getByRole("button", { name: "Save limit", exact: true }).click();
+  await expect(quota.getByRole("alert")).toContainText("cannot exceed");
+  expect(updates).toBe(0);
+  await quota.getByLabel("Capacity (GiB, 0 for unlimited)").fill("1.5");
+  await quota.getByRole("button", { name: "Save limit", exact: true }).click();
+  await expect(quota.getByRole("status")).toHaveText("Capacity limit updated");
+  await expect(quota).toContainText("Enforced");
+  expect(space.quotaBytes).toBe(1610612736);
+  await quota.getByRole("button", { name: "Set limit", exact: true }).click();
+  await quota.getByLabel("Capacity (GiB, 0 for unlimited)").fill("0");
+  await quota.getByRole("button", { name: "Save limit", exact: true }).click();
+  await expect(quota).toContainText("Unlimited");
+  await expect(quota).not.toContainText("Enforced");
+  await page.route("**/api/v1/shared-spaces/share_test/quota", (route) => route.fulfill({ status: 400, json: { error: "project quota enforcement is not enabled" } }));
+  await quota.getByRole("button", { name: "Set limit", exact: true }).click();
+  await quota.getByLabel("Capacity (GiB, 0 for unlimited)").fill("1");
+  await quota.getByRole("button", { name: "Save limit", exact: true }).click();
+  await expect(quota.getByRole("alert")).toContainText("enforcement is not enabled");
+  await expect(quota.getByRole("status")).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await quota.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });
 
 test("unavailable nodes do not expose stale link rates or fallback claims", async ({ page }) => {
@@ -484,7 +529,7 @@ test("management role exposes panel state and a consistent role editor", async (
   await page.route("**/api/v1/nodes", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [{
     id: "node-management", name: "management-a", status: "ready", os: "linux", architecture: "amd64", distribution: "Ubuntu 24.04", kernelVersion: "6.8.0",
     cpuModel: "AMD EPYC", computeWeight: 76.92, roles: ["management", "compute", "storage"], managementAddress: "192.0.2.10", sshUser: "xirang", group: "lab",
-    managementPanelEnabled: true, managementPanelStatus: "ready", capacity: { milliCpu: 96000, memoryBytes: 541165879296, devices: { "nvidia.com/gpu": 3 } },
+    managementPanelEnabled: true, managementPanelStatus: "controller", managementRole: "primary", controllerActive: true, capacity: { milliCpu: 96000, memoryBytes: 541165879296, devices: { "nvidia.com/gpu": 3 } },
     allocatable: { milliCpu: 96000, memoryBytes: 541165879296, devices: { "nvidia.com/gpu": 3 } }, allocated: { milliCpu: 0, memoryBytes: 0 },
     revision: 4, createdAt: "2026-08-02T00:00:00Z", updatedAt: "2026-08-02T00:00:01Z", lastSeenAt: "2026-08-02T00:00:01Z",
   }] }) }));
@@ -493,12 +538,12 @@ test("management role exposes panel state and a consistent role editor", async (
   await page.getByLabel(/访问令牌|Access token/).fill("admin-token");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("button", { name: "Node status" }).click();
-  await expect(page.getByText("Panel enabled")).toBeVisible();
+  await expect(page.getByText("Control panel started")).toBeVisible();
   await page.locator(".action-menu summary").click();
   await page.getByRole("button", { name: "Roles, access and priority" }).click();
   await expectAccessible(page);
   await expect(page.locator(".action-menu")).toHaveJSProperty("open", false);
-  await expect(page.getByText("The management role exposes the XIRANG panel on port 8899 of this node", { exact: false })).toBeVisible();
+  await expect(page.getByLabel("Management responsibility")).toHaveValue("primary");
   await expect(page.locator(".app-shell")).toHaveScreenshot("management-node-panel-dark.png", {
     mask: [page.locator(".live-indicator"), page.locator(".sidebar-footer small")],
   });
@@ -511,7 +556,10 @@ test("management panel distinguishes missing, disabled, failed and stale reports
     { id: "missing", name: "Missing report", expected: "Panel state not reported" },
     { id: "disabled", name: "Disabled relay", managementPanelStatus: "disabled", expected: "Node panel disabled" },
     { id: "failed", name: "Failed relay", managementPanelEnabled: true, managementPanelStatus: "error: address in use", expected: "Panel operation failed" },
-    { id: "controller", name: "Primary controller", managementPanelEnabled: true, managementPanelStatus: "controller", expected: "Independent controller detected" },
+    { id: "controller", name: "Primary controller", managementPanelEnabled: true, managementPanelStatus: "controller", managementRole: "primary", controllerActive: true, expected: "Control panel started" },
+    { id: "passive-primary", name: "Waiting primary", managementPanelEnabled: true, managementPanelStatus: "controller", managementRole: "primary", controllerConfigured: true, controllerActive: false, expected: "Control panel installed" },
+    { id: "backup", name: "Installed backup", managementPanelStatus: "installed", managementRole: "backup", controllerConfigured: true, controllerActive: false, expected: "Control panel installed" },
+    { id: "active-backup", name: "Serving backup", managementPanelStatus: "installed", managementRole: "backup", controllerConfigured: true, controllerActive: true, expected: "Control panel started" },
     { id: "offline", name: "Offline report", status: "offline", managementPanelEnabled: true, managementPanelStatus: "ready", expected: "Panel state unknown" },
   ];
   await page.route("**/api/v1/nodes", (route) => route.fulfill({ json: { items: cases.map(({ expected: _expected, ...item }) => ({ ...base, ...item })) } }));
@@ -519,8 +567,8 @@ test("management panel distinguishes missing, disabled, failed and stale reports
   for (const item of cases) {
     const report = page.locator(".nodes-table__row").filter({ has: page.getByText(item.name, { exact: true }) }).locator(".management-panel-state");
     await expect(report).toHaveText(item.expected);
-    await expect(report).toHaveAttribute("title", /Panel state reported by this node/);
-    if (item.id !== "controller") await expect(report).not.toHaveClass(/management-panel-state--ready/);
+    await expect(report).not.toHaveAttribute("title");
+    if (!item.controllerActive) await expect(report).not.toHaveClass(/management-panel-state--ready/);
   }
   await expect(page.getByText("Panel unavailable", { exact: true })).toHaveCount(0);
 });
@@ -564,6 +612,110 @@ async function loginAsAdmin(page: Page) {
   await page.getByRole("button", { name: "Token" }).click();
   await page.getByLabel(/访问令牌|Access token/).fill("admin-token");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
+}
+
+test("creating a one-use API token preserves account identity and the default login", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("xirang.language", "en"));
+  await mockControlPlane(page, "admin");
+  await page.route("**/api/v1/auth/login", (route) => route.fulfill({ json: { secret: "password-session" } }));
+  await page.route("**/api/v1/access/me", (route) => {
+    expect(route.request().headers().authorization).toBe("Bearer password-session");
+    return route.fulfill({ json: { subject: "local-admin", role: "admin", permissions: ["*"], authMethod: "local_password" } });
+  });
+  let tokens: object[] = [{ id: "session-test", name: "web session", interactive: true }];
+  await page.route("**/api/v1/access/tokens", (route) => {
+    expect(route.request().headers().authorization).toBe("Bearer password-session");
+    if (route.request().method() === "POST") {
+      const token = { id: "api-once", name: "one use", role: "viewer", createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 86400_000).toISOString() };
+      tokens.push(token);
+      return route.fulfill({ json: { token, secret: "xat.one-time-secret" } });
+    }
+    return route.fulfill({ json: { items: tokens } });
+  });
+  await page.goto("/");
+  await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
+  await page.getByLabel("Username", { exact: true }).fill("local-admin");
+  await page.getByLabel("Password (at least 12 characters)", { exact: true }).fill("correct horse battery staple");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByRole("button", { name: "Identity management", exact: true }).click();
+  await expect(page.locator(".access-identity")).toContainText("Account login");
+  const form = page.locator("form").filter({ has: page.getByRole("heading", { name: "Create API token" }) });
+  await form.getByLabel("Name", { exact: true }).fill("one use");
+  await form.getByRole("button", { name: "Generate one-time secret" }).click();
+  await expect(page.locator(".bootstrap-panel")).toContainText("xat.one-time-secret");
+  await expect(page.locator(".access-identity")).toContainText("Account login");
+  await expect(page.locator(".token-list")).not.toContainText("web session");
+  await page.getByRole("button", { name: "Saved", exact: true }).click();
+  await expect(page.getByText("xat.one-time-secret", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Access token", { exact: true })).toHaveCount(0);
+});
+
+test("API token sign-in exchanges once and uses only the resulting session", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("xirang.language", "en"));
+  await mockControlPlane(page, "admin");
+  let exchanges = 0;
+  const protectedCredentials: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/v1/")) {
+      const auth = request.headers().authorization;
+      if (auth) protectedCredentials.push(auth);
+    }
+  });
+  await page.route("**/api/v1/auth/token", (route) => {
+    exchanges++;
+    expect(route.request().postDataJSON()).toEqual({ token: "xat.single-use" });
+    expect(route.request().headers().authorization).toBeUndefined();
+    return route.fulfill({ json: { secret: "xat.console-session" } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Token", exact: true }).click();
+  await page.getByLabel("Access token", { exact: true }).fill("xat.single-use");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByRole("button", { name: "Identity management", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Access control", exact: true })).toBeVisible();
+  expect(exchanges).toBe(1);
+  expect(protectedCredentials.length).toBeGreaterThan(2);
+  expect(new Set(protectedCredentials)).toEqual(new Set(["Bearer xat.console-session"]));
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
+});
+
+for (const remaining of ["none", "warning", "critical", "sensor", "offline"] as const) {
+  test(`ignoring a confirmed alert recomputes the node lamp with ${remaining} remaining`, async ({ page }) => {
+    await loginAsAdmin(page);
+    const at = new Date().toISOString();
+    let alert = { id: "ignore-me", revision: 1, kind: "node_storage", sourceNodeId: "lamp-node", sourceInterface: "", summary: "Reviewed storage error", severity: "critical", status: "firing", firstObservedAt: at, lastObservedAt: at, ignoredAt: "", ignoredBy: "" };
+    const other = remaining === "warning" || remaining === "critical" ? [{ ...alert, id: "other", summary: "Another condition", severity: remaining }] : [];
+    await page.route("**/api/v1/alerts?*", (route) => route.fulfill({ json: { items: [alert, ...other] } }));
+    await page.route("**/api/v1/alerts/ignore-me/ignore", (route) => {
+      expect(route.request().postDataJSON()).toEqual({ revision: 1 });
+      alert = { ...alert, revision: 2, status: "ignored", ignoredAt: new Date().toISOString(), ignoredBy: "reviewing-admin" };
+      return route.fulfill({ json: alert });
+    });
+    await page.route("**/api/v1/nodes", (route) => route.fulfill({ json: { items: [{ id: "lamp-node", name: "Test node", status: remaining === "offline" ? "offline" : "ready", os: "linux", architecture: "amd64", roles: ["compute"], capacity: {}, allocated: {} }] } }));
+    await page.route("**/api/v1/nodes/lamp-node/health", (route) => route.fulfill({ json: { nodeId: "lamp-node", observedAt: new Date().toISOString(), receivedAt: new Date().toISOString(), sources: [], sensors: remaining === "sensor" ? [{ id: "hot", name: "CPU", status: "cr", available: true, value: 90, upperCritical: 85 }] : [] } }));
+    await page.getByRole("button", { name: "Node status", exact: true }).click();
+    await expect(page.locator(".nodes-table__row .state-dot")).toHaveClass(new RegExp(`state-dot--${remaining === "offline" ? "offline" : "critical"}`));
+    await page.getByRole("button", { name: "Alert center", exact: true }).click();
+    const row = page.locator(".alert-row").filter({ hasText: "Reviewed storage error" });
+    page.once("dialog", (dialog) => dialog.dismiss());
+    await row.getByRole("button", { name: "Ignore", exact: true }).click();
+    await expect(row).toBeVisible();
+    page.once("dialog", (dialog) => dialog.accept());
+    await row.getByRole("button", { name: "Ignore", exact: true }).click();
+    await expect(row).toHaveCount(0);
+    await page.getByRole("tab", { name: /^Ignored/ }).click();
+    await expect(row).toContainText("Ignored");
+    await row.getByRole("button", { name: /View alert/ }).click();
+    await expect(page.locator(".alert-inspector")).toContainText("reviewing-admin");
+    await page.getByRole("button", { name: "Node status", exact: true }).click();
+    const tone = remaining === "none" ? "ready" : remaining === "sensor" ? "critical" : remaining;
+    await expect(page.locator(".nodes-table__row .state-dot")).toHaveClass(new RegExp(`state-dot--${tone}`));
+  });
 }
 
 // Contrast is checked twice, and the two checks catch different mistakes.
@@ -946,3 +1098,38 @@ for (const language of ["en", "zh"] as const) {
     }
   });
 }
+
+test("node lamps reflect current warnings, severe sensors and connectivity with one compact menu", async ({ page }) => {
+  await loginAsAdmin(page);
+  const base = { os: "linux", architecture: "amd64", status: "ready", roles: ["compute"], capacity: { milliCpu: 1000, memoryBytes: 1024 }, allocatable: { milliCpu: 1000, memoryBytes: 1024 }, allocated: { milliCpu: 0, memoryBytes: 0 } };
+  const rows = [
+    { id: "active", name: "Active primary", roles: ["management"], managementRole: "primary", controllerActive: true },
+    { id: "passive", name: "Passive backup", roles: ["management"], managementRole: "backup", managementPanelStatus: "installed" },
+    { id: "warn", name: "Warning host" }, { id: "severe", name: "Critical host" },
+    { id: "lost", name: "Unreachable host", status: "unreachable" }, { id: "off", name: "Offline host", status: "offline" },
+  ];
+  await page.route("**/api/v1/nodes", (route) => route.fulfill({ json: { items: rows.map((node) => ({ ...base, ...node })) } }));
+  await page.route("**/api/v1/alerts**", (route) => route.fulfill({ json: { items: [{ id: "warning", sourceNodeId: "warn", status: "firing", severity: "warning" }] } }));
+  await page.route("**/api/v1/nodes/*/health", (route) => {
+    const id = new URL(route.request().url()).pathname.split("/")[4];
+    return route.fulfill({ json: { nodeId: id, observedAt: new Date().toISOString(), receivedAt: new Date().toISOString(), sources: [{ name: "ipmi", status: "available" }], sensors: id === "severe" ? [{ id: "temp", name: "CPU", status: "cr", available: true, value: 90, upperCritical: 85 }] : [] } });
+  });
+  await page.getByRole("button", { name: "Node status", exact: true }).click();
+  const expected = ["ready", "ready", "warning", "critical", "critical", "offline"];
+  for (let i = 0; i < rows.length; i++) {
+    const row = page.locator(".nodes-table__row").filter({ has: page.getByText(rows[i].name, { exact: true }) });
+    await expect(row.locator(".state-dot")).toHaveCount(1);
+    await expect(row.locator(".state-dot")).toHaveClass(new RegExp(`state-dot--${expected[i]}`));
+    const color = await row.locator(".state-dot").evaluate((el) => getComputedStyle(el).backgroundColor);
+    const reference = await page.evaluate((tone) => {
+      const el = document.createElement("i"); el.style.color = `var(--${tone})`; document.body.append(el);
+      const value = getComputedStyle(el).color; el.remove(); return value;
+    }, ({ ready: "green", warning: "amber", critical: "red", offline: "muted" } as Record<string, string>)[expected[i]]);
+    expect(color).toBe(reference);
+    await expect(row.locator("summary svg")).toHaveAttribute("width", "18");
+    await expect(row.locator("summary circle")).toHaveCount(3);
+  }
+  await expect(page.getByText("Control panel started")).toBeVisible();
+  await expect(page.getByText("Control panel installed")).toBeVisible();
+  expect(await page.locator(".management-panel-state").first().evaluate((el) => getComputedStyle(el, "::before").content)).toBe("none");
+});

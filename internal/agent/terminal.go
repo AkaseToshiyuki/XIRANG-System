@@ -16,7 +16,7 @@ import (
 
 	"github.com/creack/pty"
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
-	"golang.org/x/sys/unix"
+	"github.com/xirang-grid/xirang/internal/runtimeguard"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -98,6 +98,15 @@ func newTerminalManager(identity terminalIdentity, launcher []string) (*Terminal
 
 func (manager *TerminalManager) Events() <-chan *xirangv1.TerminalEvent { return manager.events }
 
+func (manager *TerminalManager) runningCount() int {
+	if manager == nil {
+		return 0
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	return len(manager.sessions)
+}
+
 func (manager *TerminalManager) Open(command *xirangv1.OpenTerminal) (bool, string) {
 	if command == nil || !terminalSessionPattern.MatchString(command.SessionId) || !validTerminalSize(command.Columns, command.Rows) {
 		return false, "invalid terminal session or dimensions"
@@ -156,8 +165,8 @@ func RunTerminalLauncher(arguments []string) error {
 	if os.Geteuid() == 0 {
 		return errors.New("administrator terminal launcher refuses root execution")
 	}
-	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
-		return fmt.Errorf("disable administrator terminal privilege gains: %w", err)
+	if err := runtimeguard.ProtectQuotaMetadata(); err != nil {
+		return fmt.Errorf("protect terminal privileges and quota metadata: %w", err)
 	}
 	syscall.Umask(0o077)
 	return syscall.Exec(arguments[0], append([]string{arguments[0]}, arguments[1:]...), os.Environ())

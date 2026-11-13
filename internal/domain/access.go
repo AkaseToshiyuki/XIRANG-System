@@ -18,12 +18,13 @@ type APIToken struct {
 	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
 	RevokedAt  *time.Time `json:"revokedAt,omitempty"`
 	UserID     string     `json:"userId,omitempty"`
-	// Interactive marks a browser session issued by password login, which
-	// always tracks the account's current role. An automation token keeps the
-	// narrower role it was minted with and is additionally capped by the
-	// owning account's role. Absent in records written before this field
-	// existed, which are automation tokens.
+	// Interactive sessions can authenticate multiple requests. API tokens are
+	// consumed on their first successful authentication, recorded in LastUsedAt.
 	Interactive bool `json:"interactive,omitempty"`
+	// Empty on older password sessions. Token-derived sessions retain their
+	// original permission ceiling even if the owning account is promoted.
+	AuthMethod        string   `json:"authMethod,omitempty"`
+	PermissionCeiling []string `json:"permissionCeiling,omitempty"`
 }
 
 type Principal struct {

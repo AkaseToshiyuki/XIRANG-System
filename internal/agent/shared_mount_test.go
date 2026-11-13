@@ -4,19 +4,44 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
+	"github.com/xirang-grid/xirang/internal/mountcontrol"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func testMountOperation() *xirangv1.SharedMountOperation {
 	return &xirangv1.SharedMountOperation{OperationId: "mount_test", SpaceId: "share", Action: xirangv1.SharedMountOperation_ACTION_EXPORT, SourcePath: "/srv/share", ExpiresAt: timestamppb.New(time.Now().Add(20 * time.Second))}
+}
+
+func TestPrivilegedMountRuntimeRejectsUserWritableInstallation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "agent")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := trustedMountExecutable(path); err == nil {
+		t.Fatal("accepted a privileged program under a writable parent")
+	}
+	if err := os.Symlink("/usr/bin/true", filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := trustedMountExecutable(filepath.Join(root, "link")); err == nil {
+		t.Fatal("accepted a privileged executable symlink")
+	}
+	t.Setenv("PATH", root)
+	resolved, err := fixedMountTool("true")
+	if err != nil || !strings.HasPrefix(resolved, "/usr/") {
+		t.Fatalf("host tool lookup used the caller's PATH: %q %v", resolved, err)
+	}
 }
 
 func TestSharedMountManagerIsBoundedAsyncAndDeduplicates(t *testing.T) {
@@ -164,5 +189,35 @@ func TestSharedMountLedgerRetiresOnlyCompletedExpiredOperations(t *testing.T) {
 	defer manager.mu.Unlock()
 	if manager.records["completed"] != nil || manager.records["running"] == nil || manager.records["recent"] == nil {
 		t.Fatal("ledger retention lost replay/running boundary")
+	}
+}
+
+func TestRepathAtSystemdHostEntry(t *testing.T) {
+	now := time.Now()
+	operation := testMountOperation()
+	operation.Action = xirangv1.SharedMountOperation_ACTION_REPATH
+	operation.SourceHost, operation.MountPath = "192.0.2.1", "/srv/share"
+	operation.ClientAddress, operation.ClientInterface = "192.0.2.2", "eth0"
+	args, err := mountcontrol.Arguments(operation, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := sharedMountUnitArguments("/usr/local/bin/xirang-agent", operation, args)
+	index := slices.Index(unit, "__xirang-shared-mount")
+	if index < 0 {
+		t.Fatal("missing internal host command")
+	}
+	host := unit[index+1:]
+	if err := validateHostMountRequest(host, now); err != nil {
+		t.Fatalf("host rejected the issued path change: %v", err)
+	}
+	if validateHostMountRequest(host, operation.ExpiresAt.AsTime()) == nil {
+		t.Fatal("expired path change accepted")
+	}
+	for _, action := range []string{"file-write", "stats", "sh"} {
+		host[1] = action
+		if validateHostMountRequest(host, now) == nil {
+			t.Fatal("unexpected host operation accepted", action)
+		}
 	}
 }

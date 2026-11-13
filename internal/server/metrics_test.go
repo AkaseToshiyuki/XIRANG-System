@@ -72,7 +72,7 @@ func TestMetricsAuthenticationAndReadOnlyToken(t *testing.T) {
 	}
 	defer store.Close()
 	access := identity.NewAccessService(store, nil, nil)
-	viewer, err := access.CreateToken(context.Background(), "scraper", "viewer", time.Hour, domain.Principal{Subject: "admin", Role: "admin", Permissions: []string{"*"}})
+	viewer, err := createTestSession(t, access, context.Background(), "scraper", "viewer", time.Hour, domain.Principal{Subject: "admin", Role: "admin", Permissions: []string{"*"}})
 	if err != nil {
 		t.Fatal(err)
 	}

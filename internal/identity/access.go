@@ -315,7 +315,7 @@ func (service *AccessService) Login(ctx context.Context, username, password stri
 	token := domain.APIToken{
 		ID: "session_" + base64.RawURLEncoding.EncodeToString(idBytes), Name: "web session",
 		Role: user.Role, Subject: user.Username, UserID: user.ID, CreatedAt: now, ExpiresAt: now.Add(12 * time.Hour),
-		Interactive: true,
+		Interactive: true, AuthMethod: "local_password",
 	}
 	if err := service.repository.CreateAPIToken(ctx, token, sha256.Sum256([]byte(secret)), domain.AuditEvent{
 		ID: "user_login_" + token.ID, ActorType: "local_password", ActorID: user.ID,
@@ -691,51 +691,8 @@ func verifyPassword(password, encoded string) bool {
 func (service *AccessService) Authenticate(ctx context.Context, bearer string) (domain.Principal, error) {
 	bearer = strings.TrimSpace(bearer)
 	if strings.HasPrefix(bearer, "xat.") {
-		digest := sha256.Sum256([]byte(bearer))
-		token, err := service.repository.GetAPITokenByDigest(ctx, digest)
-		if err != nil || token.RevokedAt != nil || !service.now().Before(token.ExpiresAt) {
-			return domain.Principal{}, ErrUnauthorized
-		}
-		role := roleByName(token.Role)
-		if role == nil {
-			return domain.Principal{}, ErrUnauthorized
-		}
-		var account domain.User
-		if token.UserID != "" && service.accounts != nil {
-			account, _, err = service.accounts.GetUser(ctx, token.UserID)
-			if err != nil || account.Status != domain.UserStatusActive {
-				return domain.Principal{}, ErrUnauthorized
-			}
-			accountRole := roleByName(account.Role)
-			if accountRole == nil {
-				return domain.Principal{}, ErrUnauthorized
-			}
-			// A browser session follows the account's current role in both
-			// directions. An automation token never gains privilege from its
-			// owner's role, only loses it: minting a narrow token from an
-			// administrator account must stay narrow, while demoting that
-			// account must immediately narrow the token further.
-			if token.Interactive {
-				role = accountRole
-			} else {
-				permissions := intersectPermissions(role.Permissions, accountRole.Permissions)
-				// The role label is used by ownership checks as well as the UI.
-				// Never retain an admin label after an account demotion.
-				if roleRank(accountRole.Name) < roleRank(role.Name) {
-					role = accountRole
-				}
-				role.Permissions = permissions
-			}
-		}
-		now := service.now().UTC()
-		_, _ = service.repository.UpdateAPIToken(context.WithoutCancel(ctx), token.ID, func(current *domain.APIToken) error {
-			current.LastUsedAt = &now
-			return nil
-		}, nil)
-		return domain.Principal{
-			UserID: token.UserID, Subject: token.Subject, DisplayName: account.DisplayName,
-			Role: role.Name, Permissions: role.Permissions, AuthMethod: "api_token", GroupIDs: account.GroupIDs,
-		}, nil
+		principal, _, err := service.authenticateToken(ctx, bearer, false)
+		return principal, err
 	}
 	if service.oidc == nil {
 		return domain.Principal{}, ErrUnauthorized
@@ -767,6 +724,109 @@ func (service *AccessService) Authenticate(ctx context.Context, bearer string) (
 	}
 	sort.Strings(permissions)
 	return domain.Principal{Subject: claims.Subject, DisplayName: claims.Name, Role: role.Name, Permissions: permissions, AuthMethod: "oidc"}, nil
+}
+
+func (service *AccessService) authenticateToken(ctx context.Context, bearer string, oneUseOnly bool) (domain.Principal, domain.APIToken, error) {
+	token, err := service.repository.GetAPITokenByDigest(ctx, sha256.Sum256([]byte(bearer)))
+	if err != nil || token.RevokedAt != nil || !service.now().Before(token.ExpiresAt) ||
+		(!token.Interactive && token.LastUsedAt != nil) || (oneUseOnly && token.Interactive) {
+		return domain.Principal{}, domain.APIToken{}, ErrUnauthorized
+	}
+	role := roleByName(token.Role)
+	if role == nil {
+		return domain.Principal{}, domain.APIToken{}, ErrUnauthorized
+	}
+	var account domain.User
+	if token.UserID != "" {
+		if service.accounts == nil {
+			return domain.Principal{}, domain.APIToken{}, ErrUnauthorized
+		}
+		account, _, err = service.accounts.GetUser(ctx, token.UserID)
+		if err != nil || account.Status != domain.UserStatusActive {
+			return domain.Principal{}, domain.APIToken{}, ErrUnauthorized
+		}
+		accountRole := roleByName(account.Role)
+		if accountRole == nil {
+			return domain.Principal{}, domain.APIToken{}, ErrUnauthorized
+		}
+		if token.Interactive && token.AuthMethod != "api_token" {
+			role = accountRole
+		} else {
+			permissions := intersectPermissions(role.Permissions, accountRole.Permissions)
+			if roleRank(accountRole.Name) < roleRank(role.Name) {
+				role = accountRole
+			}
+			role.Permissions = permissions
+		}
+	}
+	method := "api_token"
+	if token.Interactive {
+		if token.AuthMethod == "api_token" {
+			role.Permissions = intersectPermissions(role.Permissions, token.PermissionCeiling)
+		} else {
+			method = "local_password"
+		}
+	}
+	now := service.now().UTC()
+	var audit *domain.AuditEvent
+	if !token.Interactive {
+		audit = &domain.AuditEvent{ID: "api_token_consumed_" + token.ID, ActorType: "api_token", ActorID: token.Subject,
+			Action: "access.api_token.consumed", TargetKind: "api_token", TargetID: token.ID, Outcome: "succeeded", OccurredAt: now}
+	}
+	// Consumption and its audit record must commit before a principal is issued.
+	// The transaction checks the current row, so competing services cannot both
+	// authenticate the same token or race past an explicit revocation.
+	_, err = service.repository.UpdateAPIToken(ctx, token.ID, func(current *domain.APIToken) error {
+		if current.RevokedAt != nil || !service.now().Before(current.ExpiresAt) ||
+			(!current.Interactive && current.LastUsedAt != nil) {
+			return ErrUnauthorized
+		}
+		current.LastUsedAt = &now
+		return nil
+	}, audit)
+	if err != nil {
+		return domain.Principal{}, domain.APIToken{}, err
+	}
+	return domain.Principal{UserID: token.UserID, Subject: token.Subject, DisplayName: account.DisplayName,
+		Role: role.Name, Permissions: role.Permissions, AuthMethod: method, GroupIDs: account.GroupIDs}, token, nil
+}
+
+// ExchangeToken consumes an API token once and creates a separate console
+// session. Its lifetime and permissions cannot exceed the consumed token.
+// An existing session cannot be exchanged to renew itself.
+func (service *AccessService) ExchangeToken(ctx context.Context, bearer string) (CreatedAPIToken, error) {
+	bearer = strings.TrimSpace(bearer)
+	if !strings.HasPrefix(bearer, "xat.") {
+		return CreatedAPIToken{}, ErrUnauthorized
+	}
+	principal, source, err := service.authenticateToken(ctx, bearer, true)
+	if err != nil {
+		return CreatedAPIToken{}, err
+	}
+	randomBytes, idBytes := make([]byte, 32), make([]byte, 12)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return CreatedAPIToken{}, err
+	}
+	if _, err := rand.Read(idBytes); err != nil {
+		return CreatedAPIToken{}, err
+	}
+	secret := "xat." + base64.RawURLEncoding.EncodeToString(idBytes) + "." + base64.RawURLEncoding.EncodeToString(randomBytes)
+	now := service.now().UTC()
+	expiresAt := now.Add(12 * time.Hour)
+	if source.ExpiresAt.Before(expiresAt) {
+		expiresAt = source.ExpiresAt
+	}
+	token := domain.APIToken{ID: "session_" + base64.RawURLEncoding.EncodeToString(idBytes), Name: "token session",
+		Role: principal.Role, Subject: source.Subject, UserID: source.UserID, CreatedAt: now, ExpiresAt: expiresAt,
+		Interactive: true, AuthMethod: "api_token", PermissionCeiling: append([]string(nil), principal.Permissions...)}
+	if err := service.repository.CreateAPIToken(ctx, token, sha256.Sum256([]byte(secret)), domain.AuditEvent{
+		ID: "token_login_" + token.ID, ActorType: "api_token", ActorID: source.Subject,
+		Action: "access.token.logged_in", TargetKind: "api_token", TargetID: token.ID, Outcome: "succeeded", OccurredAt: now,
+		Details: map[string]string{"sourceTokenId": source.ID},
+	}); err != nil {
+		return CreatedAPIToken{}, err
+	}
+	return CreatedAPIToken{Token: token, Secret: secret}, nil
 }
 
 func (service *AccessService) Authorize(principal domain.Principal, permission string) error {

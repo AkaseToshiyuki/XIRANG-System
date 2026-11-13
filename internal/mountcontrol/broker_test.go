@@ -89,6 +89,15 @@ func TestMountBrokerNodeBindingAuditAndCompletion(t *testing.T) {
 	unchanged := proto.Clone(original)
 	go func() { done <- broker.Run(ctx, node, original) }()
 	message := <-transport.messages
+	// A synchronized peer can still lag the controller. Evaluate the actual
+	// wire command against that peer's clock, before any network delay.
+	op := message.GetSharedMountOperation()
+	if _, err := Arguments(op, message.SentAt.AsTime().Add(-time.Second)); err != nil {
+		t.Errorf("fresh broker command rejected by a peer one second behind: %v", err)
+	}
+	if _, err := Arguments(op, op.ExpiresAt.AsTime()); err == nil {
+		t.Error("expired broker command accepted")
+	}
 	if !proto.Equal(original, unchanged) {
 		t.Fatal("caller operation mutated")
 	}
@@ -140,6 +149,9 @@ func TestMountBrokerTimeoutAndAuditFailureDoNotDispatchAgain(t *testing.T) {
 		t.Fatalf("timeout: %v", err)
 	}
 	message := <-transport.messages
+	if deadline, _ := ctx.Deadline(); message.GetSharedMountOperation().ExpiresAt.AsTime().After(deadline) {
+		t.Fatal("mount command outlives caller deadline")
+	}
 	if <-transport.forgotten != message.MessageId {
 		t.Fatal("timeout left queued command")
 	}

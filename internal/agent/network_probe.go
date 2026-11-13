@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/xirang-grid/xirang/internal/networkhealth"
 	"net/netip"
 	"os/exec"
 	"regexp"
@@ -57,8 +58,32 @@ type networkProbePair struct {
 type pingProbe func(context.Context, netip.Addr, netip.Addr) (time.Duration, error)
 
 func CollectNetworkPathProbes(ctx context.Context, localInterfaces []NetworkInterfaceInventory, targets []NetworkProbeTarget) []PathProbeObservation {
-	offset := networkProbeCursor.Add(maxNetworkProbePairs) - maxNetworkProbePairs
-	return collectNetworkPathProbesWindow(ctx, localInterfaces, targets, runPingProbe, offset)
+	offset := networkProbeCursor.Load()
+	interfaces := map[string]string{}
+	for _, iface := range localInterfaces {
+		for _, raw := range iface.Addresses {
+			if ip, ok := probeAddress(raw); ok {
+				if existing, found := interfaces[ip.String()]; found && existing != iface.Name {
+					// An address shared by interfaces cannot identify the actual
+					// source device for this address-bound ping.
+					interfaces[ip.String()] = ""
+				} else if !found {
+					interfaces[ip.String()] = iface.Name
+				}
+			}
+		}
+	}
+	probe := func(ctx context.Context, source, target netip.Addr) (time.Duration, error) {
+		if err := networkhealth.CheckRoute(ctx, networkhealth.Path{SourceAddress: source.String(), TargetAddress: target.String(), SourceInterface: interfaces[source.String()]}); err != nil {
+			return 0, err
+		}
+		return runPingProbe(ctx, source, target)
+	}
+	observations := collectNetworkPathProbesWindow(ctx, localInterfaces, targets, probe, offset)
+	// Advance by attempted work; a timed-out full window must not starve
+	// unvisited pairs on every subsequent collection.
+	networkProbeCursor.Add(uint64(max(1, len(observations))))
+	return observations
 }
 
 func collectNetworkPathProbes(ctx context.Context, localInterfaces []NetworkInterfaceInventory, targets []NetworkProbeTarget, probe pingProbe) []PathProbeObservation {

@@ -72,7 +72,7 @@ export function QueuesPage({ token }: { token: string }) {
     <header className="page-header"><div><h1>{t("队列策略", "Queue policies")}</h1></div></header>
     {error && <p className="error-banner" role="alert">{error}</p>}
     {elasticity && <div className="elasticity-strip">
-      <div><strong>{t("弹性容量建议", "Elastic capacity recommendations")}</strong><small>{t("建议仅供管理员扩容参考", "Recommendations are advisory for administrator scale-out")} · {relativeTime(elasticity.generatedAt)}</small></div>
+      <div><strong>{t("弹性容量建议", "Elastic capacity recommendations")}</strong><small>{relativeTime(elasticity.generatedAt)}</small></div>
       {elasticity.recommendations.length === 0
         ? <p>{t("当前排队任务不需要增加容量。", "Queued jobs do not currently require additional capacity.")}</p>
         : elasticity.recommendations.map((item) => <article key={item.queue}>
@@ -100,8 +100,8 @@ export function QueuesPage({ token }: { token: string }) {
         <QueueNumber label={t("公平份额半衰期 (小时)", "Fair-share half-life (hours)")} value={form.fairShareHalfLife} set={(value) => setForm({ ...form, fairShareHalfLife: value })} />
         <QueueNumber label={t("历史用量权重 (0 关闭)", "Historical usage weight (0 disables)")} value={form.historicalWeight} set={(value) => setForm({ ...form, historicalWeight: value })} />
         <label className="queue-toggle"><input type="checkbox" checked={form.backfill} onChange={(event) => setForm({ ...form, backfill: event.target.checked })} /><span><strong>{t("允许基础回填", "Allow basic backfill")}</strong><small>{t("高优先级作业暂时无法放置时，使用空闲容量运行较小作业。", "Run smaller jobs on idle capacity while a high-priority job cannot be placed.")}</small></span></label>
-        <label className="queue-toggle"><input type="checkbox" checked={form.allowPreemption} onChange={(event) => setForm({ ...form, allowPreemption: event.target.checked })} /><span><strong>{t("允许发起抢占", "Allow preemption")}</strong><small>{t("仅抢占显式允许且优先级更低的队列任务；资源在 Agent 确认退出前不会释放。", "Preempt only explicitly preemptible lower-priority jobs; resources remain reserved until the Agent confirms exit.")}</small></span></label>
-        <label className="queue-toggle"><input type="checkbox" checked={form.preemptible} onChange={(event) => setForm({ ...form, preemptible: event.target.checked })} /><span><strong>{t("本队列任务可被抢占", "Jobs in this queue are preemptible")}</strong><small>{t("被抢占任务会安全重新入队，并保留原有失败重试额度。", "Preempted jobs are safely requeued without consuming failure retries.")}</small></span></label>
+        <label className="queue-toggle"><input type="checkbox" checked={form.allowPreemption} onChange={(event) => setForm({ ...form, allowPreemption: event.target.checked })} /><span><strong>{t("允许发起抢占", "Allow preemption")}</strong><small>{t("抢占允许被抢占的低优先级任务。", "Preempt eligible lower-priority jobs.")}</small></span></label>
+        <label className="queue-toggle"><input type="checkbox" checked={form.preemptible} onChange={(event) => setForm({ ...form, preemptible: event.target.checked })} /><span><strong>{t("本队列任务可被抢占", "Jobs in this queue are preemptible")}</strong><small>{t("被抢占的任务重新排队。", "Preempted jobs return to the queue.")}</small></span></label>
         <div><QueueNumber label={t("退出宽限期 (秒)", "Exit grace period (seconds)")} value={form.preemptionGrace} set={(value) => setForm({ ...form, preemptionGrace: value })} /><QueueNumber label={t("单任务最多抢占次数", "Maximum preemptions per job")} value={form.maxPreemptions} set={(value) => setForm({ ...form, maxPreemptions: value })} /></div>
         <span className="editor-divider">{t("弹性建议预算", "Elasticity recommendation budget")}</span>
         <div><QueueNumber label={t("建议节点上限", "Recommended node limit")} value={form.maxScaleOut} set={(value) => setForm({ ...form, maxScaleOut: value })} /><QueueNumber label={t("预算逻辑 CPU 核心数", "Budget logical CPU cores")} value={form.budgetCPU} set={(value) => setForm({ ...form, budgetCPU: value })} /></div>

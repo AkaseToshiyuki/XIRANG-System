@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"log/slog"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -82,12 +85,21 @@ func agentServerOptions() []grpc.ServerOption {
 }
 
 func main() {
+	for {
+		flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+		if !runController() {
+			return
+		}
+	}
+}
+
+func runController() bool {
 	if len(os.Args) > 1 && os.Args[1] == "__xirang-build-exec" {
 		if err := buildmanager.RunExecutorLauncher(os.Args[2:]); err != nil {
 			_, _ = os.Stderr.WriteString(err.Error() + "\n")
 			os.Exit(126)
 		}
-		return
+		return false
 	}
 	address := flag.String("listen", "0.0.0.0:8899", "HTTPS management and Web console listen address")
 	agentAddress := flag.String("agent-listen", "127.0.0.1:8444", "mTLS Agent gRPC listen address")
@@ -98,9 +110,13 @@ func main() {
 	certificateRotateBefore := flag.Duration("node-certificate-rotate-before", 7*24*time.Hour, "automatically rotate node certificates this long before expiry")
 	dataDirectory := flag.String("data-dir", ".data/xirang", "control-plane state directory")
 	webRoot := flag.String("web-root", "/usr/local/share/xirang/web", "compiled Web console directory (empty disables Web serving)")
+	defaultSharedSpace := flag.Bool("default-shared-space", true, "automatically create and protect the built-in XirangShare space")
 	jobArtifactRoot := flag.String("job-artifact-root", "/srv/xirang/XirangShare/.xirang/artifacts", "versioned system Job artifact directory on shared storage")
 	terminalSSHKey := flag.String("terminal-ssh-key", "", "SSH key for administrator terminals and shared mounts (defaults inside data-dir)")
 	terminalKnownHosts := flag.String("terminal-known-hosts", "", "SSH known-hosts file (defaults inside data-dir)")
+	controllerRole := flag.String("controller-role", "", "preferred controller role: primary or backup; requires PostgreSQL")
+	controllerNodeID := flag.String("controller-node-id", "", "enrolled node ID assigned to this controller")
+	failbackDelay := flag.Duration("controller-failback-delay", 15*time.Second, "continuous primary availability before automatic handback")
 	standby := flag.Bool("standby", false, "wait for the exclusive state lock and take over after the active controller exits")
 	backupDirectory := flag.String("backup-dir", "", "online consistent backup directory (defaults inside data-dir)")
 	externalStateDSN := flag.String("external-state-dsn", "", "optional PostgreSQL DSN for write-through control state and leader election")
@@ -146,7 +162,7 @@ func main() {
 	if *showVersion {
 		info := version.Current()
 		_, _ = os.Stdout.WriteString(info.Name + " " + info.Version + "\n")
-		return
+		return false
 	}
 	if *agentHeartbeatInterval < time.Second || *unreachableAfter <= 2**agentHeartbeatInterval ||
 		*offlineAfter <= *unreachableAfter || *reconcileInterval <= 0 || *certificateRotateBefore <= 0 {
@@ -176,6 +192,13 @@ func main() {
 		os.Exit(2)
 	}
 
+	if (*controllerRole != "" && (*externalStateDSN == "" || *controllerNodeID == "" || (*controllerRole != "primary" && *controllerRole != "backup"))) || (*controllerRole == "" && *controllerNodeID != "") || *failbackDelay < time.Second {
+		_, _ = os.Stderr.WriteString("controller pair requires PostgreSQL, a node ID, primary/backup role and a positive failback delay\n")
+		os.Exit(2)
+	}
+	lifecycle, stopLifecycle := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopLifecycle()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	resolvedData, resolvedBackups, err := resolveStateDirectories(*dataDirectory, *backupDirectory)
 	if err != nil {
@@ -200,11 +223,32 @@ func main() {
 	if created {
 		logger.Warn("created bootstrap administrator token", "path", *adminTokenFile)
 	}
+	authority, err := pki.OpenOrCreate(filepath.Join(*dataDirectory, "pki"), tlsHosts)
+	if err != nil {
+		logger.Error("initialize control-plane PKI", "error", err)
+		os.Exit(1)
+	}
+	tlsConfig, err := authority.TLSConfig()
+	if err != nil {
+		logger.Error("initialize TLS configuration", "error", err)
+		os.Exit(1)
+	}
+	trust := sha256.New()
+	caBytes, err := os.ReadFile(authority.CAPath())
+	if err != nil {
+		logger.Error("read controller CA", "error", err)
+		os.Exit(1)
+	}
+	_, _ = trust.Write(caBytes)
+	_, _ = trust.Write([]byte("\x00" + adminToken))
+	trustDigest := hex.EncodeToString(trust.Sum(nil))
+
 	var state controlStore
 	if *externalStateDSN != "" {
-		state, err = externalstore.Open(context.Background(), externalstore.Config{
+		state, err = externalstore.Open(lifecycle, externalstore.Config{
 			DSN: *externalStateDSN, Namespace: *externalStateNamespace,
 			CachePath: filepath.Join(*dataDirectory, "external-cache", "xirang.db"), Standby: *standby,
+			ControllerRole: *controllerRole, ControllerNodeID: *controllerNodeID, TrustDigest: trustDigest, FailbackDelay: *failbackDelay,
 		}, func() {
 			logger.Info("standby controller waiting for PostgreSQL leadership", "namespace", *externalStateNamespace)
 		})
@@ -212,7 +256,18 @@ func main() {
 		state, err = openControlStore(filepath.Join(*dataDirectory, "xirang.db"), *standby, logger)
 	}
 	if err != nil {
+		if lifecycle.Err() != nil {
+			return false
+		}
 		logger.Error("open control-plane state", "error", err)
+		if *controllerRole != "" && !errors.Is(err, externalstore.ErrControllerConfiguration) {
+			select {
+			case <-lifecycle.Done():
+				return false
+			case <-time.After(3 * time.Second):
+				return true
+			}
+		}
 		os.Exit(1)
 	}
 	defer state.Close()
@@ -272,23 +327,28 @@ func main() {
 		TriggerAfter: *alertTriggerAfter, ResolveAfter: *alertResolveAfter, RecordTransitions: notificationService.Enabled(),
 		Policy: alertPolicyService.Get,
 	})
-	authority, err := pki.OpenOrCreate(filepath.Join(*dataDirectory, "pki"), tlsHosts)
-	if err != nil {
-		logger.Error("initialize control-plane PKI", "error", err)
-		os.Exit(1)
-	}
-	tlsConfig, err := authority.TLSConfig()
-	if err != nil {
-		logger.Error("initialize TLS configuration", "error", err)
-		os.Exit(1)
-	}
 	enrollmentService := enrollment.NewService(state, authority)
+	if external, ok := state.(*externalstore.Store); ok && *controllerRole != "" {
+		members, err := external.ControllerMembers(lifecycle)
+		if err != nil {
+			logger.Error("read controller pair", "error", err)
+			os.Exit(1)
+		}
+		enrollmentService.SetControllerMembers(members, *controllerNodeID)
+		enrollmentService.SetControllerResolver(external.ControllerMembers)
+	}
 	commandHub := controlstream.NewHub(128)
 	mountBroker := mountcontrol.New(commandHub, state.AppendAuditEvent)
+	localHostname, _ := os.Hostname()
+	liveNetwork := networkhealth.NewLiveSource(topologyService, telemetryService)
+	networkPaths := &networkhealth.Resolver{Snapshots: liveNetwork, Nodes: enrollmentService, LocalID: *controllerNodeID, Hostname: localHostname, Telemetry: telemetryService}
 	sharedSpaceService := clusterops.New(state, enrollmentService, clusterops.AgentRunner{
-		Mounts: mountBroker, Files: clusterops.SSHRunner{KeyPath: *terminalSSHKey, KnownHostsPath: *terminalKnownHosts},
+		Mounts: mountBroker, Files: clusterops.SSHRunner{KeyPath: *terminalSSHKey, KnownHostsPath: *terminalKnownHosts, Paths: networkPaths},
 	})
-	sharedSpaceService.EnableDefault("/srv/xirang/XirangShare", "/srv/xirang/XirangShare")
+	if *defaultSharedSpace {
+		sharedSpaceService.EnableDefault("/srv/xirang/XirangShare", "/srv/xirang/XirangShare")
+	}
+	sharedSpaceService.EnableNetworkPaths(networkPaths)
 	joinTokens, joinTokenCreated, err := enrollment.OpenJoinTokenManager(
 		context.Background(), filepath.Join(*dataDirectory, "join.token"), enrollmentService,
 	)
@@ -406,7 +466,7 @@ func main() {
 	); err != nil {
 		logger.Error("install built-in Job templates", "error", err)
 	}
-	jobCoordinator.SetTopologySource(networkhealth.NewLiveSource(topologyService, telemetryService))
+	jobCoordinator.SetTopologySource(liveNetwork)
 	if err := jobCoordinator.RestoreAssignments(context.Background()); err != nil {
 		logger.Error("restore pending job assignments", "error", err)
 		os.Exit(1)
@@ -436,6 +496,7 @@ func main() {
 		Telemetry:          telemetryService,
 		HostHealth:         hostHealthService,
 		Topology:           topologyService,
+		NetworkPaths:       networkPaths,
 		Flows:              flowService,
 		Alerts:             alertService,
 		Notifications:      notificationService,
@@ -454,6 +515,14 @@ func main() {
 		ArtifactRoot:       *buildArtifactRoot,
 		WebRoot:            *webRoot,
 	})
+	var leadershipChanges <-chan error
+	if external, ok := state.(*externalstore.Store); ok {
+		leadershipChanges = external.WatchLeadership(lifecycle)
+		application.ConfigureLifecycle(lifecycle, external.CheckLeadership)
+	} else {
+		application.ConfigureLifecycle(lifecycle, nil)
+	}
+
 	agentListener, err := net.Listen("tcp", *agentAddress)
 	if err != nil {
 		logger.Error("listen for Agent control streams", "error", err)
@@ -469,6 +538,9 @@ func main() {
 	agentServer := grpc.NewServer(append(agentServerOptions(),
 		grpc.Creds(credentials.NewTLS(agentTLS)),
 		grpc.StreamInterceptor(func(service any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+			if external, ok := state.(*externalstore.Store); ok {
+				stream = &leadershipStream{ServerStream: stream, check: external.CheckLeadership}
+			}
 			err := handler(service, stream)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				address := ""
@@ -482,8 +554,6 @@ func main() {
 	)...)
 	xirangv1.RegisterAgentControlServer(agentServer, agentControl)
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	httpErrors := make(chan error, 1)
 	agentErrors := make(chan error, 1)
 	go func() {
@@ -492,25 +562,37 @@ func main() {
 		httpErrors <- application.ListenAndServeTLS("", "")
 	}()
 	go func() { agentErrors <- agentServer.Serve(agentListener) }()
-	reconcileContext, stopReconciler := context.WithCancel(context.Background())
+	reconcileContext, stopReconciler := context.WithCancel(lifecycle)
 	defer stopReconciler()
-	go reconcileNodes(reconcileContext, enrollmentService, commandHub, *reconcileInterval, *unreachableAfter, *offlineAfter, *certificateRotateBefore, logger)
-	go reconcileSharedSpaces(reconcileContext, sharedSpaceService, sharedSpaceReconcile, logger)
-	go alerting.RunEvaluator(reconcileContext, topologyService, telemetryService, alertService, *alertEvaluationInterval, func(err error) {
-		logger.Error("evaluate interface alerts", "error", err)
+	var background sync.WaitGroup
+	start := func(work func()) { background.Add(1); go func() { defer background.Done(); work() }() }
+	start(func() {
+		reconcileNodes(reconcileContext, enrollmentService, commandHub, *reconcileInterval, *unreachableAfter, *offlineAfter, *certificateRotateBefore, logger)
 	})
-	go notificationService.Run(reconcileContext, func(err error) {
-		logger.Error("deliver alert webhook", "error", err)
+	start(func() { reconcileSharedSpaces(reconcileContext, sharedSpaceService, sharedSpaceReconcile, logger) })
+	start(func() {
+		alerting.RunEvaluator(reconcileContext, topologyService, telemetryService, alertService, *alertEvaluationInterval, func(err error) { logger.Error("evaluate interface alerts", "error", err) })
 	})
-	go jobCoordinator.Run(reconcileContext, func(err error) {
-		logger.Error("schedule jobs", "error", err)
+	start(func() {
+		notificationService.Run(reconcileContext, func(err error) { logger.Error("deliver alert webhook", "error", err) })
 	})
+	start(func() {
+		jobCoordinator.Run(reconcileContext, func(err error) { logger.Error("schedule jobs", "error", err) })
+	})
+
 	logger.Info("starting XIRANG control plane", "apiAddress", *address, "agentAddress", *agentAddress,
 		"version", version.Version, "ca", authority.CAPath())
 
 	var serveErr error
+	restart := false
 	select {
-	case <-stop:
+	case <-lifecycle.Done():
+	case reason := <-leadershipChanges:
+		logger.Info("relinquishing controller leadership", "reason", reason)
+		restart = *controllerRole != ""
+		if !restart {
+			serveErr = reason
+		}
 	case err := <-httpErrors:
 		if !errors.Is(err, http.ErrServerClosed) {
 			serveErr = err
@@ -521,16 +603,43 @@ func main() {
 		}
 	}
 	stopReconciler()
+	stopLifecycle()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := application.Shutdown(shutdownContext); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("HTTP shutdown failed", "error", err)
+		_ = application.Close()
 	}
 	gracefulStopGRPC(shutdownContext, agentServer)
+	background.Wait()
 	if serveErr != nil {
 		logger.Error("control plane stopped", "error", serveErr)
 		os.Exit(1)
 	}
+	return restart
+}
+
+type leadershipStream struct {
+	grpc.ServerStream
+	check func(context.Context) error
+}
+
+func (s *leadershipStream) verify() error {
+	ctx, cancel := context.WithTimeout(s.Context(), 2*time.Second)
+	defer cancel()
+	return s.check(ctx)
+}
+func (s *leadershipStream) SendMsg(message any) error {
+	if err := s.verify(); err != nil {
+		return err
+	}
+	return s.ServerStream.SendMsg(message)
+}
+func (s *leadershipStream) RecvMsg(message any) error {
+	if err := s.ServerStream.RecvMsg(message); err != nil {
+		return err
+	}
+	return s.verify()
 }
 
 func reconcileSharedSpaces(ctx context.Context, service *clusterops.Service, requested <-chan struct{}, logger *slog.Logger) {
@@ -567,6 +676,10 @@ func reconcileNodes(ctx context.Context, service *enrollment.Service, commands *
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	reconcile := func() {
+		if err := service.RefreshControllerMembers(ctx); err != nil {
+			logger.Error("refresh controller pair", "error", err)
+			return
+		}
 		changed, err := service.ReconcileStaleNodes(ctx, unreachableAfter, offlineAfter)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("reconcile stale nodes", "error", err)

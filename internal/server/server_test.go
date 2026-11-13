@@ -43,7 +43,7 @@ func TestAPITokenRBACMiddleware(t *testing.T) {
 	}
 	defer store.Close()
 	access := identity.NewAccessService(store, nil, nil)
-	created, err := access.CreateToken(context.Background(), "read only", "viewer", time.Hour, domain.Principal{
+	created, err := createTestSession(t, access, context.Background(), "read only", "viewer", time.Hour, domain.Principal{
 		Subject: "root", Role: "admin", Permissions: []string{"*"}, AuthMethod: "bootstrap",
 	})
 	if err != nil {
@@ -70,7 +70,7 @@ func TestAccountingUsersSeeOnlyTheirSummaryAndAdminsManageRates(t *testing.T) {
 	defer store.Close()
 	access := identity.NewAccessService(store, nil, nil)
 	admin := domain.Principal{Subject: "root", Role: "admin", Permissions: []string{"*"}, AuthMethod: "bootstrap"}
-	user, err := access.CreateToken(context.Background(), "accounting user", "user", time.Hour, admin)
+	user, err := createTestSession(t, access, context.Background(), "accounting user", "user", time.Hour, admin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,11 +189,11 @@ func TestJobTemplateHTTPFlowAndRBAC(t *testing.T) {
 	defer store.Close()
 	access := identity.NewAccessService(store, nil, nil)
 	admin := domain.Principal{Subject: "root", Role: "admin", Permissions: []string{"*"}, AuthMethod: "bootstrap"}
-	viewer, err := access.CreateToken(context.Background(), "template viewer", "viewer", time.Hour, admin)
+	viewer, err := createTestSession(t, access, context.Background(), "template viewer", "viewer", time.Hour, admin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	user, err := access.CreateToken(context.Background(), "template user", "user", time.Hour, admin)
+	user, err := createTestSession(t, access, context.Background(), "template user", "user", time.Hour, admin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -731,7 +731,7 @@ func TestEnrollmentHTTPFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	managed, err := enrollmentService.GetNode(context.Background(), registered.Node.ID)
-	if err != nil || !managed.HasRole(domain.NodeRoleManagement) || !managed.ManagementPanelEnabled || managed.PendingManagementCommandID != "" {
+	if err != nil || !managed.HasRole(domain.NodeRoleManagement) || managed.ManagementPanelEnabled || managed.ManagementPanelStatus != "installed" || managed.PendingManagementCommandID != "" {
 		t.Fatalf("management panel acknowledgement was not persisted: node=%#v err=%v", managed, err)
 	}
 	tainted := jsonRequest(t, handler, http.MethodPut, "/api/v1/nodes/"+registered.Node.ID+"/taints", map[string]any{
@@ -936,7 +936,7 @@ func TestFlowRoutesRequireAdminAndBoundHistoryLimit(t *testing.T) {
 	}}}
 	handler := New(Config{AdminToken: "admin-test", Flows: reader, Access: access}).HTTPHandler()
 	for _, role := range []string{"viewer", "user", "operator", "builder", "admin"} {
-		token, err := access.CreateToken(context.Background(), role, role, time.Hour, domain.Principal{Subject: "root", Role: "admin", Permissions: []string{"*"}})
+		token, err := createTestSession(t, access, context.Background(), role, role, time.Hour, domain.Principal{Subject: "root", Role: "admin", Permissions: []string{"*"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1265,6 +1265,14 @@ func (manager *testAlertManager) Acknowledge(_ context.Context, id, actor string
 
 func (manager *testAlertManager) Subscribe(context.Context) <-chan domain.Alert {
 	return manager.updates
+}
+
+func (manager *testAlertManager) Ignore(_ context.Context, id, actor string, _ uint64) (domain.Alert, error) {
+	manager.acknowledgedID, manager.actor = id, actor
+	if manager.ackErr != nil {
+		return domain.Alert{}, manager.ackErr
+	}
+	return domain.Alert{ID: id, Status: domain.AlertStatusIgnored}, nil
 }
 
 type testTopologyReader struct {

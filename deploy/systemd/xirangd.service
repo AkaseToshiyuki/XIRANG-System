@@ -1,6 +1,6 @@
 [Unit]
 Description=XIRANG control plane
-After=network-online.target
+After=network-online.target time-sync.target
 Wants=network-online.target
 
 [Service]

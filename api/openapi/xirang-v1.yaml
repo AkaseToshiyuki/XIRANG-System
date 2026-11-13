@@ -1,13 +1,52 @@
 openapi: 3.1.0
 info:
   title: XIRANG Management API
-  version: 1.3.0
+  version: 1.4.1
   description: Multi-user cluster management, native-host observability, restricted discovery, resource-aware scheduling, administrator-curated job templates, shared storage, administrator terminals, native builds, RBAC, and recovery contract. The Web console and API share HTTPS port 8899 by default.
 servers:
   - url: /api/v1
 security:
   - managementBearer: []
 paths:
+  /network-paths:
+    get:
+      operationId: getRankedNetworkPaths
+      summary: Read fresh reciprocal network paths ordered by health, capacity and latency
+      description: Enrolled mTLS callers may read paths only from their own node. Administrators may supply a source node. The default target is the local controller. Addresses are transport endpoints; TLS and SSH identities remain unchanged. Capacity is a conservative negotiated line rate, not measured application throughput.
+      security:
+        - managementBearer: []
+        - nodeMTLS: []
+      parameters:
+        - { in: query, name: source, schema: { type: string } }
+        - { in: query, name: target, schema: { type: string } }
+      responses:
+        "200":
+          description: Current ranked paths, empty until reciprocal observations are available
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sourceNodeId, targetNodeId, paths]
+                properties:
+                  sourceNodeId: { type: string }
+                  targetNodeId: { type: string }
+                  paths:
+                    type: array
+                    maxItems: 16
+                    items:
+                      type: object
+                      required: [sourceAddress, targetAddress, sourceInterface, targetInterface, capacityBits, latencyMicros, expiresAt]
+                      properties:
+                        sourceAddress: { type: string }
+                        targetAddress: { type: string }
+                        sourceInterface: { type: string }
+                        targetInterface: { type: string }
+                        capacityBits: { type: integer, minimum: 0 }
+                        latencyMicros: { type: integer, minimum: 1 }
+                        expiresAt: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { description: Controller identity or topology unavailable }
   /metrics:
     get:
       operationId: getPrometheusMetrics
@@ -222,6 +261,30 @@ paths:
       responses:
         "200": { description: Twelve-hour local Web session issued }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /auth/token:
+    post:
+      security: []
+      operationId: exchangeAPIToken
+      summary: Consume an unused API token and issue a bounded console session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token: { type: string, minLength: 1, writeOnly: true }
+      responses:
+        "200":
+          description: Separate session capped by the token permissions and expiry, at most twelve hours
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedAPIToken" }
+        "400": { description: Invalid request }
+        "401": { description: Invalid, used, revoked, expired token or an existing session }
+        "429": { description: Too many credential attempts }
   /version:
     get:
       security: []
@@ -737,7 +800,7 @@ paths:
   /alerts:
     get:
       operationId: listAlerts
-      summary: List firing and acknowledged alerts, with optional resolved history
+      summary: List firing and acknowledged alerts, with optional resolved and ignored history
       parameters:
         - name: includeResolved
           in: query
@@ -774,10 +837,40 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: Alert is not firing }
+  /alerts/{alertId}/ignore:
+    parameters:
+      - name: alertId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: ignoreAlert
+      summary: Confirm and ignore the current incident without declaring it repaired
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [revision]
+              properties:
+                revision: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Ignored alert, excluded from active node alert severity until recovery or escalation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alert" }
+        "400": { description: Invalid request }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: Node-management permission required }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Alert state or revision has changed }
   /events/alerts:
     get:
       operationId: watchAlertEvents
-      summary: Stream alert firing, severity, acknowledgement, and resolution transitions
+      summary: Stream alert firing, severity, acknowledgement, ignore, and resolution transitions
       responses:
         "200":
           description: SSE stream with `alert` events containing the Alert schema
@@ -1321,6 +1414,36 @@ paths:
       summary: Legacy alias for unsharing while retaining the source directory and files
       responses:
         "204": { description: Shared space removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /shared-spaces/{spaceId}/quota:
+    parameters:
+      - name: spaceId
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: updateSharedSpaceQuota
+      summary: Set an administrator-managed filesystem project quota for a shared directory
+      description: Zero removes the capacity limit. A nonzero whole-KiB limit must not exceed current physical filesystem available space or be below allocated usage. Requires an upgraded source Agent and enabled ext4 or XFS project quotas. Unsupported or unconfirmed enforcement fails explicitly.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [quotaBytes]
+              properties:
+                quotaBytes: { type: integer, format: int64, minimum: 0, maximum: 1152921504606846976, multipleOf: 1024 }
+      responses:
+        "200":
+          description: Kernel limit applied and read back; independent source observation returned
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SharedSpace" }
+        "400": { description: Invalid capacity or unavailable filesystem quota enforcement }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -1960,6 +2083,7 @@ components:
           minItems: 1
           maxItems: 3
           items: { type: string, enum: [management, compute, storage] }
+        managementRole: { type: string, enum: [primary, backup] }
         managementAddress:
           type: string
           description: Administrator-reachable DNS name or IP address used for SSH operations.
@@ -2477,6 +2601,7 @@ components:
         permissions: { type: array, items: { type: string } }
     APIToken:
       type: object
+      description: Non-interactive tokens expire after their first successful authentication; interactive records represent independent sessions
       required: [id, name, role, subject, createdAt, expiresAt]
       properties:
         id: { type: string }
@@ -2487,6 +2612,9 @@ components:
         expiresAt: { type: string, format: date-time }
         lastUsedAt: { type: string, format: date-time }
         revokedAt: { type: string, format: date-time }
+        interactive: { type: boolean, default: false }
+        authMethod: { type: string, enum: [local_password, api_token] }
+        permissionCeiling: { type: array, items: { type: string } }
     CreatedAPIToken:
       type: object
       required: [token, secret]
@@ -2669,6 +2797,9 @@ components:
         desiredManagementPanel: { type: boolean }
         managementPanelEnabled: { type: boolean }
         managementPanelStatus: { type: string }
+        managementRole: { type: string, enum: [primary, backup] }
+        controllerActive: { type: boolean, readOnly: true }
+        controllerConfigured: { type: boolean, readOnly: true }
         os: { type: string }
         architecture: { type: string }
         distribution: { type: string }
@@ -2743,8 +2874,11 @@ components:
       required: [nodeId, status]
       properties:
         nodeId: { type: string }
-        status: { type: string, enum: [exported, mounted, available, failed] }
+        status: { type: string, enum: [exported, mounted, available, failed, unmount_failed, path_pending] }
         message: { type: string }
+        sourceAddress: { type: string }
+        clientAddress: { type: string }
+        networkInterface: { type: string }
     SharedSpace:
       type: object
       required: [id, name, sourceNodeId, sourcePath, mountPath, target, status, createdAt, updatedAt]
@@ -2768,6 +2902,11 @@ components:
         totalBytes: { type: integer, format: int64, minimum: 0 }
         capacityObservedAt: { type: string, format: date-time }
         capacityError: { type: string }
+        quotaBytes: { type: integer, format: int64, minimum: 0, description: Last acknowledged administrative limit; zero means unlimited. }
+        quotaStatus: { type: string, enum: [available, unlimited, enforced, unsupported, unknown] }
+        quotaEnforcedBytes: { type: integer, format: int64, minimum: 0, description: Current kernel hard limit from the source observation. }
+        quotaAllocatedBytes: { type: integer, format: int64, minimum: 0, description: Kernel project allocation including filesystem metadata; distinct from apparent file size. }
+        quotaError: { type: string }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
     SharedFile:
@@ -3114,7 +3253,7 @@ components:
         kind: { type: string, enum: [interface_health, job_storage, group_storage, node_storage] }
         sourceNodeId: { type: string }
         sourceInterface: { type: string }
-        status: { type: string, enum: [firing, acknowledged, resolved] }
+        status: { type: string, enum: [firing, acknowledged, ignored, resolved] }
         severity: { type: string, enum: [info, warning, critical] }
         observedHealth: { type: string, enum: [healthy, degraded, critical, unhealthy] }
         summary: { type: string }
@@ -3127,6 +3266,9 @@ components:
         firingAt: { type: string, format: date-time }
         healthySince: { type: string, format: date-time }
         acknowledgedAt: { type: string, format: date-time }
+        ignoredAt: { type: string, format: date-time }
+        ignoredBy: { type: string }
+        stateRevision: { type: integer, format: int64, description: Revision of the latest state transition; ordinary observations do not invalidate a confirmation }
         acknowledgedBy: { type: string }
         resolvedAt: { type: string, format: date-time }
         revision: { type: integer, format: int64, minimum: 1 }

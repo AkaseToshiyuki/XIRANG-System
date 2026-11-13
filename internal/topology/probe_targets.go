@@ -37,7 +37,7 @@ func (provider *ProbeTargetProvider) NetworkProbeTargets(ctx context.Context, ex
 	}
 	var targets []*xirangv1.NetworkProbeTarget
 	for _, node := range nodes {
-		if node.ID == excludeNodeID || node.Status == domain.NodeStatusRejected || node.Status == domain.NodeStatusPendingApproval {
+		if node.ID == excludeNodeID || node.RemovedAt != nil || node.CertificateRevokedAt != nil || node.Status == domain.NodeStatusRemoved || node.Status == domain.NodeStatusDiscovered || node.Status == domain.NodeStatusRejected || node.Status == domain.NodeStatusPendingApproval {
 			continue
 		}
 		inventory, err := provider.inventories.GetInventory(ctx, node.ID)

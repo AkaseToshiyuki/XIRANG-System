@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"reflect"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/xirang-grid/xirang/internal/enrollment"
 	"github.com/xirang-grid/xirang/internal/hosthealth"
 	"github.com/xirang-grid/xirang/internal/identity"
+	"github.com/xirang-grid/xirang/internal/networkhealth"
 	"github.com/xirang-grid/xirang/internal/scheduler"
 	"github.com/xirang-grid/xirang/internal/terminal"
 	"github.com/xirang-grid/xirang/pkg/version"
@@ -46,6 +48,7 @@ type FlowReader interface {
 type AlertManager interface {
 	List(context.Context, bool) ([]domain.Alert, error)
 	Acknowledge(context.Context, string, string) (domain.Alert, error)
+	Ignore(context.Context, string, string, uint64) (domain.Alert, error)
 	Subscribe(context.Context) <-chan domain.Alert
 }
 
@@ -168,6 +171,7 @@ type Config struct {
 	NodeEvents         *NodeEventBroker
 	Telemetry          TelemetryReader
 	Topology           TopologyReader
+	NetworkPaths       *networkhealth.Resolver
 	Flows              FlowReader
 	Alerts             AlertManager
 	Notifications      NotificationManager
@@ -199,6 +203,9 @@ func New(config Config) *Server {
 		logger = slog.Default()
 	}
 	mux := http.NewServeMux()
+	if config.NetworkPaths != nil {
+		registerNetworkPathRoutes(mux, config.NetworkPaths, config.Enrollment, config.AdminToken)
+	}
 	if config.HostHealth != nil {
 		registerHostHealthRoutes(mux, config.HostHealth, config.Enrollment, config.Commands, config.AdminToken)
 	}
@@ -448,6 +455,28 @@ func (s *Server) ListenAndServeTLS(certificateFile, keyFile string) error {
 func (s *Server) Shutdown(ctx context.Context) error { return s.httpServer.Shutdown(ctx) }
 
 func (s *Server) HTTPHandler() http.Handler { return s.httpServer.Handler }
+
+func (s *Server) Close() error { return s.httpServer.Close() }
+
+// ConfigureLifecycle must run before serving. The request guard prevents a
+// disconnected former leader from serving its stale cache, including Web UI.
+func (s *Server) ConfigureLifecycle(ctx context.Context, check func(context.Context) error) {
+	s.httpServer.BaseContext = func(net.Listener) context.Context { return ctx }
+	if check == nil {
+		return
+	}
+	handler := s.httpServer.Handler
+	s.httpServer.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bounded, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		err := check(bounded)
+		cancel()
+		if err != nil {
+			http.Error(w, "controller unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})
+}
 
 type createTokenRequest struct {
 	Name            string `json:"name"`

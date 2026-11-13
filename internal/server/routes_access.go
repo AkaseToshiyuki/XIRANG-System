@@ -83,6 +83,22 @@ func registerAccessRoutes(mux *http.ServeMux, service *identity.AccessService, j
 	mux.HandleFunc("GET /api/v1/access/me", requireAuthenticated(adminToken, func(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, http.StatusOK, requestPrincipal(request))
 	}))
+	mux.HandleFunc("POST /api/v1/auth/token", func(writer http.ResponseWriter, request *http.Request) {
+		var payload struct {
+			Token string `json:"token"`
+		}
+		if err := decodeJSON(writer, request, &payload); err != nil {
+			writeError(writer, err)
+			return
+		}
+		session, err := service.ExchangeToken(request.Context(), payload.Token)
+		if err != nil {
+			writeError(writer, err)
+			return
+		}
+		writer.Header().Set("Cache-Control", "no-store")
+		writeJSON(writer, http.StatusOK, session)
+	})
 	mux.HandleFunc("GET /api/v1/access/roles", requireAuthenticated(adminToken, func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]any{"items": service.Roles()})
 	}))

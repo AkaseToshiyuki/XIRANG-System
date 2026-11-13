@@ -69,15 +69,16 @@ func OpenOrCreate(directory string, serverHosts []string) (*Authority, error) {
 }
 
 // ServerCertificate returns the control-plane certificate, issuing a fresh one
-// when none is loaded or the current one is near expiry. Certificates used to
-// be issued only at process start, so a controller that stayed up beyond their
-// lifetime began serving an expired certificate and every agent, which verifies
-// the listener against this CA, lost its control stream until a restart.
+// when none is loaded, the current one is not yet valid, or it is near expiry.
+// Resolving the certificate per handshake lets live listeners recover from
+// expiry and backwards clock corrections without replacing the cluster CA.
 func (authority *Authority) ServerCertificate() (*tls.Certificate, error) {
 	authority.serverMu.Lock()
 	defer authority.serverMu.Unlock()
+	now := time.Now()
 	if authority.serverPair != nil && authority.serverPair.Leaf != nil &&
-		time.Now().Before(authority.serverPair.Leaf.NotAfter.Add(-serverCertificateRenewBefore)) {
+		!now.Before(authority.serverPair.Leaf.NotBefore) &&
+		now.Before(authority.serverPair.Leaf.NotAfter.Add(-serverCertificateRenewBefore)) {
 		return authority.serverPair, nil
 	}
 	if err := authority.issueServerCertificate(authority.serverHosts); err != nil {

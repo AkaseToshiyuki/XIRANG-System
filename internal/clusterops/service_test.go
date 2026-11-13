@@ -2,11 +2,13 @@ package clusterops
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/xirang-grid/xirang/internal/domain"
+	"github.com/xirang-grid/xirang/internal/mountcontrol"
 )
 
 type memoryRepository struct{ spaces map[string]domain.SharedSpace }
@@ -68,7 +70,94 @@ func (nodes *dynamicNodes) GetNode(ctx context.Context, id string) (domain.Node,
 }
 func (nodes *dynamicNodes) ListNodes(context.Context) ([]domain.Node, error) { return nodes.nodes, nil }
 
+type operationalNodes struct{ memoryNodes }
+
+func (nodes operationalNodes) ListNodes(context.Context) ([]domain.Node, error) {
+	var active []domain.Node
+	for _, node := range nodes.memoryNodes {
+		if node.RemovedAt == nil {
+			active = append(active, node)
+		}
+	}
+	return active, nil
+}
+
+func TestRetiredMountResultsDisappearWithoutUnmountingOrHidingOfflineCleanup(t *testing.T) {
+	for _, keepOffline := range []bool{false, true} {
+		t.Run(fmt.Sprint("offline=", keepOffline), func(t *testing.T) {
+			now := time.Now()
+			nodes := operationalNodes{memoryNodes{
+				{ID: "storage", Status: domain.NodeStatusReady, Roles: []domain.NodeRole{domain.NodeRoleStorage}, ManagementAddress: "10.0.0.1", SSHUser: "admin"},
+				{ID: "retired", Status: domain.NodeStatusRemoved, RemovedAt: &now},
+				{ID: "offline", Status: domain.NodeStatusOffline},
+			}}
+			space := domain.SharedSpace{ID: "share", SourceNodeID: "storage", SourcePath: "/shared/data", MountPath: "/shared/data", Target: domain.SharedSpaceNodes, TargetNodeIDs: []string{"storage"}, Status: "degraded", Results: []domain.SharedSpaceNodeResult{
+				{NodeID: "storage", Status: "exported"}, {NodeID: "storage", Status: "available"},
+				{NodeID: "retired", Status: "unmount_failed"},
+			}}
+			wantStatus, wantCount := "active", 2
+			if keepOffline {
+				space.Results = append(space.Results, domain.SharedSpaceNodeResult{NodeID: "offline", Status: "unmount_failed"}, domain.SharedSpaceNodeResult{NodeID: "unknown", Status: "unmount_failed"})
+				wantStatus, wantCount = "degraded", 4
+			}
+			repository := &memoryRepository{spaces: map[string]domain.SharedSpace{"share": space}}
+			runner := &recordedRunner{}
+			service := New(repository, nodes, runner)
+			listed, err := service.List(context.Background())
+			if err != nil || len(listed) != 1 || listed[0].Status != wantStatus || len(listed[0].Results) != wantCount {
+				t.Fatalf("operational view: %#v err=%v", listed, err)
+			}
+			if len(repository.spaces["share"].Results) != len(space.Results) {
+				t.Fatal("read path changed persisted state")
+			}
+			runner.calls = nil
+			if err := service.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			updated := repository.spaces["share"]
+			if updated.Status != wantStatus || len(updated.Results) != wantCount || len(runner.calls) != 0 {
+				t.Fatalf("reconcile: %#v calls=%#v", updated, runner.calls)
+			}
+			for _, result := range updated.Results {
+				if result.NodeID == "retired" {
+					t.Fatal("retired node retained in operational results")
+				}
+			}
+		})
+	}
+}
+
 type recordedRunner struct{ calls [][]string }
+
+func TestReconcileNewAgentMountDoesNotRequireSSH(t *testing.T) {
+	ctx := context.Background()
+	nodes := &dynamicNodes{nodes: []domain.Node{
+		{ID: "storage", Status: domain.NodeStatusReady, Roles: []domain.NodeRole{domain.NodeRoleManagement, domain.NodeRoleStorage}, ManagementAddress: "10.0.0.1", Capabilities: []string{mountcontrol.Capability}},
+	}}
+	repository := &memoryRepository{}
+	runner := &recordedRunner{}
+	service := New(repository, nodes, runner)
+	service.EnableDefault("/srv/shared", "/srv/shared")
+	if err := service.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Enrollment supplies an outbound authenticated control stream, without
+	// provisioning SSH keys, a sudo account, or an inbound management address.
+	nodes.nodes = append(nodes.nodes, domain.Node{ID: "new", Status: domain.NodeStatusReady, Capabilities: []string{mountcontrol.Capability}})
+	runner.calls = nil
+	if err := service.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	space := repository.spaces["share_default"]
+	if space.Status != "active" || len(runner.calls) != 1 || runner.calls[0][0] != "new" || runner.calls[0][1] != "mount" {
+		t.Fatalf("new Agent did not receive its mount: space=%+v calls=%v", space, runner.calls)
+	}
+	for _, result := range space.Results {
+		if result.Status == "failed" {
+			t.Fatalf("unexpected mount failure: %+v", result)
+		}
+	}
+}
 
 func (runner *recordedRunner) Run(_ context.Context, node domain.Node, arguments ...string) ([]byte, error) {
 	runner.calls = append(runner.calls, append([]string{node.ID}, arguments...))
@@ -76,6 +165,44 @@ func (runner *recordedRunner) Run(_ context.Context, node domain.Node, arguments
 		return []byte(`{"usedBytes":10,"availableBytes":90,"totalBytes":100}`), nil
 	}
 	return nil, nil
+}
+
+func TestDefaultShareCanBeRemovedOnlyWhenAutomaticDefaultIsDisabled(t *testing.T) {
+	for _, managed := range []bool{true, false} {
+		t.Run(fmt.Sprint("managed=", managed), func(t *testing.T) {
+			ctx := context.Background()
+			nodes := memoryNodes{{ID: "storage", Status: domain.NodeStatusReady,
+				Roles:             []domain.NodeRole{domain.NodeRoleManagement, domain.NodeRoleStorage},
+				ManagementAddress: "192.0.2.54", Capabilities: []string{mountcontrol.Capability}}}
+			old := domain.SharedSpace{ID: "share_default", Name: "XirangShare", SourceNodeID: "storage",
+				SourcePath: "/srv/xirang/XirangShare", MountPath: "/srv/xirang/XirangShare", Target: domain.SharedSpaceAll}
+			repository := &memoryRepository{spaces: map[string]domain.SharedSpace{old.ID: old}}
+			runner := &recordedRunner{}
+			service := New(repository, nodes, runner)
+			if managed {
+				service.EnableDefault(old.SourcePath, old.MountPath)
+			}
+			if err := service.Delete(ctx, old.ID); managed {
+				if err == nil || len(repository.spaces) != 1 || len(runner.calls) != 0 {
+					t.Fatal("managed default was removed or changed")
+				}
+			} else {
+				if err != nil || len(repository.spaces) != 0 || len(runner.calls) != 1 {
+					t.Fatalf("explicitly disabled default removal failed: %v calls=%v", err, runner.calls)
+				}
+				call := runner.calls[0]
+				if len(call) != 4 || call[1] != "unexport" || call[2] != old.ID || call[3] != old.SourcePath {
+					t.Fatalf("removal did more than unexport the original data: %v", call)
+				}
+			}
+			if err := service.Reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := repository.spaces[old.ID]; exists != managed {
+				t.Fatal("reconciliation recreated an explicitly disabled default")
+			}
+		})
+	}
 }
 
 func TestApplySharedSpaceSelectsGroupAndPersistsResults(t *testing.T) {

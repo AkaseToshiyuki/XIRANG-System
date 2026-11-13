@@ -5,10 +5,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +19,7 @@ import (
 
 	"github.com/xirang-grid/xirang/internal/domain"
 	"github.com/xirang-grid/xirang/internal/mountcontrol"
+	"github.com/xirang-grid/xirang/internal/networkhealth"
 )
 
 var ErrInvalid = errors.New("invalid shared-space request")
@@ -52,13 +53,20 @@ type Service struct {
 	defaultSourcePath string
 	defaultMountPath  string
 	storageQuotaFor   func(context.Context, domain.Principal) (int64, error)
+	paths             *networkhealth.Resolver
 }
 
+func (service *Service) EnableNetworkPaths(paths *networkhealth.Resolver) { service.paths = paths }
+
 type capacityObservation struct {
-	usedBytes      uint64
-	availableBytes uint64
-	totalBytes     uint64
-	observedAt     time.Time
+	usedBytes           uint64
+	availableBytes      uint64
+	totalBytes          uint64
+	observedAt          time.Time
+	quotaStatus         string
+	quotaEnforcedBytes  uint64
+	quotaAllocatedBytes uint64
+	quotaError          string
 }
 
 const capacityCacheTTL = 30 * time.Second
@@ -161,6 +169,10 @@ func (service *Service) List(ctx context.Context) ([]domain.SharedSpace, error) 
 	}
 	for index := range spaces {
 		spaces[index].FileOwners = nil
+		spaces[index].QuotaStatus = "unknown"
+		// Retirement keeps an identity for audit, but not an operational mount
+		// target. Also hide old persisted results before the next reconcile.
+		service.pruneRetiredTargets(ctx, &spaces[index])
 		if observation, ok := service.cachedCapacity(spaces[index].ID); ok {
 			applyCapacity(&spaces[index], observation)
 			continue
@@ -181,18 +193,10 @@ func (service *Service) List(ctx context.Context) ([]domain.SharedSpace, error) 
 			spaces[index].CapacityError = statsErr.Error()
 			continue
 		}
-		var capacity struct {
-			UsedBytes      uint64 `json:"usedBytes"`
-			AvailableBytes uint64 `json:"availableBytes"`
-			TotalBytes     uint64 `json:"totalBytes"`
-		}
-		if err := json.Unmarshal(output, &capacity); err != nil || capacity.TotalBytes == 0 {
+		observation, err := decodeSharedCapacity(output, service.now().UTC())
+		if err != nil {
 			spaces[index].CapacityError = "invalid capacity response"
 			continue
-		}
-		observation := capacityObservation{
-			usedBytes: capacity.UsedBytes, availableBytes: capacity.AvailableBytes,
-			totalBytes: capacity.TotalBytes, observedAt: service.now().UTC(),
 		}
 		service.storeCapacity(spaces[index].ID, observation)
 		applyCapacity(&spaces[index], observation)
@@ -230,6 +234,8 @@ func applyCapacity(space *domain.SharedSpace, observation capacityObservation) {
 	space.UsedBytes, space.AvailableBytes, space.TotalBytes =
 		observation.usedBytes, observation.availableBytes, observation.totalBytes
 	space.CapacityObservedAt = &observedAt
+	space.QuotaStatus, space.QuotaEnforcedBytes, space.QuotaAllocatedBytes, space.QuotaError =
+		observation.quotaStatus, observation.quotaEnforcedBytes, observation.quotaAllocatedBytes, observation.quotaError
 }
 
 func (service *Service) Apply(ctx context.Context, requested domain.SharedSpace) (domain.SharedSpace, error) {
@@ -275,6 +281,9 @@ func (service *Service) applyLocked(ctx context.Context, requested domain.Shared
 		return domain.SharedSpace{}, fmt.Errorf("%w: target selection is empty", ErrInvalid)
 	}
 	if requested.ID == "" {
+		if requested.QuotaBytes != 0 {
+			return domain.SharedSpace{}, fmt.Errorf("%w: create the shared space before setting its capacity limit", ErrInvalid)
+		}
 		requested.ID = "share_" + randomID()
 		requested.CreatedAt = service.now().UTC()
 		requested.FileOwners = map[string]domain.SharedFileOwner{}
@@ -294,7 +303,11 @@ func (service *Service) applyLocked(ctx context.Context, requested domain.Shared
 		requested.Results = current.Results
 		requested.Status = current.Status
 		requested.FileOwners = current.FileOwners
+		requested.QuotaBytes = current.QuotaBytes
 	}
+	// Capacity and enforcement are observations, never client-authored state.
+	requested.QuotaStatus, requested.QuotaError = "", ""
+	requested.QuotaEnforcedBytes, requested.QuotaAllocatedBytes = 0, 0
 	requested.UpdatedAt = service.now().UTC()
 	if err := service.repository.PutSharedSpace(ctx, requested); err != nil {
 		return domain.SharedSpace{}, err
@@ -386,6 +399,8 @@ func (service *Service) ensureDefaultLocked(ctx context.Context, nodes []domain.
 }
 
 func (service *Service) reconcileSpaceLocked(ctx context.Context, space domain.SharedSpace, nodes []domain.Node) (domain.SharedSpace, error) {
+	original := space
+	service.pruneRetiredTargets(ctx, &space)
 	source, err := service.nodes.GetNode(ctx, space.SourceNodeID)
 	if err != nil {
 		space.Status = "failed"
@@ -457,8 +472,33 @@ func (service *Service) reconcileSpaceLocked(ctx context.Context, space domain.S
 	}
 
 	for _, target := range desiredTargets {
+		// Rolling upgrades retain an older Agent's confirmed mount. It cannot
+		// acknowledge the new path-change contract until its capability appears.
+		if service.paths != nil && !slices.Contains(target.Capabilities, mountcontrol.PathCapability) {
+			if previous, ok := previousTargets[target.ID]; ok && (previous.Status == "mounted" || previous.Status == "available") {
+				results = append(results, previous)
+				continue
+			}
+		}
+		var selected *networkhealth.Path
+		var selectedPaths []networkhealth.Path
+		if service.paths != nil && target.ID != source.ID {
+			paths, pathErr := service.paths.Paths(ctx, target.ID, source.ID)
+			if pathErr != nil || len(paths) == 0 {
+				previous := previousTargets[target.ID]
+				previous.NodeID, previous.Status, previous.Message = target.ID, "path_pending", "waiting for a fresh reciprocal network path"
+				results = append(results, previous)
+				if status != "failed" {
+					status = "degraded"
+				}
+				continue
+			}
+			selected = &paths[0]
+			selectedPaths = paths
+		}
 		if previous, exists := previousTargets[target.ID]; exists &&
-			(previous.Status == "mounted" || previous.Status == "available") {
+			(previous.Status == "mounted" || previous.Status == "available") &&
+			(selected == nil || previous.SourceAddress == selected.TargetAddress && previous.ClientAddress == selected.SourceAddress && previous.NetworkInterface == selected.SourceInterface) {
 			results = append(results, previous)
 			continue
 		}
@@ -468,13 +508,33 @@ func (service *Service) reconcileSpaceLocked(ctx context.Context, space domain.S
 			result.Status, result.Message = "failed", "source export is unavailable"
 		case nodeNotOnline(target):
 			result.Status, result.Message = "failed", "node is offline or unreachable"
-		case target.ManagementAddress == "" || target.SSHUser == "":
-			result.Status, result.Message = "failed", "SSH access is not configured"
 		case target.ID == source.ID && space.SourcePath == space.MountPath:
 			result.Status = "available"
 		default:
-			if _, mountErr := service.runner.Run(ctx, target, "mount", space.ID, source.ManagementAddress, space.SourcePath, space.MountPath); mountErr != nil {
+			// Mount commands address the authenticated Agent by node ID. A
+			// compute node needs neither an SSH account nor an inbound address.
+			var mountErr error
+			if selected == nil {
+				_, mountErr = service.runner.Run(ctx, target, "mount", space.ID, source.ManagementAddress, space.SourcePath, space.MountPath)
+			} else {
+				for _, path := range selectedPaths {
+					_, mountErr = service.runner.Run(ctx, target, "repath", space.ID, path.TargetAddress, space.SourcePath, space.MountPath, path.SourceAddress, path.SourceInterface)
+					if mountErr == nil {
+						result.SourceAddress, result.ClientAddress, result.NetworkInterface = path.TargetAddress, path.SourceAddress, path.SourceInterface
+						break
+					}
+					// Only preflight failures permit trying another endpoint. Never
+					// repeat an operation whose mutation outcome is uncertain.
+					if !strings.Contains(mountErr.Error(), "selected shared path unavailable:") {
+						break
+					}
+				}
+			}
+			if mountErr != nil {
 				result.Status, result.Message = "failed", mountErr.Error()
+				if selected != nil {
+					result.SourceAddress, result.ClientAddress, result.NetworkInterface = "", "", ""
+				}
 			}
 		}
 		if result.Status == "failed" && status != "failed" {
@@ -482,11 +542,42 @@ func (service *Service) reconcileSpaceLocked(ctx context.Context, space domain.S
 		}
 		results = append(results, result)
 	}
-	if space.Status == status && sharedSpaceResultsEqual(space.Results, results) {
+	if original.Status == status && sharedSpaceResultsEqual(original.Results, results) {
 		return space, nil
 	}
 	space.Status, space.Results, space.UpdatedAt = status, results, service.now().UTC()
 	return space, service.repository.PutSharedSpace(ctx, space)
+}
+
+// Only a confirmed tombstone permits forgetting a mount result. An absent
+// list entry, a lookup error, or an offline host must retain pending cleanup.
+// This removes controller bookkeeping; it does not claim the retired host
+// was physically unmounted or that its files were deleted.
+func (service *Service) pruneRetiredTargets(ctx context.Context, space *domain.SharedSpace) {
+	results := make([]domain.SharedSpaceNodeResult, 0, len(space.Results))
+	removed := false
+	for _, result := range space.Results {
+		if result.NodeID != space.SourceNodeID {
+			node, err := service.nodes.GetNode(ctx, result.NodeID)
+			if err == nil && (node.RemovedAt != nil || node.Status == domain.NodeStatusRemoved) {
+				removed = true
+				continue
+			}
+		}
+		results = append(results, result)
+	}
+	if !removed {
+		return
+	}
+	space.Results = results
+	if space.Status == "degraded" {
+		for _, result := range results {
+			if result.Status == "failed" || result.Status == "unmount_failed" {
+				return
+			}
+		}
+		space.Status = "active"
+	}
 }
 
 func sharedSpaceResultsEqual(left, right []domain.SharedSpaceNodeResult) bool {
@@ -504,7 +595,7 @@ func sharedSpaceResultsEqual(left, right []domain.SharedSpaceNodeResult) bool {
 func (service *Service) Delete(ctx context.Context, id string) error {
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	if id == "share_default" {
+	if id == "share_default" && safePath(service.defaultSourcePath) && safePath(service.defaultMountPath) {
 		return fmt.Errorf("%w: the default shared space cannot be deleted", ErrInvalid)
 	}
 	space, err := service.repository.GetSharedSpace(ctx, id)
@@ -564,6 +655,7 @@ func nodeByID(nodes []domain.Node, id string) (domain.Node, bool) {
 type SSHRunner struct {
 	KeyPath        string
 	KnownHostsPath string
+	Paths          *networkhealth.Resolver
 }
 
 func (runner SSHRunner) Run(ctx context.Context, node domain.Node, arguments ...string) ([]byte, error) {
@@ -580,11 +672,38 @@ func (runner SSHRunner) RunStream(ctx context.Context, node domain.Node, input i
 	}
 	remote := []string{"sudo", "-n", "/usr/local/bin/xirang-agent", "mount-helper"}
 	remote = append(remote, arguments...)
+	address := node.ManagementAddress
+	var routeArgs []string
+	if runner.Paths != nil {
+		paths, err := runner.Paths.Paths(ctx, "", node.ID)
+		if err != nil {
+			return fmt.Errorf("select file transfer network path: %w", err)
+		}
+		for _, path := range paths {
+			if networkhealth.CheckRoute(ctx, path) != nil {
+				continue
+			}
+			dialer := net.Dialer{Timeout: 2 * time.Second, LocalAddr: &net.TCPAddr{IP: net.ParseIP(path.SourceAddress)}}
+			connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(path.TargetAddress, "22"))
+			if err != nil {
+				continue
+			}
+			connection.Close()
+			address = path.TargetAddress
+			// Preserve the known host identity when its transport IP changes.
+			routeArgs = []string{"-b", path.SourceAddress, "-o", "HostKeyAlias=" + node.ManagementAddress, "-o", "StrictHostKeyChecking=yes"}
+			break
+		}
+		if len(paths) > 0 && len(routeArgs) == 0 {
+			return errors.New("no observed file transfer path is currently reachable")
+		}
+	}
 	commandArguments := []string{
 		"-i", runner.KeyPath, "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
 		"-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=" + runner.KnownHostsPath,
-		node.SSHUser + "@" + node.ManagementAddress,
 	}
+	commandArguments = append(routeArgs, commandArguments...)
+	commandArguments = append(commandArguments, node.SSHUser+"@"+address)
 	commandArguments = append(commandArguments, remote...)
 	command := exec.CommandContext(ctx, "ssh", commandArguments...)
 	command.Stdin = input

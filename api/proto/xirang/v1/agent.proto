@@ -583,6 +583,8 @@ message SharedMountOperation {
     ACTION_UNEXPORT = 3;
     ACTION_MOUNT = 4;
     ACTION_UNMOUNT = 5;
+    ACTION_QUOTA_SET = 6;
+    ACTION_REPATH = 7;
   }
   string operation_id = 1;
   Action action = 2;
@@ -591,6 +593,9 @@ message SharedMountOperation {
   string source_path = 5;
   string mount_path = 6;
   google.protobuf.Timestamp expires_at = 7;
+  uint64 quota_bytes = 8;
+  string client_address = 9;
+  string client_interface = 10;
 }
 
 message SharedMountResult {

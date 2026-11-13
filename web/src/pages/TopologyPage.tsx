@@ -88,7 +88,6 @@ export function TopologyPage({ token }: { token: string }) {
       }
     }
   }, [links]);
-  const positions = useMemo(() => layoutNodes(nodes), [nodes]);
   const selectedNode = selection?.kind === "node" ? nodes.find((node) => node.id === selection.id) ?? null : null;
   const selectedLink = selection?.kind === "link" ? links.find((link) => link.id === selection.id) ?? null : null;
   const readyNodes = nodes.filter((node) => node.status === "ready").length;
@@ -112,28 +111,7 @@ export function TopologyPage({ token }: { token: string }) {
       <div className="topology-workspace">
         <div className="topology-stage">
           <div className="graph-toolbar graph-toolbar--managed"><span><i className="graph-key graph-key--healthy" />{t("连接正常", "Healthy")}</span><span><i className="graph-key graph-key--attention" />{t("节点受限", "Node restricted")}</span><span><i className="graph-key graph-key--offline" />{t("连接不可用", "Unavailable")}</span><small>{t("选择连接可查看两个方向对应的节点与速率", "Select a link to inspect both directions and rates")}</small></div>
-          <svg className="topology-graph" viewBox="0 0 960 540" role="group" aria-label={t("XIRANG 节点网络拓扑", "XIRANG node network topology")}>
-            {links.map((link) => {
-              const source = positions[link.source.id], target = positions[link.target.id];
-              const midpoint = { x: (source.x + target.x) / 2, y: (source.y + target.y) / 2 };
-              return <g key={link.id} className={selectedLink?.id === link.id ? "graph-edge-group selected" : "graph-edge-group"} role="button" tabIndex={0} aria-label={`${t(`连接：${link.source.name} ↔ ${link.target.name}`, `Link: ${link.source.name} ↔ ${link.target.name}`)} ↑ ${formatLinkRate(link, link.forwardBits, t)} · ↓ ${formatLinkRate(link, link.reverseBits, t)} ${negotiatedLabel(link, t, t("协商", "Negotiated"))}${link.fallback === "none" ? "" : ` ${link.fallback === "active" ? t("主链路失效", "Primary link failed") : fallbackAvailableLabel(link.fallbackInterfaces.length, t)}`}`} aria-pressed={selectedLink?.id === link.id} onClick={() => setSelection({ kind: "link", id: link.id })} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelection({ kind: "link", id: link.id }); } }}>
-                <line className="graph-edge-hitbox" x1={source.x} y1={source.y} x2={target.x} y2={target.y} />
-                <line className={`graph-edge graph-edge--managed graph-edge--managed-${link.health}`} style={{ strokeWidth: edgeStrokeWidth((link.forwardBits ?? 0) + (link.reverseBits ?? 0)) }} x1={source.x} y1={source.y} x2={target.x} y2={target.y} />
-                <text className="graph-link-rate" x={midpoint.x} y={midpoint.y - 15} textAnchor="middle">↑ {formatLinkRate(link, link.forwardBits, t)} · ↓ {formatLinkRate(link, link.reverseBits, t)}</text>
-                <text className="graph-link-capacity" x={midpoint.x} y={midpoint.y + 3} textAnchor="middle">{negotiatedLabel(link, t, t("协商", "Negotiated"))}</text>
-                {link.fallback !== "none" && <text className={`graph-link-fallback graph-link-fallback--${link.fallback}`} x={midpoint.x} y={midpoint.y + 20} textAnchor="middle">{link.fallback === "active" ? t("主链路失效", "Primary link failed") : fallbackAvailableLabel(link.fallbackInterfaces.length, t)}</text>}
-              </g>;
-            })}
-            {nodes.map((node) => {
-              const position = positions[node.id];
-              const management = effectiveRoles(node).includes("management");
-              return <g className={`graph-vertex graph-vertex--managed graph-vertex--state-${nodeVisualState(node)}${selectedNode?.id === node.id ? " selected" : ""}`} key={node.id} transform={`translate(${position.x} ${position.y})`} role="button" tabIndex={0} aria-label={`${management ? "CTRL" : "NODE"} ${node.name} ${roleText(node, t)}`} aria-pressed={selectedNode?.id === node.id} onClick={() => setSelection({ kind: "node", id: node.id })} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelection({ kind: "node", id: node.id }); } }}>
-                <circle className="graph-vertex-halo" r="39" /><circle r="27" /><text textAnchor="middle" y="3">{management ? "CTRL" : "NODE"}</text>
-                <text className="graph-label" textAnchor="middle" y="48">{node.name}</text>
-                <text className="graph-node-rate" textAnchor="middle" y="61">{roleText(node, t)}</text>
-              </g>;
-            })}
-          </svg>
+          <NodeTopologyGraph nodes={nodes} links={links} selection={selection} onSelect={setSelection} />
           <div className="graph-footnote"><span>{t(`${nodes.length} 个已加入节点`, `${nodes.length} enrolled nodes`)}</span><span>{lastRefreshedAt ? `${t("更新于", "Updated at")} ${clockTime(lastRefreshedAt)}` : t("等待更新", "Waiting for update")}</span></div>
         </div>
         <TopologyInspector node={selectedNode} link={selectedLink} rate={selectedNode ? rates[selectedNode.id] : undefined} t={t} />
@@ -149,6 +127,38 @@ export function TopologyPage({ token }: { token: string }) {
   </section>;
 }
 
+export function NodeTopologyGraph({ nodes, links, selection = null, onSelect, compact = false }: {
+  nodes: ClusterNode[]; links: ManagedLink[]; selection?: Selection;
+  onSelect: (selection: NonNullable<Selection>) => void; compact?: boolean;
+}) {
+  const { t } = usePreferences();
+  const positions = useMemo(() => layoutNodes(nodes, compact), [nodes, compact]);
+  const selectedNode = selection?.kind === "node" ? nodes.find((node) => node.id === selection.id) : null;
+  const selectedLink = selection?.kind === "link" ? links.find((link) => link.id === selection.id) : null;
+  return <svg className={`topology-graph${compact ? " topology-graph--compact" : ""}`} viewBox={compact ? "0 0 640 320" : "0 0 960 540"} role="group" aria-label={t("XIRANG 节点网络拓扑", "XIRANG node network topology")}>
+            {links.map((link) => {
+              const source = positions[link.source.id], target = positions[link.target.id];
+              const midpoint = { x: (source.x + target.x) / 2, y: (source.y + target.y) / 2 };
+              return <g key={link.id} className={selectedLink?.id === link.id ? "graph-edge-group selected" : "graph-edge-group"} role="button" tabIndex={0} aria-label={`${t(`连接：${link.source.name} ↔ ${link.target.name}`, `Link: ${link.source.name} ↔ ${link.target.name}`)} ↑ ${formatLinkRate(link, link.forwardBits, t)} · ↓ ${formatLinkRate(link, link.reverseBits, t)} ${negotiatedLabel(link, t, t("协商", "Negotiated"))}${link.fallback === "none" ? "" : ` ${link.fallback === "active" ? t("主链路失效", "Primary link failed") : fallbackAvailableLabel(link.fallbackInterfaces.length, t)}`}`} aria-pressed={selectedLink?.id === link.id} onClick={() => onSelect({ kind: "link", id: link.id })} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect({ kind: "link", id: link.id }); } }}>
+                <line className="graph-edge-hitbox" x1={source.x} y1={source.y} x2={target.x} y2={target.y} />
+                <line className={`graph-edge graph-edge--managed graph-edge--managed-${link.health}`} style={{ strokeWidth: edgeStrokeWidth((link.forwardBits ?? 0) + (link.reverseBits ?? 0)) }} x1={source.x} y1={source.y} x2={target.x} y2={target.y} />
+                <text className="graph-link-rate" x={midpoint.x} y={midpoint.y - 15} textAnchor="middle">↑ {formatLinkRate(link, link.forwardBits, t)} · ↓ {formatLinkRate(link, link.reverseBits, t)}</text>
+                <text className="graph-link-capacity" x={midpoint.x} y={midpoint.y + 3} textAnchor="middle">{negotiatedLabel(link, t, t("协商", "Negotiated"))}</text>
+                {link.fallback !== "none" && <text className={`graph-link-fallback graph-link-fallback--${link.fallback}`} x={midpoint.x} y={midpoint.y + 20} textAnchor="middle">{link.fallback === "active" ? t("主链路失效", "Primary link failed") : fallbackAvailableLabel(link.fallbackInterfaces.length, t)}</text>}
+              </g>;
+            })}
+            {nodes.map((node) => {
+              const position = positions[node.id];
+              const management = effectiveRoles(node).includes("management");
+              return <g className={`graph-vertex graph-vertex--managed graph-vertex--state-${nodeVisualState(node)}${selectedNode?.id === node.id ? " selected" : ""}`} key={node.id} transform={`translate(${position.x} ${position.y})`} role="button" tabIndex={0} aria-label={`${management ? "CTRL" : "NODE"} ${node.name} ${roleText(node, t)}`} aria-pressed={selectedNode?.id === node.id} onClick={() => onSelect({ kind: "node", id: node.id })} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect({ kind: "node", id: node.id }); } }}>
+                <title>{node.name} · {roleText(node, t)}</title><circle className="graph-vertex-halo" r="39" /><circle r="27" /><text textAnchor="middle" y="3">{management ? "CTRL" : "NODE"}</text>
+                <text className="graph-label" textAnchor="middle" y="48">{compact && node.name.length > 27 ? `${node.name.slice(0, 24)}…` : node.name}</text>
+                <text className="graph-node-rate" textAnchor="middle" y="61">{roleText(node, t)}</text>
+              </g>;
+            })}
+          </svg>;
+}
+
 function TopologyInspector({ node, link, rate, t }: { node: ClusterNode | null; link: ManagedLink | null; rate?: NodeRate; t: (zh: string, en: string) => string }) {
   if (link) return <aside className="topology-inspector"><span className="eyebrow">{t("连接详情", "Link details")}</span><h2>{link.source.name} ↔ {link.target.name}</h2><div className={`health-badge health-badge--managed-${link.health}`}><i />{linkHealthLabel(link.health, t)}</div><dl>
     <div><dt>{link.source.name} → {link.target.name}</dt><dd>{formatLinkRate(link, link.forwardBits, t)}</dd></div><div><dt>{link.target.name} → {link.source.name}</dt><dd>{formatLinkRate(link, link.reverseBits, t)}</dd></div>
@@ -156,7 +166,7 @@ function TopologyInspector({ node, link, rate, t }: { node: ClusterNode | null; 
     <div><dt>{t("Ping 延迟", "Ping latency")}</dt><dd>{link.health === "offline" ? unavailableLabel(t) : formatLatency(link.latencyMicros, t)}</dd></div>
     <div><dt>Fallback</dt><dd>{fallbackLabel(link, t)}</dd></div><div><dt>{t("备用接口", "Fallback interfaces")}</dt><dd>{link.fallbackInterfaces.join(t("、", ", ")) || t("无", "None")}</dd></div>
     <div><dt>{t("最新采样", "Latest sample")}</dt><dd>{link.observedAt ? relativeTime(link.observedAt) : t("等待遥测", "Waiting for telemetry")}</dd></div>
-  </dl><p>{t("链路由两端内核路由或邻居证据验证；双向速率来自两端接口连续采样，协商速率来自网卡报告值。", "Links are verified by routing or neighbor evidence at both endpoints. Bidirectional rates come from consecutive interface samples and negotiated rates from NIC reports.")}</p></aside>;
+  </dl></aside>;
   if (node) return <aside className="topology-inspector"><span className="eyebrow">{t("节点详情", "Node details")}</span><h2>{node.name}</h2><div className={`vertex-kind vertex-kind--managed-${nodeVisualState(node)}`}>{node.status}</div><dl>
     <div><dt>{t("角色", "Roles")}</dt><dd>{roleText(node, t)}</dd></div><div><dt>{t("架构", "Architecture")}</dt><dd>{node.architecture}</dd></div><div><dt>{t("接收速率", "Receive rate")}</dt><dd>{nodeAccessUnavailable(node) ? unavailableLabel(t) : formatRate(rate?.receivedBits, t)}</dd></div><div><dt>{t("发送速率", "Transmit rate")}</dt><dd>{nodeAccessUnavailable(node) ? unavailableLabel(t) : formatRate(rate?.transmittedBits, t)}</dd></div><div><dt>{t("最后在线", "Last seen")}</dt><dd>{relativeTime(node.lastSeenAt)}</dd></div>
   </dl></aside>;
@@ -413,16 +423,17 @@ function nodeAccessUnavailable(node: ClusterNode) { return ["offline", "unreacha
 function linkHealth(source: ClusterNode, target: ClusterNode): ManagedLink["health"] { return nodeAccessUnavailable(source) || nodeAccessUnavailable(target) ? "offline" : source.status === "ready" && target.status === "ready" ? "healthy" : "attention"; }
 function nodeVisualState(node: ClusterNode): "ready" | "attention" | "offline" { return nodeAccessUnavailable(node) ? "offline" : node.status === "ready" ? "ready" : "attention"; }
 function linkHealthLabel(health: ManagedLink["health"], t: (zh: string, en: string) => string) { return t(health === "healthy" ? "连接正常" : health === "attention" ? "节点受限" : "连接不可用", health === "healthy" ? "Healthy" : health === "attention" ? "Node restricted" : "Unavailable"); }
-function layoutNodes(nodes: ClusterNode[]): Record<string, Position> {
+function layoutNodes(nodes: ClusterNode[], compact = false): Record<string, Position> {
   const result: Record<string, Position> = {};
   if (!nodes.length) return result;
+  const center = compact ? { x: 320, y: 150 } : { x: 480, y: 270 };
   if (nodes.length === 1) {
-    result[nodes[0].id] = { x: 480, y: 270 };
+    result[nodes[0].id] = center;
     return result;
   }
   nodes.forEach((node, index) => {
-    const angle = index / nodes.length * Math.PI * 2 - Math.PI / 2;
-    result[node.id] = { x: 480 + Math.cos(angle) * 285, y: 270 + Math.sin(angle) * 185 };
+    const angle = index / nodes.length * Math.PI * 2 - (compact && nodes.length === 2 ? Math.PI : Math.PI / 2);
+    result[node.id] = { x: center.x + Math.cos(angle) * (compact ? 205 : 285), y: center.y + Math.sin(angle) * (compact ? 88 : 185) };
   });
   return result;
 }

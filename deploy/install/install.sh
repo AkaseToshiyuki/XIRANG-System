@@ -136,6 +136,19 @@ if [ -d "${SOURCE_DIR}/deploy/config" ]; then
 fi
 
 if [ -z "${DESTDIR}" ] && [ "$(id -u)" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
+    # time-sync.target orders consumers only when a provider delays the target.
+    # Do not start this wait here: an explicitly offline staged install may not
+    # have NTP access yet. The enabled unit waits on subsequent system boots.
+    if systemctl is-active --quiet systemd-timesyncd.service && \
+       systemctl cat systemd-time-wait-sync.service >/dev/null 2>&1; then
+        systemctl enable systemd-time-wait-sync.service
+    fi
+    # Fail before enrolling/starting an Agent with missing NFS tools or a
+    # privileged executable below a user-writable directory. Custom software
+    # locations need a protected root-owned runtime for the system service.
+    if [ -d /run/systemd/system ]; then
+        "${PREFIX}/bin/xirang-agent" mount-check
+    fi
     "${PREFIX}/bin/xirang-agent" mount-helper policy-authorize default-share /srv/xirang/XirangShare
     if [ -f /etc/fstab ]; then
         awk '/# xirang:[A-Za-z0-9_-]+$/ { id=$NF; sub(/^xirang:/, "", id); print id, $2 }' /etc/fstab |
@@ -165,8 +178,8 @@ if [ -z "${DESTDIR}" ] && [ "$(id -u)" -eq 0 ] && [ -t 0 ] && [ "${XIRANG_NONINT
             esac
             umask 027
             {
-                printf "XIRANGD_ARGS=\"-tls-host=%s -agent-listen=%s:8444 -discovery-controller-url=https://%s:8899\"\n" \
-                    "${controller_ip}" "${controller_host}" "${controller_host}"
+                printf "XIRANGD_ARGS=\"-tls-host=%s -agent-listen=:8444 -discovery-controller-url=https://%s:8899\"\n" \
+                    "${controller_ip}" "${controller_host}"
             } > /etc/xirang/xirangd.env
             chmod 0640 /etc/xirang/xirangd.env
             if command -v systemctl >/dev/null 2>&1; then

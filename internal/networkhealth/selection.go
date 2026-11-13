@@ -37,7 +37,7 @@ func SelectParallelPaths(edges []domain.TopologyEdge) []domain.NetworkPathSelect
 	for key, observed := range groups {
 		physical := make(map[string][]domain.TopologyEdge)
 		for _, edge := range observed {
-			if edge.Health == "critical" {
+			if edge.Health == "critical" || edge.Health == "stale" {
 				continue
 			}
 			physical[physicalLinkKey(edge)] = append(physical[physicalLinkKey(edge)], edge)
@@ -82,14 +82,39 @@ func combinePhysicalDirections(key string, links []domain.TopologyEdge) (pathCan
 		addressPairs[addressPairKey(link)] = append(addressPairs[addressPairKey(link)], link)
 	}
 	var best pathCandidate
-	found := false
+	candidates := make([]pathCandidate, 0, len(addressPairs))
 	for _, observations := range addressPairs {
 		candidate, ok := combineDirections(key, observations)
-		if ok && (!found || betterCandidate(candidate, best)) {
-			best, found = candidate, true
+		if ok {
+			if len(candidates) == 0 || betterCandidate(candidate, best) {
+				best = candidate
+			}
+			candidates = append(candidates, candidate)
 		}
 	}
-	return best, found
+	// Sub-millisecond probe variation on a single interface pair must not tear
+	// down a healthy stream or remount NFS every time another alias wins.
+	// Anchor the tolerance to the actual fastest sample, independent of map order.
+	fastest := best.latency
+	for _, candidate := range candidates {
+		if best.bidirectional && candidate.bidirectional && candidate.capacity == best.capacity &&
+			healthRank(candidate.health) == healthRank(best.health) && candidate.latency-fastest <= 250 &&
+			stableAliasLess(candidate.forward, best.forward) {
+			best = candidate
+		}
+	}
+	return best, len(candidates) > 0
+}
+
+// Prefer a verified IPv4 pair over equally usable IPv6 privacy aliases, then
+// use a stable endpoint order within the family. Every candidate is reciprocal.
+func stableAliasLess(a, b domain.TopologyEdge) bool {
+	a4 := !strings.Contains(a.SourceAddress, ":")
+	b4 := !strings.Contains(b.SourceAddress, ":")
+	if a4 != b4 {
+		return a4
+	}
+	return addressPairKey(a) < addressPairKey(b)
 }
 
 func combineDirections(key string, links []domain.TopologyEdge) (pathCandidate, bool) {

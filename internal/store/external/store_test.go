@@ -77,6 +77,7 @@ func TestExternalStateLeadershipAndTakeoverPreserveControlState(t *testing.T) {
 type fakePostgreSQL struct {
 	mu                 sync.Mutex
 	locked             bool
+	failWrite          bool
 	image, imageSHA256 []byte
 	namespace          string
 	schemaVersion      int64
@@ -104,6 +105,9 @@ func (connection *fakeConnection) ExecContext(_ context.Context, query string, a
 	connection.state.mu.Lock()
 	defer connection.state.mu.Unlock()
 	if strings.Contains(query, "INSERT INTO xirang_control_state") {
+		if connection.state.failWrite {
+			return nil, errors.New("injected database write failure")
+		}
 		connection.state.namespace = arguments[0].Value.(string)
 		connection.state.schemaVersion = 1
 		connection.state.image = append([]byte(nil), arguments[1].Value.([]byte)...)
@@ -113,10 +117,61 @@ func (connection *fakeConnection) ExecContext(_ context.Context, query string, a
 	return driver.RowsAffected(1), nil
 }
 
+func TestFailedPersistenceFencesUntilCommittedStateIsReloaded(t *testing.T) {
+	const driverName = "xirang-external-fenced-state-test"
+	state := &fakePostgreSQL{}
+	sql.Register(driverName, fakeDriver{state: state})
+	config := Config{DSN: "postgresql://localhost/xirang?sslmode=disable", Namespace: "test", CachePath: t.TempDir() + "/state.db", driver: driverName}
+	active, err := Open(context.Background(), config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if active != nil {
+			_ = active.Close()
+		}
+	}()
+	ctx := context.Background()
+	if err := active.PutQueuePolicy(ctx, domain.QueuePolicy{Name: "committed", Weight: 7}); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	state.failWrite = true
+	state.mu.Unlock()
+	if err := active.PutQueuePolicy(ctx, domain.QueuePolicy{Name: "failed", Weight: 3}); err == nil {
+		t.Fatal("failed write was acknowledged")
+	}
+	state.mu.Lock()
+	state.failWrite = false
+	state.mu.Unlock()
+	if !errors.Is(active.CheckLeadership(ctx), ErrLeadershipLost) {
+		t.Fatal("failed writer became ready without reloading")
+	}
+	if !errors.Is(active.PutQueuePolicy(ctx, domain.QueuePolicy{Name: "later", Weight: 2}), ErrLeadershipLost) {
+		t.Fatal("fenced writer persisted cached state")
+	}
+	if err := active.Close(); err != nil {
+		t.Fatal(err)
+	}
+	active = nil
+	config.CachePath = t.TempDir() + "/restored.db"
+	restored, err := Open(ctx, config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	policies, err := restored.ListQueuePolicies(ctx)
+	if err != nil || len(policies) != 1 || policies[0].Name != "committed" {
+		t.Fatalf("reload included uncommitted changes: %#v, %v", policies, err)
+	}
+}
+
 func (connection *fakeConnection) QueryContext(_ context.Context, query string, arguments []driver.NamedValue) (driver.Rows, error) {
 	connection.state.mu.Lock()
 	defer connection.state.mu.Unlock()
 	switch {
+	case strings.Contains(query, "to_regclass"):
+		return &fakeRows{columns: []string{"exists"}, values: [][]driver.Value{{false}}}, nil
 	case strings.Contains(query, "pg_try_advisory_lock"):
 		acquired := !connection.state.locked
 		if acquired {

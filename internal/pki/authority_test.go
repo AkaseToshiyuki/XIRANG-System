@@ -126,3 +126,62 @@ func TestTLSConfigResolvesTheCertificatePerHandshake(t *testing.T) {
 		t.Fatalf("GetCertificate did not return a usable certificate: %v", err)
 	}
 }
+
+func TestServerCertificateRecoversAfterClockMovesBackwards(t *testing.T) {
+	authority, err := OpenOrCreate(t.TempDir(), []string{"controller.example", "10.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := authority.ServerCertificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Build a real CA-signed certificate for a clock seven hours ahead. The
+	// standard X.509 verifier must reject its DER at the corrected time; merely
+	// editing cached Leaf metadata would not reproduce the client failure.
+	future := *original.Leaf
+	future.NotBefore = time.Now().Add(7 * time.Hour)
+	future.NotAfter = future.NotBefore.Add(serverCertificateLifetime)
+	der, err := x509.CreateCertificate(rand.Reader, &future, authority.certificate,
+		original.Leaf.PublicKey, authority.privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(authority.certificate)
+	options := x509.VerifyOptions{Roots: roots, DNSName: "controller.example", CurrentTime: time.Now()}
+	if _, err := leaf.Verify(options); err == nil {
+		t.Fatal("test certificate must fail verification before its validity window")
+	}
+	cached := *original
+	cached.Certificate = [][]byte{der}
+	cached.Leaf = leaf
+	authority.serverMu.Lock()
+	authority.serverPair = &cached
+	authority.serverMu.Unlock()
+	config, err := authority.TLSConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewed, err := config.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedLeaf, err := x509.ParseCertificate(renewed.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifiedLeaf.Verify(options); err != nil {
+		t.Fatalf("reissued certificate does not verify against the original CA: %v", err)
+	}
+	if err := verifiedLeaf.VerifyHostname("10.0.0.1"); err != nil {
+		t.Fatalf("reissued certificate lost its IP identity: %v", err)
+	}
+	if verifiedLeaf.SerialNumber.Cmp(leaf.SerialNumber) == 0 {
+		t.Fatal("future-dated certificate was reused after the clock correction")
+	}
+}

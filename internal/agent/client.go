@@ -412,11 +412,14 @@ func bootstrapHTTPClient(caFile string) (*http.Client, error) {
 }
 
 func authenticatedHTTPClient(directory string, state State) (*http.Client, error) {
+	if _, err := validateServerURL(state.ServerURL); err != nil {
+		return nil, err
+	}
 	tlsConfig, err := authenticatedTLSConfig(directory, state)
 	if err != nil {
 		return nil, err
 	}
-	return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsConfig}}, nil
+	return &http.Client{Timeout: 10 * time.Second, Transport: controllerHTTPTransport(directory, state, tlsConfig)}, nil
 }
 
 func authenticatedTLSConfig(directory string, state State) (*tls.Config, error) {

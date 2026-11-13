@@ -1,13 +1,13 @@
 [Unit]
 Description=XIRANG node agent
-After=network-online.target
+After=network-online.target time-sync.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
 EnvironmentFile=-/etc/xirang/xirang-agent.env
-ExecStart=/usr/local/bin/xirang-agent run --state-dir=/var/lib/xirang-agent --executor-task-user=xirang-task --executor-task-dir=/var/lib/xirang-tasks --executor-cgroup-root=auto --terminal-user=xirang-operator $XIRANG_AGENT_ARGS
+ExecStart=/usr/local/bin/xirang-agent run --state-dir=/var/lib/xirang-agent --executor-task-user=xirang-task --executor-task-dir=/var/lib/xirang-tasks --executor-cgroup-root=auto --terminal-user=xirang-operator --shared-mount-control $XIRANG_AGENT_ARGS
 Restart=always
 RestartSec=5s
 UMask=0077

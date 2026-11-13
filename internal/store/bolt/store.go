@@ -252,7 +252,11 @@ func (store *Store) UpdateNode(ctx context.Context, id string, update func(*doma
 		if err := json.Unmarshal(encoded, &record); err != nil {
 			return err
 		}
+		previous := record.Node
 		if err := update(&record.Node); err != nil {
+			return err
+		}
+		if err := validateManagementAssignment(bucket, previous, &record.Node); err != nil {
 			return err
 		}
 		record.Node.Revision++

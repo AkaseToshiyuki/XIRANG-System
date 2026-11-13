@@ -82,6 +82,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+	case "mount-check":
+		if err := agent.CheckSharedMountControl(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("Shared mount preflight passed")
 	case "__xirang-shared-mount":
 		if err := agent.RunHostSharedMount(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)

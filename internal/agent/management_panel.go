@@ -14,7 +14,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,11 +22,8 @@ import (
 	"time"
 )
 
-const managementPanelListenAddress = "0.0.0.0:8899"
-
-// ManagementPanel relays the enrolled controller's Web/API surface from a
-// node that has the management role. It deliberately has no configurable
-// upstream: the Agent identity fixes the only controller it may contact.
+// ManagementPanel reports the local controller or the installed passive role.
+// Only an elected xirangd opens the panel listener; Agents never open relays.
 type ManagementPanel struct {
 	mu              sync.Mutex
 	stateDirectory  string
@@ -37,6 +33,7 @@ type ManagementPanel struct {
 	external        bool
 	localController bool
 	status          string
+	installed       bool
 }
 
 func NewManagementPanel(stateDirectory string, state State) *ManagementPanel {
@@ -50,21 +47,22 @@ func (panel *ManagementPanel) SetEnabled(enabled bool) (bool, string) {
 	defer panel.mu.Unlock()
 	panel.refreshControllerLocked(enrolledControllerIsLocal, localPanelListening)
 	if enabled {
+		panel.installed = true
 		if panel.external {
 			return true, ""
 		}
 		if panel.server != nil {
 			return true, ""
 		}
-		if panel.localController {
-			// A relay to our own enrolled endpoint would proxy to itself once
-			// it occupies the controller's port. Wait for xirangd to recover.
-			return false, "local control-plane service is unavailable"
-		}
-		if err := panel.startLocked(); err != nil {
+		// Management assignment installs/enables the role only. The elected
+		// xirangd exclusively owns the panel listener; a passive Agent must
+		// never open a relay that looks like another active controller.
+		if err := controllerInstallationReady(); err != nil {
+			panel.installed = false
 			panel.status = "error: " + err.Error()
 			return false, err.Error()
 		}
+		panel.status = "installed"
 		return true, ""
 	}
 	if panel.external {
@@ -81,6 +79,7 @@ func (panel *ManagementPanel) SetEnabled(enabled bool) (bool, string) {
 			return false, "port 8899 is served by an external control-plane service"
 		}
 		panel.status = "disabled"
+		panel.installed = false
 		return true, ""
 	}
 	server, listener := panel.server, panel.listener
@@ -95,7 +94,27 @@ func (panel *ManagementPanel) SetEnabled(enabled bool) (bool, string) {
 		_ = listener.Close()
 	}
 	panel.status = "disabled"
+	panel.installed = false
 	return true, ""
+}
+
+// A passive role is reported installed only when the standard node bundle
+// actually contains both the controller executable and compiled panel assets.
+func controllerInstallationReady() error {
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	binary := filepath.Join(filepath.Dir(executable), "xirangd")
+	info, err := os.Stat(binary)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("controller executable is not installed beside the Agent")
+	}
+	info, err = os.Stat("/usr/local/share/xirang/web/index.html")
+	if err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("control panel assets are not installed")
+	}
+	return nil
 }
 
 func (panel *ManagementPanel) State() (bool, string) {
@@ -117,7 +136,11 @@ func (panel *ManagementPanel) refreshControllerLocked(isLocal func(State) bool, 
 	if !panel.localController {
 		panel.external = false
 		if wasLocal {
-			panel.status = "disabled"
+			if panel.installed {
+				panel.status = "installed"
+			} else {
+				panel.status = "disabled"
+			}
 		}
 		return
 	}
@@ -125,7 +148,11 @@ func (panel *ManagementPanel) refreshControllerLocked(isLocal func(State) bool, 
 	if panel.external {
 		panel.status = "controller"
 	} else {
-		panel.status = "error: local control-plane service is unavailable"
+		if panel.installed {
+			panel.status = "installed"
+		} else {
+			panel.status = "error: local control-plane service is unavailable"
+		}
 	}
 }
 
@@ -178,51 +205,6 @@ func (panel *ManagementPanel) Close() {
 	if listener != nil {
 		_ = listener.Close()
 	}
-}
-
-func (panel *ManagementPanel) startLocked() error {
-	upstream, err := url.Parse(panel.state.ServerURL)
-	if err != nil || upstream.Scheme != "https" || upstream.Hostname() == "" {
-		return errors.New("enrolled controller URL is not a valid HTTPS endpoint")
-	}
-	tlsConfig, err := managementPanelUpstreamTLSConfig(panel.stateDirectory, panel.state, upstream)
-	if err != nil {
-		return fmt.Errorf("load enrolled controller trust: %w", err)
-	}
-	proxy := httputil.NewSingleHostReverseProxy(upstream)
-	proxy.Transport = &http.Transport{
-		Proxy: http.ProxyFromEnvironment, TLSClientConfig: tlsConfig,
-		ForceAttemptHTTP2: true, MaxIdleConns: 64, IdleConnTimeout: 90 * time.Second,
-	}
-	proxy.ErrorHandler = func(writer http.ResponseWriter, _ *http.Request, cause error) {
-		http.Error(writer, "XIRANG active controller is unavailable", http.StatusBadGateway)
-	}
-	certificate, err := managementPanelCertificate(panel.stateDirectory)
-	if err != nil {
-		return fmt.Errorf("prepare management-panel certificate: %w", err)
-	}
-	listener, err := net.Listen("tcp", managementPanelListenAddress)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", managementPanelListenAddress, err)
-	}
-	server := &http.Server{
-		Addr: managementPanelListenAddress, Handler: proxy,
-		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second,
-		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}},
-	}
-	panel.server, panel.listener, panel.status = server, listener, "ready"
-	go func() {
-		err := server.Serve(tls.NewListener(listener, server.TLSConfig))
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			panel.mu.Lock()
-			if panel.server == server {
-				panel.server, panel.listener = nil, nil
-				panel.status = "error: " + err.Error()
-			}
-			panel.mu.Unlock()
-		}
-	}()
-	return nil
 }
 
 // managementPanelUpstreamTLSConfig trusts the enrolled controller CA without

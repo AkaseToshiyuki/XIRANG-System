@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26.10"
+          go-version: "1.26.11"
           cache: true
       - name: Install independent ACL reference tools
         run: sudo apt-get update && sudo apt-get install --yes acl
@@ -60,7 +60,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26.10"
+          go-version: "1.26.11"
           cache: true
       - name: Compile Linux binaries
         env:
@@ -74,7 +74,8 @@ jobs:
           go build ./cmd/xirang-maint
 
   web:
-    runs-on: ubuntu-latest
+    # Playwright 1.56.1 publishes Chromium builds for Ubuntu 24.04.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: web

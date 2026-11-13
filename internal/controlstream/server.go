@@ -393,10 +393,10 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 		}
 	}
 	negotiated := negotiateCapabilities(hello.Capabilities)
-	if server.mounts == nil {
+	if server.mounts == nil || !hasCapability(negotiated, mountcontrol.Capability) {
 		filtered := negotiated[:0]
 		for _, capability := range negotiated {
-			if capability != mountcontrol.Capability {
+			if capability != mountcontrol.Capability && capability != mountcontrol.QuotaCapability && capability != mountcontrol.PathCapability {
 				filtered = append(filtered, capability)
 			}
 		}
@@ -535,7 +535,9 @@ func (server *Server) Connect(stream grpc.BidiStreamingServer[xirangv1.AgentMess
 			}
 			if operation := command.GetSharedMountOperation(); operation != nil {
 				_, invalid := mountcontrol.Arguments(operation, time.Now())
-				if invalid != nil || operation.OperationId != command.MessageId || !hasCapability(negotiated, mountcontrol.Capability) {
+				quotaUnsupported := operation.Action == xirangv1.SharedMountOperation_ACTION_QUOTA_SET && !hasCapability(negotiated, mountcontrol.QuotaCapability)
+				pathUnsupported := operation.Action == xirangv1.SharedMountOperation_ACTION_REPATH && !hasCapability(negotiated, mountcontrol.PathCapability)
+				if invalid != nil || operation.OperationId != command.MessageId || !hasCapability(negotiated, mountcontrol.Capability) || quotaUnsupported || pathUnsupported {
 					session.Acknowledge(command.MessageId)
 					if server.mounts != nil {
 						_ = server.mounts.ReportMountResult(stream.Context(), nodeID, &xirangv1.SharedMountResult{OperationId: command.MessageId, Message: "mount command expired, invalid, or capability unavailable"})
@@ -1004,7 +1006,7 @@ func negotiateCapabilities(offered []string) []string {
 	negotiated := make([]string, 0, 9)
 	for _, capability := range offered {
 		switch capability {
-		case mountcontrol.Capability, hosthealth.Capability, hosthealth.IdentifyCapability, hosthealth.OutboxCapability, heartbeatCapability, nodeModeCapability, nativeExecutorCapability, cgroupExecutorCapability, certificateRotationCapability,
+		case mountcontrol.Capability, mountcontrol.QuotaCapability, mountcontrol.PathCapability, hosthealth.Capability, hosthealth.IdentifyCapability, hosthealth.OutboxCapability, heartbeatCapability, nodeModeCapability, nativeExecutorCapability, cgroupExecutorCapability, certificateRotationCapability,
 			inventorySnapshotCapability, resourceObservationCapability, interfaceHealthCapability, topologyObservationCapability,
 			flowObservationCapability, assignmentLogCapability, deviceInventoryCapability, telemetryIntervalCapability,
 			networkPathProbeCapability, gangAssignmentCapability, mpiLaunchCapability, agentPTYCapability, remoteNativeBuildCapability,

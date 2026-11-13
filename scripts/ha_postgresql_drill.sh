@@ -240,7 +240,10 @@ HTTP_CODE=$(curl --silent --cacert "$CA_FILE" --connect-timeout 1 --max-time 10 
   --request PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   --data '{"weight":9,"backfill":true}' \
   "https://127.0.0.1:$HTTPS_PORT/api/v1/queues/ha-outage-rejected") || true
-[[ "$HTTP_CODE" == 500 ]] || fail "database outage write returned HTTP $HTTP_CODE instead of 500"
+case "$HTTP_CODE" in
+  500|503|000) ;; # Persistence failure, fenced request, or closed listener.
+  *) fail "database outage write returned unexpected HTTP $HTTP_CODE" ;;
+esac
 mark outage_write_rejected
 
 mark database_recovery_start

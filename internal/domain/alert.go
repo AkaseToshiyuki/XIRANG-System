@@ -8,6 +8,7 @@ const (
 	AlertStatusPending      AlertStatus = "pending"
 	AlertStatusFiring       AlertStatus = "firing"
 	AlertStatusAcknowledged AlertStatus = "acknowledged"
+	AlertStatusIgnored      AlertStatus = "ignored"
 	AlertStatusResolved     AlertStatus = "resolved"
 )
 
@@ -39,6 +40,11 @@ type Alert struct {
 	HealthySince            *time.Time    `json:"healthySince,omitempty"`
 	AcknowledgedAt          *time.Time    `json:"acknowledgedAt,omitempty"`
 	AcknowledgedBy          string        `json:"acknowledgedBy,omitempty"`
+	IgnoredAt               *time.Time    `json:"ignoredAt,omitempty"`
+	IgnoredBy               string        `json:"ignoredBy,omitempty"`
 	ResolvedAt              *time.Time    `json:"resolvedAt,omitempty"`
 	Revision                uint64        `json:"revision"`
+	// StateRevision changes on operator-visible transitions, unlike Revision
+	// which also advances for an unchanged condition's periodic observations.
+	StateRevision uint64 `json:"stateRevision,omitempty"`
 }

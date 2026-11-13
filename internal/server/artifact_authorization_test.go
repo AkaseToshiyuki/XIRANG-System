@@ -49,7 +49,7 @@ func TestArtifactDownloadsEnforceBuildOwnership(t *testing.T) {
 		subject, role string
 		want          int
 	}{{"alice", "builder", 200}, {"bob", "builder", 404}, {"bob", "user", 404}, {"bob", "viewer", 404}, {"bob", "admin", 200}} {
-		token, err := access.CreateToken(context.Background(), "download", tc.role, time.Hour, domain.Principal{Subject: tc.subject})
+		token, err := createTestSession(t, access, context.Background(), "download", tc.role, time.Hour, domain.Principal{Subject: tc.subject})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -67,7 +67,7 @@ func TestArtifactDownloadsEnforceBuildOwnership(t *testing.T) {
 	}
 	// A deployment without build metadata must not grant human users blanket
 	// read access merely because their token authenticates successfully.
-	viewer, err := access.CreateToken(context.Background(), "viewer", "viewer", time.Hour, domain.Principal{Subject: "alice"})
+	viewer, err := createTestSession(t, access, context.Background(), "viewer", "viewer", time.Hour, domain.Principal{Subject: "alice"})
 	if err != nil {
 		t.Fatal(err)
 	}

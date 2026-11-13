@@ -47,8 +47,8 @@ func TestAPITokenRoleAndRevocation(t *testing.T) {
 		t.Fatalf("revoked token authenticated: %v", err)
 	}
 	events, err := store.ListAuditEvents(context.Background(), 10)
-	if err != nil || len(events) != 2 || events[0].Action != "access.api_token.revoked" ||
-		events[1].Action != "access.api_token.created" {
+	if err != nil || len(events) != 3 || events[0].Action != "access.api_token.revoked" ||
+		events[1].Action != "access.api_token.consumed" || events[2].Action != "access.api_token.created" {
 		t.Fatalf("unexpected API token audit trail: events=%#v err=%v", events, err)
 	}
 }
@@ -325,7 +325,7 @@ func TestRevokeGroupSessionsLeavesAutomationTokensUntouched(t *testing.T) {
 	}
 }
 
-func TestAutomationTokenTracksOwnerAccountWithoutEscalating(t *testing.T) {
+func TestTokenSessionTracksOwnerAccountWithoutEscalating(t *testing.T) {
 	store, err := boltstore.Open(filepath.Join(t.TempDir(), "xirang.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -363,6 +363,10 @@ func TestAutomationTokenTracksOwnerAccountWithoutEscalating(t *testing.T) {
 	}
 	ownerActor := domain.Principal{UserID: owner.ID, Subject: owner.Username, Role: "admin", Permissions: []string{"*"}, AuthMethod: "local_password"}
 	wide, err := service.CreateToken(ctx, "automation", "admin", time.Hour, ownerActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wide, err = service.ExchangeToken(ctx, wide.Secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,6 +581,10 @@ func TestBuiltInRolesCannotBeMutatedThroughAReturnedRole(t *testing.T) {
 	// A principal's permissions must be detached from the shared table too.
 	admin := domain.Principal{Subject: "root", Role: "admin", Permissions: []string{"*"}, AuthMethod: "bootstrap"}
 	created, err := service.CreateToken(context.Background(), "read only", "viewer", time.Hour, admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err = service.ExchangeToken(context.Background(), created.Secret)
 	if err != nil {
 		t.Fatal(err)
 	}

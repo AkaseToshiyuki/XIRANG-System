@@ -1,5 +1,6 @@
-# Replace the example hostname and provision a revocable viewer-role API token.
-# Keep the token file readable only by the Prometheus service identity.
+# Replace the example hostname and provision a managed viewer OIDC credential or
+# a bounded session exchanged from a one-use viewer API token (see Operations).
+# Refresh it before expiry; keep the file readable only by the monitoring identity.
 global:
   scrape_interval: 60s
   scrape_timeout: 10s

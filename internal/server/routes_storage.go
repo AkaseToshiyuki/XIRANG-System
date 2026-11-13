@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"path/filepath"
 
+	"github.com/xirang-grid/xirang/internal/clusterops"
 	"github.com/xirang-grid/xirang/internal/domain"
 	"github.com/xirang-grid/xirang/internal/identity"
 )
@@ -37,6 +39,32 @@ func registerBackupRoutes(mux *http.ServeMux, manager BackupManager, adminToken 
 }
 
 func registerSharedSpaceRoutes(mux *http.ServeMux, spaces SharedSpaceManager, adminToken string) {
+	mux.HandleFunc("PUT /api/v1/shared-spaces/{id}/quota", requireAuthenticated(adminToken, func(writer http.ResponseWriter, request *http.Request) {
+		manager, ok := spaces.(interface {
+			UpdateQuota(context.Context, string, uint64) (domain.SharedSpace, error)
+		})
+		if !ok {
+			http.Error(writer, "shared capacity limits are unavailable", http.StatusNotImplemented)
+			return
+		}
+		var payload struct {
+			QuotaBytes *uint64 `json:"quotaBytes"`
+		}
+		if err := decodeJSON(writer, request, &payload); err != nil {
+			writeError(writer, err)
+			return
+		}
+		if payload.QuotaBytes == nil {
+			writeError(writer, fmt.Errorf("%w: quotaBytes is required", clusterops.ErrInvalid))
+			return
+		}
+		space, err := manager.UpdateQuota(identity.WithPrincipal(request.Context(), requestPrincipal(request)), request.PathValue("id"), *payload.QuotaBytes)
+		if err != nil {
+			writeError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, publicSharedSpace(space))
+	}))
 	mux.HandleFunc("GET /api/v1/shared-spaces", requireAuthenticated(adminToken, func(writer http.ResponseWriter, request *http.Request) {
 		items, err := spaces.List(request.Context())
 		if err != nil {

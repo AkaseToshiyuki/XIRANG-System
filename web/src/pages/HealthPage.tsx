@@ -19,7 +19,7 @@ export function HealthPage({ token }: { token: string }) {
   const [reload, setReload] = useState(0);
   const kinds = ["error", "corrected", "recovery", "repair", "info"];
   const kindLabel = (value: string) => value === "error" ? t("错误", "Error") : value === "corrected" ? t("硬件已纠正", "Hardware corrected") : value === "recovery" ? t("恢复观测", "Recovery observed") : value === "repair" ? t("人工修复记录", "Operator repair record") : t("信息", "Information");
-  const sourceStatus = (value: string) => value === "available" ? t("可用", "Available") : value === "partial" ? t("采集范围受限", "Partial coverage") : value === "disabled" ? t("已禁用", "Disabled") : t("不可用", "Unavailable");
+  const sourceStatus = (value: string) => value === "available" ? t("可用", "Available") : value === "partial" ? t("警告", "Warning") : value === "disabled" ? t("已禁用", "Disabled") : t("不可用", "Unavailable");
   const pendingAction = action?.status === "queued" && Date.now() - Date.parse(action.createdAt) < 60000;
   const stale = !snapshot || Date.now() - Date.parse(snapshot.receivedAt) > 120000;
 
@@ -84,25 +84,31 @@ export function HealthPage({ token }: { token: string }) {
     {error && <p className="form-error" role="alert">{error}</p>}{notice && <p className="form-notice" role="status">{notice}</p>}
     {!nodeID ? <p className="branding-help">{t("暂无已接入节点。", "No enrolled nodes.")}</p> : <>
       <section className="panel health-panel"><div className="panel-heading"><h2>{t("采集状态", "Collection status")}</h2><span>{snapshot ? (stale ? t("观测已过期", "Observation stale") : t("最近观测", "Recent observation")) : t("等待 Agent 上报", "Waiting for Agent report")}</span></div>
-        <p className="branding-help">{t("Agent 每 60 秒采集。journal 回看最近 24 小时；BMC 读取最近 128 条 SEL。每节点保留最多 2000 条、最长 30 天。这是有界记录，不保证覆盖全部历史。", "The Agent collects every 60 seconds. Journal queries cover the last 24 hours; BMC queries read the latest 128 SEL records. Retention is up to 2,000 events per node for 30 days. This bounded view may omit older or high-volume events.")}</p>
         {snapshot && <p className="branding-help">{t("采样时间", "Sampled")}: {new Date(snapshot.observedAt).toLocaleString()} · {t("控制器接收", "Received")}: {new Date(snapshot.receivedAt).toLocaleString()}</p>}
-        <div className="health-source-list">{snapshot?.sources.map((source) => <div key={source.name}><strong>{source.name}</strong><span>{sourceStatus(source.status)}</span><p>{source.message}</p></div>)}</div>
-        {!snapshot && <p className="branding-help">{t("节点需要支持系统健康上报的 Agent。尚无数据不代表主机健康。", "This node needs an Agent that supports host health reporting. Missing data does not imply a healthy host.")}</p>}
+        <div className="health-source-list">{snapshot?.sources.map((source) => <div key={source.name}><strong>{source.name}</strong><span>{sourceStatus(source.status)}</span>{sourceDetail(source, t) && <p>{sourceDetail(source, t)}</p>}</div>)}</div>
+        {!snapshot && <p className="branding-help">{t("暂无健康数据。", "No health data available.")}</p>}
       </section>
       <section className="panel health-panel"><div className="panel-heading"><h2>{t("BMC 传感器", "BMC sensors")}</h2><span>{t("机箱电源", "Chassis power")}: {snapshot?.chassisPower === "on" ? t("开启", "On") : snapshot?.chassisPower === "off" ? t("关闭", "Off") : t("未知", "Unknown")}</span></div>
-        <p className="branding-help">{t("数值精度取决于硬件及固件；显示小数位不代表校准精度。过期数据仅用于查看历史观测。", "Measurement accuracy depends on the hardware and firmware; decimal places are not calibration evidence. Stale values represent historical observations.")}</p>
         <div className="branding-actions"><button className="text-button" type="button" disabled={stale || !snapshot?.identifySupported || saving || pendingAction} onClick={() => void identify(true)}>{t("定位灯亮起 120 秒", "Locate for 120 seconds")}</button><button className="text-button" type="button" disabled={stale || !snapshot?.identifySupported || saving || pendingAction} onClick={() => void identify(false)}>{t("关闭定位灯", "Turn locator off")}</button></div>
         {!snapshot?.identifySupported && <p className="branding-help">{t("定位灯控制未由主机管理员启用。", "Locator control has not been enabled by the host administrator.")}</p>}
-        {action && <p role="status">{action.status === "succeeded" ? t("BMC 已确认请求，灯的实际状态需现场确认。", "BMC acknowledged the request; verify the physical LED on site.") : action.status === "failed" ? t("BMC 操作失败。", "BMC action failed.") : pendingAction ? t("等待 Agent 回执…", "Waiting for Agent acknowledgement…") : t("未收到回执，执行结果未知。", "No acknowledgement received; outcome unknown.")}</p>}
+        {action && <p role="status">{action.status === "succeeded" ? t("BMC 已确认请求。", "BMC acknowledged the request.") : action.status === "failed" ? t("BMC 操作失败。", "BMC action failed.") : pendingAction ? t("等待 Agent 回执…", "Waiting for Agent acknowledgement…") : t("未收到回执，执行结果未知。", "No acknowledgement received; outcome unknown.")}</p>}
         <div className="table-scroll"><table><thead><tr><th>{t("传感器", "Sensor")}</th><th>{t("读数", "Reading")}</th><th>{t("状态", "Status")}</th><th>{t("临界下限", "Lower critical")}</th><th>{t("临界上限", "Upper critical")}</th></tr></thead><tbody>{snapshot?.sensors.map((sensor) => <tr key={sensor.id}><td>{sensor.name}</td><td>{sensor.available ? `${sensor.value} ${sensor.unit}` : t("不可用", "Unavailable")}</td><td>{sensor.status}</td><td>{sensor.lowerCritical ?? "—"}</td><td>{sensor.upperCritical ?? "—"}</td></tr>)}</tbody></table></div>
         {!snapshot?.sensors.length && <p className="branding-help">{t("暂无可读取的 BMC 传感器。", "No BMC sensor readings available.")}</p>}
       </section>
       <section className="panel health-panel"><div className="panel-heading"><h2>{t("错误与维护记录", "Errors and maintenance records")}</h2><label className="job-field"><span className="sr-only">{t("事件类型", "Event kind")}</span><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="">{t("全部类型", "All kinds")}</option>{kinds.map((item) => <option key={item} value={item}>{kindLabel(item)}</option>)}</select></label></div>
-        <p className="branding-help">{t("纠错或恢复事件不证明根因已修复。自动分类仅作线索，请核对原始消息；BMC 时间未校准时显示接收时间。", "Correction or recovery does not prove that the root cause is repaired. Automatic classification is a clue; inspect the source message. BMC events with an unverified clock show receipt time.")}</p>
         <div className="health-event-list">{events.map((event) => <article key={event.id}><div className="health-event-meta"><strong>{kindLabel(event.kind)}</strong><span>{event.source} · {event.component}</span><time>{new Date(event.occurredAt || event.receivedAt).toLocaleString()}{!event.occurredAt && ` (${t("接收时间", "received")})`}</time></div><p>{event.message}</p>{event.actor && <small>{t("记录人", "Recorded by")}: {event.actor}</small>}<button className="text-button" type="button" onClick={() => setRelated(event.id)}>{t("关联修复记录", "Link a repair record")}</button></article>)}</div>
-        {!events.length && <p className="branding-help">{t("当前筛选和保留范围内暂无记录。请同时检查采集状态。", "No records match the current filter and retention window. Check collection status as well.")}</p>}
+        {!events.length && <p className="branding-help">{t("暂无匹配的记录。", "No matching records.")}</p>}
         <form className="health-note" onSubmit={saveNote}><label className="job-field"><span>{t("人工修复记录", "Operator repair record")}</span><textarea value={note} maxLength={1000} required disabled={saving} onChange={(event) => setNote(event.target.value)} placeholder={t("记录检查结论、采取的操作与验证结果", "Record findings, actions taken, and verification results")} /></label>{related && <p className="branding-help">{t("已关联所选事件", "Linked to the selected event")} <button className="text-button" type="button" onClick={() => setRelated("")}>{t("取消关联", "Unlink")}</button></p>}<button className="primary-button" type="submit" disabled={saving || !note.trim()}>{t("保存维护记录", "Save maintenance record")}</button></form>
       </section>
     </>}
   </section>;
+}
+
+function sourceDetail(source: NodeHealthSnapshot["sources"][number], t: (zh: string, en: string) => string): string {
+  if (source.name === "event-outbox") {
+    const counts = source.message?.match(/pending=(\d+); evicted unacknowledged records=(\d+); journal coverage warnings=(\d+)/);
+    if (counts) return t(`待发送 ${counts[1]} · 已淘汰 ${counts[2]} · 采集警告 ${counts[3]}`, `Pending ${counts[1]} · Evicted ${counts[2]} · Collection warnings ${counts[3]}`);
+  }
+  if (source.status === "available" || source.status === "disabled") return "";
+  return source.message?.split(/[;\n]/)[0] ?? "";
 }

@@ -10,7 +10,7 @@ const (
 
 // These values are replaced with -ldflags by release builds.
 var (
-	Version   = "1.3.0"
+	Version   = "1.4.1"
 	Commit    = "unknown"
 	BuildTime = "unknown"
 )

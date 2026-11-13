@@ -422,6 +422,8 @@ export interface APIToken {
   expiresAt: string;
   lastUsedAt?: string;
   revokedAt?: string;
+  interactive?: boolean;
+  authMethod?: string;
 }
 
 export interface BackupManifest {
@@ -441,6 +443,9 @@ export interface ClusterNode {
   desiredManagementPanel?: boolean;
   managementPanelEnabled?: boolean;
   managementPanelStatus?: string;
+  managementRole?: "primary" | "backup";
+  controllerActive?: boolean;
+  controllerConfigured?: boolean;
   os: string;
   architecture: string;
   distribution?: string;
@@ -494,6 +499,11 @@ export interface SharedSpace {
   totalBytes?: number;
   capacityObservedAt?: string;
   capacityError?: string;
+  quotaBytes?: number;
+  quotaStatus?: "available" | "unlimited" | "enforced" | "unsupported" | "unknown";
+  quotaEnforcedBytes?: number;
+  quotaAllocatedBytes?: number;
+  quotaError?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -693,7 +703,7 @@ export interface Alert {
   kind: "interface_health" | "job_storage" | "group_storage" | "node_storage";
   sourceNodeId: string;
   sourceInterface: string;
-  status: "firing" | "acknowledged" | "resolved";
+  status: "firing" | "acknowledged" | "ignored" | "resolved";
   severity: "info" | "warning" | "critical";
   observedHealth: "healthy" | "degraded" | "critical";
   summary: string;
@@ -707,6 +717,9 @@ export interface Alert {
   healthySince?: string;
   acknowledgedAt?: string;
   acknowledgedBy?: string;
+  ignoredAt?: string;
+  ignoredBy?: string;
+  stateRevision?: number;
   resolvedAt?: string;
   revision: number;
 }

@@ -3,6 +3,7 @@ package clusterops
 import (
 	"context"
 	"io"
+	"strconv"
 
 	xirangv1 "github.com/xirang-grid/xirang/gen/xirang/v1"
 	"github.com/xirang-grid/xirang/internal/domain"
@@ -22,6 +23,22 @@ func (runner AgentRunner) Run(ctx context.Context, node domain.Node, args ...str
 	}
 	operation := &xirangv1.SharedMountOperation{}
 	switch args[0] {
+	case "repath":
+		if len(args) != 7 {
+			return nil, ErrInvalid
+		}
+		operation.Action = xirangv1.SharedMountOperation_ACTION_REPATH
+		operation.SpaceId, operation.SourceHost, operation.SourcePath, operation.MountPath, operation.ClientAddress, operation.ClientInterface = args[1], args[2], args[3], args[4], args[5], args[6]
+	case "quota-set":
+		if len(args) != 4 {
+			return nil, ErrInvalid
+		}
+		limit, err := strconv.ParseUint(args[3], 10, 64)
+		if err != nil {
+			return nil, ErrInvalid
+		}
+		operation.Action = xirangv1.SharedMountOperation_ACTION_QUOTA_SET
+		operation.SpaceId, operation.SourcePath, operation.QuotaBytes = args[1], args[2], limit
 	case "prepare", "export", "unexport":
 		if len(args) != 3 {
 			return nil, ErrInvalid

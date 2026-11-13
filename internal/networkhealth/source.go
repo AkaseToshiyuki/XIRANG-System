@@ -2,6 +2,7 @@ package networkhealth
 
 import (
 	"context"
+	"time"
 
 	"github.com/xirang-grid/xirang/internal/domain"
 )
@@ -26,8 +27,17 @@ func (source *LiveSource) LatestSnapshot(ctx context.Context) (domain.TopologySn
 	if err != nil {
 		return domain.TopologySnapshot{}, err
 	}
-	if source.telemetry == nil {
-		return snapshot, nil
+	if source.telemetry != nil {
+		snapshot = Enrich(ctx, snapshot, source.telemetry)
 	}
-	return Enrich(ctx, snapshot, source.telemetry), nil
+	snapshot.Edges = append([]domain.TopologyEdge(nil), snapshot.Edges...)
+	now := time.Now()
+	for i, edge := range snapshot.Edges {
+		if edge.Type == "probe" && (edge.ObservedAt.IsZero() || edge.ObservedAt.Before(now.Add(-ProbeMaxAge)) || edge.ObservedAt.After(now.Add(5*time.Second))) {
+			snapshot.Edges[i].Health = "stale"
+			snapshot.Edges[i].CapacityBits = 0
+		}
+	}
+	snapshot.PathSelections = SelectParallelPaths(snapshot.Edges)
+	return snapshot, nil
 }

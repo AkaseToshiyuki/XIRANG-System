@@ -2,7 +2,7 @@
 
 [English](DEPLOYMENT.md) | [简体中文](DEPLOYMENT.zh-CN.md)
 
-Applies to XIRANG **1.3.0**.
+Applies to XIRANG **1.4.1**.
 
 This guide installs a prebuilt native release. A container runtime is not
 required.
@@ -45,26 +45,36 @@ PTP is not required. In an intentionally offline staging environment, use
 `--allow-unsynchronized-clock` to continue with a warning, then synchronize the
 host before enrollment. `--skip-dependencies` never silently disables this check.
 
+The systemd controller and Agent units also start after `time-sync.target`.
+When `systemd-timesyncd` is active, the native installer enables
+`systemd-time-wait-sync.service` for subsequent boots. With Chrony or another NTP
+provider, configure its equivalent synchronization wait service before
+`time-sync.target`; ordering after the target alone does not confirm a valid
+clock. A host without an available time source may wait before starting XIRANG.
+If a running controller's clock moves backwards before its cached server
+certificate's validity window, it reissues that leaf certificate on the next TLS
+handshake using the existing cluster CA.
+
 ## Select a release or local package
 
 Install a specific release:
 
 ```bash
-./install.sh --version 1.3.0
+./install.sh --version 1.4.1
 ```
 
 Install a downloaded package. The installer reads `SHA256SUMS` and
 `SHA256SUMS.sig` from the same directory:
 
 ```bash
-./install.sh --archive ~/Downloads/xirang-1.3.0-linux-amd64.tar.gz
+./install.sh --archive ~/Downloads/xirang-1.4.1-linux-amd64.tar.gz
 ```
 
 If no checksum file is present, supply a trusted SHA-256 value:
 
 ```bash
 ./install.sh \
-  --archive ~/Downloads/xirang-1.3.0-linux-amd64.tar.gz \
+  --archive ~/Downloads/xirang-1.4.1-linux-amd64.tar.gz \
   --sha256 EXPECTED_SHA256
 ```
 
@@ -137,8 +147,13 @@ local users' effective access. XIRANG adds a POSIX access ACL for the task group
 instead of taking ownership or forcing mode `0770`. Existing masked ACL entries
 keep their effective permissions; default ACLs and descendant files are unchanged.
 New export roots are host-readable/traversable (`0755` plus the cluster ACL).
-The filesystem must support POSIX ACLs; failure is reported without a chmod
-fallback. NFS continues to use `all_squash` with the task identity.
+POSIX ACLs are used to add cluster access while preserving host permissions.
+On a filesystem without POSIX ACL support, an existing directory is accepted
+only when its Unix mode already grants full access to both the task identity
+and task group. Insufficient access fails without chmod or chown of host data.
+New directories created by XIRANG retain task ownership and group access even
+under a restrictive service umask. NFS continues to use `all_squash` with the
+task identity.
 
 Installation uses the same permission-preserving preparation for the default
 share. Existing mount-parent permissions are also preserved. Administrators must
@@ -158,6 +173,24 @@ The default `/srv/xirang/XirangShare` path is authorized before first startup.
 After changing another shared path, restart the affected service during a
 maintenance window so its systemd mount namespace receives the new policy.
 Drain running jobs before restarting an Agent.
+
+To replace the built-in share, add `-default-shared-space=false` to the
+controller's existing `XIRANGD_ARGS` and restart it in a maintenance window.
+This disables automatic recreation and permits unsharing `share_default`;
+it does not remove any share or data by itself. First create and verify the
+replacement, migrate any required artifacts, and update the controller's
+`-job-artifact-root` and build root flags before unsharing the old space.
+The default remains automatically managed and protected unless this flag is set.
+
+For a NAS-backed source, mount the remote filesystem at the exact source path
+before registering it. Configure persistent mounting and systemd dependencies
+so XIRANG cannot start against the empty local mountpoint. A mounted NFS source
+gets a stable explicit `fsid` and the `mountpoint` export guard. Reexported NFS
+has [kernel locking and filehandle limitations](https://www.kernel.org/doc/html/latest/filesystems/nfs/reexport.html);
+successful local file operations do not establish downstream workload or lock
+support. Preserve numeric identities on the NAS and verify permissions using
+the actual task account. Filesystem project quotas remain unavailable where
+the NAS does not expose the required local quota interface.
 
 Shared mount/export control requires matching upgraded endpoints and the explicit
 Agent flag `-shared-mount-control` (root/systemd only, disabled by default). It uses
